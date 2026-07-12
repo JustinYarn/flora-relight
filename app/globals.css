@@ -3,25 +3,100 @@
 @tailwind utilities;
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --canvas: #0b0d10;
+  --surface: #12151a;
+  --raised: #1a1e25;
+  --edge: #262c36;
+  --ink: #e8eaee;
+  --muted: #98a1ad;
+  --faint: #5c6570;
+  --accent: #8b7cf6;
+  --accent-soft: rgba(139, 124, 246, 0.14);
+  --pass: #34d399;
+  --borderline: #fbbf24;
+  --fail: #f87171;
+  --running: #60a5fa;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+html,
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--canvas);
+  color: var(--ink);
 }
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--edge) transparent;
+}
+
+/* React Flow dark-theme adjustments */
+.react-flow__attribution {
+  display: none;
+}
+.react-flow__background {
+  background: var(--canvas);
+}
+.react-flow__edge-path {
+  stroke: var(--edge);
+  stroke-width: 1.5;
+}
+.react-flow__edge.animated .react-flow__edge-path {
+  stroke: var(--accent);
+}
+.react-flow__controls {
+  box-shadow: none;
+}
+.react-flow__controls button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--edge);
+  fill: var(--muted);
+}
+.react-flow__controls button:hover {
+  background: var(--raised);
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.45);
   }
+  70% {
+    box-shadow: 0 0 0 8px rgba(96, 165, 250, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(96, 165, 250, 0);
+  }
+}
+.node-running {
+  animation: pulse-ring 1.6s ease-out infinite;
+}
+
+/* --- Pipeline canvas additions (stage lanes / status glyphs), additive --- */
+
+/* Pulsing "● running" glyph on node cards and stage chips. */
+@keyframes status-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+.status-pulse {
+  animation: status-blink 1.3s ease-in-out infinite;
+}
+
+/* --- Generation theater (components/review/GenerationTheater.tsx) --------- */
+
+/* Thin indeterminate shimmer shown while Omni Flash repaints the frames. */
+@keyframes theater-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+.theater-sweep {
+  animation: theater-sweep 1.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }

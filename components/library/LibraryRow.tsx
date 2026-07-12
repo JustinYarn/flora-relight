@@ -1,0 +1,400 @@
+"use client";
+
+import { useState } from "react";
+import Link from "next/link";
+import type { Iteration, Run } from "@/lib/types";
+import { Badge, Button, verdictColor } from "@/components/ui";
+import { formatUsd } from "@/lib/cost";
+import { useAppStore } from "@/lib/store";
+import { CheckList } from "@/components/library/CheckList";
+import { PairPlayer } from "@/components/library/PairPlayer";
+import { DownloadSideBySide } from "@/components/review/DownloadSideBySide";
+import {
+  STATUS_META,
+  activeFixes,
+  compositeVerdict,
+  formatRunDate,
+  shippedComposite,
+  shippedIteration,
+  shippedVideo,
+} from "@/components/library/derive";
+
+/*
+ * One Library entry — progressive disclosure:
+ *   Level 1: the collapsed row (thumbnail pair, label, status, score, cost).
+ *   Level 2: expanded — side-by-side players, per-attempt chips, the 11
+ *            checks, the fix list, review actions.
+ *   Level 3: lives inside CheckList — judge details per check.
+ */
+
+const THUMB_TIME = "#t=0.5";
+
+function severityColor(s: "critical" | "major" | "minor"): string {
+  return s === "critical"
+    ? "var(--fail)"
+    : s === "major"
+      ? "var(--borderline)"
+      : "var(--muted)";
+}
+
+/** ~120px before/after thumbnail. Falls back to a quiet tile when the file is missing. */
+function Thumb({
+  url,
+  tag,
+  filter,
+  dimmed,
+}: {
+  url?: string;
+  tag?: string;
+  filter?: string;
+  dimmed?: boolean;
+}) {
+  const [broken, setBroken] = useState(false);
+  return (
+    <span className="relative block w-[120px] shrink-0 overflow-hidden rounded-md border border-edge bg-canvas">
+      <span className="block aspect-video">
+        {url && !broken ? (
+          <video
+            src={`${url}${THUMB_TIME}`}
+            preload="metadata"
+            muted
+            playsInline
+            onError={() => setBroken(true)}
+            style={filter ? { filter } : undefined}
+            className={`h-full w-full object-cover ${dimmed ? "opacity-40" : ""}`}
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center text-2xs text-faint">
+            no file
+          </span>
+        )}
+      </span>
+      {tag ? (
+        <span
+          className="pointer-events-none absolute bottom-1 left-1 rounded px-1 py-px text-[9px] font-semibold tracking-wider text-ink"
+          style={{ background: "color-mix(in srgb, var(--canvas) 78%, transparent)" }}
+        >
+          {tag}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/** Quiet chips a1 a2 a3… with pass/fail dots; switching drives the check rows. */
+function AttemptChips({
+  iterations,
+  bestIndex,
+  selected,
+  onSelect,
+}: {
+  iterations: Iteration[];
+  bestIndex?: number;
+  selected: number | undefined;
+  onSelect: (index: number) => void;
+}) {
+  const dotColor = (status: Iteration["status"]): string =>
+    status === "running"
+      ? "var(--running)"
+      : status === "passed"
+        ? "var(--pass)"
+        : "var(--fail)";
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      <span className="mr-1 text-2xs uppercase tracking-[0.14em] text-faint">
+        Attempts
+      </span>
+      {iterations.map((it) => (
+        <button
+          key={it.index}
+          onClick={() => onSelect(it.index)}
+          className={`flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs transition ${
+            selected === it.index ? "bg-raised text-ink" : "text-muted hover:text-ink"
+          }`}
+        >
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${it.status === "running" ? "status-pulse" : ""}`}
+            style={{ background: dotColor(it.status) }}
+          />
+          a{it.index}
+          {bestIndex === it.index ? (
+            <span className="text-2xs text-accent" title="shipped attempt">
+              ★
+            </span>
+          ) : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Level 2 body — mounted only while the row is open so its state resets per visit. */
+function RowBody({ run }: { run: Run }) {
+  const submitReview = useAppStore((s) => s.submitReview);
+  const shipped = shippedIteration(run);
+  const [selectedIndex, setSelectedIndex] = useState<number | undefined>(
+    shipped?.index
+  );
+  const ordered = [...run.iterations].sort((a, b) => a.index - b.index);
+  const selected =
+    ordered.find((it) => it.index === selectedIndex) ?? shipped;
+  const fixes = activeFixes(run);
+  const relit = shippedVideo(run);
+
+  return (
+    <div className="space-y-5 pb-6 pl-1 pr-1">
+      <PairPlayer
+        original={run.originalVideo}
+        relit={relit}
+        relitLabel={
+          run.finalVideo ? "RELIT · FINAL" : shipped ? `RELIT v${shipped.index}` : "RELIT"
+        }
+      />
+
+      {ordered.length > 0 ? (
+        <div className="space-y-2">
+          <AttemptChips
+            iterations={ordered}
+            bestIndex={run.bestIterationIndex}
+            selected={selected?.index}
+            onSelect={setSelectedIndex}
+          />
+          <CheckList iteration={selected} runActive={run.status === "running"} />
+        </div>
+      ) : (
+        <CheckList iteration={undefined} runActive={run.status === "running"} />
+      )}
+
+      {fixes.length > 0 ? (
+        <div>
+          <p className="mb-1.5 text-2xs uppercase tracking-[0.14em] text-faint">
+            Fixes that drove the final attempt
+          </p>
+          <ul className="space-y-1.5">
+            {fixes.map((f) => (
+              <li key={f.id} className="flex items-baseline gap-2 text-xs">
+                <Badge color={severityColor(f.severity)}>{f.severity}</Badge>
+                <span className="min-w-0 flex-1 text-muted">{f.instruction}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-3 border-t border-edge pt-4">
+        <Link
+          href={`/runs/${run.id}`}
+          className="text-sm text-muted transition hover:text-ink"
+        >
+          Open review →
+        </Link>
+        <Link
+          href={`/runs/${run.id}/journey`}
+          className="text-sm text-muted transition hover:text-ink"
+        >
+          Open journey →
+        </Link>
+        <span className="ml-auto flex items-center gap-2">
+          {run.status === "awaiting-review" ? (
+            <>
+              <Button
+                variant="success"
+                onClick={() => submitReview(run.id, "approved", "")}
+              >
+                Approve
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => submitReview(run.id, "needs-changes", "")}
+              >
+                Request changes
+              </Button>
+            </>
+          ) : run.review ? (
+            <span className="text-2xs text-faint">
+              reviewed —{" "}
+              {run.review.decision === "approved" ? "approved" : "needs changes"}
+            </span>
+          ) : null}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export function LibraryRow({
+  run,
+  passThreshold,
+  open,
+  onToggle,
+  onDeleted,
+}: {
+  run: Run;
+  passThreshold: number;
+  open: boolean;
+  onToggle: () => void;
+  /** Called after a successful delete so the list view can drop its own copy. */
+  onDeleted?: () => void;
+}) {
+  const removeRun = useAppStore((s) => s.removeRun);
+  const status = STATUS_META[run.status];
+  const composite = shippedComposite(run);
+  const verdict = composite ? compositeVerdict(composite, passThreshold) : undefined;
+  const relit = shippedVideo(run);
+  const attempts = run.iterations.length;
+  const actualUsd = run.cost?.actualUsd ?? 0;
+
+  // Delete flow: ✕ → inline confirm → removeRun (optimistic; store restores
+  // the run and we surface a text-fail line if the server refuses).
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const stillRunning = run.status === "running";
+
+  const confirmDelete = async () => {
+    if (deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await removeRun(run.id);
+      onDeleted?.();
+    } catch {
+      setDeleteError("Couldn't delete this run — the server said no. It's back in the list; try again.");
+      setDeleting(false);
+      setConfirmingDelete(false);
+    }
+  };
+
+  return (
+    <div>
+      {/* LEVEL 1 — the collapsed row; click the row to expand, actions right */}
+      <div className="flex w-full items-center gap-x-3 transition hover:bg-[color-mix(in_srgb,var(--raised)_40%,transparent)]">
+        <button
+          onClick={onToggle}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 flex-wrap items-center gap-x-5 gap-y-2 py-3 text-left"
+        >
+        <span className="flex shrink-0 gap-1.5">
+          <Thumb url={run.originalVideo.url} tag="BEFORE" />
+          {relit ? (
+            <Thumb
+              url={relit.url}
+              tag="AFTER"
+              filter={relit.simulatedFilter}
+            />
+          ) : (
+            <Thumb url={run.originalVideo.url} tag="no relit cut" dimmed />
+          )}
+        </span>
+
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
+            <span className="min-w-0 truncate text-sm font-medium text-ink">
+              {run.originalVideo.label}
+            </span>
+            {!run.live ? <Badge color="var(--accent)">simulated</Badge> : null}
+            {relit?.simulatedFilter && run.live ? (
+              <Badge color="var(--accent)">simulated</Badge>
+            ) : null}
+          </span>
+          <span className="mt-0.5 block text-2xs text-faint">
+            {formatRunDate(run.createdAt)}
+          </span>
+        </span>
+
+        <span className="w-32 shrink-0">
+          <Badge color={status.color}>{status.label}</Badge>
+        </span>
+
+        <span className="w-20 shrink-0" title="Overall score of the shipped cut">
+          {composite && verdict ? (
+            <>
+              <span
+                className="block text-xl font-semibold tabular-nums"
+                style={{ color: verdictColor(verdict) }}
+              >
+                {composite.score.toFixed(1)}
+              </span>
+              <span className="mt-1 block h-0.5 w-16 overflow-hidden rounded-full bg-raised">
+                <span
+                  className="block h-full rounded-full"
+                  style={{
+                    width: `${Math.min(100, Math.max(0, composite.score))}%`,
+                    background: verdictColor(verdict),
+                  }}
+                />
+              </span>
+            </>
+          ) : (
+            <span className="text-xl font-semibold text-faint">—</span>
+          )}
+        </span>
+
+        <span className="w-16 shrink-0 text-sm tabular-nums text-muted">
+          {attempts} att.
+        </span>
+
+        <span
+          className="w-16 shrink-0 text-right text-sm tabular-nums text-muted"
+          title={
+            run.cost
+              ? `actual spend ${formatUsd(actualUsd)} · est. ${formatUsd(run.cost.estimatedUsd)}`
+              : "no cost ledger"
+          }
+        >
+          {run.cost ? formatUsd(actualUsd) : "—"}
+        </span>
+
+          <span className="w-3 shrink-0 text-center text-2xs text-faint">
+            {open ? "▴" : "▾"}
+          </span>
+        </button>
+
+        {/* ROW ACTIONS — download the comparison cut, delete the run */}
+        <span className="flex shrink-0 items-center gap-1.5 pr-1">
+          {confirmingDelete ? (
+            <span className="flex items-center gap-2">
+              <span className="max-w-[190px] text-right text-2xs leading-tight text-muted">
+                Delete forever? This removes the videos too.
+              </span>
+              <button
+                onClick={() => void confirmDelete()}
+                disabled={deleting}
+                className="rounded-md border border-[color-mix(in_srgb,var(--fail)_40%,transparent)] bg-[color-mix(in_srgb,var(--fail)_14%,transparent)] px-2 py-1 text-xs text-fail transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {deleting ? "Deleting…" : "Delete"}
+              </button>
+              <button
+                onClick={() => setConfirmingDelete(false)}
+                disabled={deleting}
+                className="px-1 py-1 text-xs text-muted transition hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                keep
+              </button>
+            </span>
+          ) : (
+            <>
+              <DownloadSideBySide run={run} variant="compact" />
+              <button
+                onClick={() => setConfirmingDelete(true)}
+                disabled={stillRunning}
+                title={stillRunning ? "still running" : "Delete run"}
+                aria-label="Delete run"
+                className="rounded-md border border-edge px-2 py-1 text-xs text-faint transition hover:border-faint hover:text-fail disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                ✕
+              </button>
+            </>
+          )}
+        </span>
+      </div>
+
+      {deleteError ? (
+        <p className="pb-2 text-right text-2xs text-fail">{deleteError}</p>
+      ) : null}
+
+      {/* LEVEL 2 — expanded */}
+      {open ? <RowBody run={run} /> : null}
+    </div>
+  );
+}
