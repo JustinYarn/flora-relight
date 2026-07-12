@@ -17,13 +17,8 @@ import {
   getGemini,
   parseDataUrl,
 } from "@/lib/server/gemini";
-import {
-  ensureDir,
-  isValidRunId,
-  runDir,
-  runMediaPath,
-  runMediaUrl,
-} from "@/lib/server/runstore";
+import { isValidRunId } from "@/lib/server/runstore";
+import { getStorage } from "@/lib/server/storage";
 import { PRICE_TABLE } from "@/lib/cost";
 
 export const runtime = "nodejs";
@@ -93,12 +88,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return jsonError(502, "Image relight returned no output image.");
     }
 
-    await ensureDir(runDir(runId));
+    // Write locally, then persist through the storage driver (fs driver:
+    // the local path already IS the canonical destination — put is a no-op).
+    const storage = getStorage();
     const fileName = `anchor-v${version}.jpg`;
-    await fsp.writeFile(runMediaPath(runId, fileName), Buffer.from(outData, "base64"));
+    const localPath = await storage.mediaWritePath(runId, fileName);
+    await fsp.writeFile(localPath, Buffer.from(outData, "base64"));
+    await storage.putMediaFromFile(runId, fileName, localPath);
 
     return NextResponse.json({
-      imageUrl: runMediaUrl(runId, fileName),
+      imageUrl: await storage.publicMediaUrl(runId, fileName),
       interactionId: r.id,
       costUsd: PRICE_TABLE.geminiImageEditPerImage.usd,
     });

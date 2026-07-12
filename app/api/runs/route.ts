@@ -11,19 +11,15 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import type { Run } from "@/lib/types";
-import {
-  deleteRun,
-  isValidRunId,
-  listRuns,
-  readBatches,
-  writeRun,
-} from "@/lib/server/runstore";
+import { isValidRunId } from "@/lib/server/runstore";
+import { getStorage } from "@/lib/server/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(): Promise<NextResponse> {
-  const [runs, batches] = await Promise.all([listRuns(), readBatches()]);
+  const storage = getStorage();
+  const [runs, batches] = await Promise.all([storage.listRuns(), storage.getBatches()]);
   return NextResponse.json(
     { runs, batches },
     { headers: { "Cache-Control": "no-store" } }
@@ -56,7 +52,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  await writeRun(candidate);
+  await getStorage().putRun(candidate);
   return NextResponse.json({ ok: true, id: candidate.id });
 }
 
@@ -68,6 +64,6 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
       { status: 400 }
     );
   }
-  const existed = await deleteRun(id);
+  const existed = await getStorage().deleteRun(id);
   return NextResponse.json({ ok: true, id, existed });
 }

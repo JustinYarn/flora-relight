@@ -7,7 +7,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import type { Batch } from "@/lib/types";
-import { writeBatches } from "@/lib/server/runstore";
+import { getStorage } from "@/lib/server/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,6 +36,6 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  await writeBatches(batches as Batch[]);
+  await getStorage().putBatches(batches as Batch[]);
   return NextResponse.json({ ok: true, count: (batches as Batch[]).length });
 }

@@ -16,7 +16,12 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { GoogleGenAI } from "@google/genai";
-import { resolveMediaRequest } from "@/lib/server/runstore";
+import {
+  isValidMediaFileName,
+  isValidRunId,
+  resolveMediaRequest,
+} from "@/lib/server/runstore";
+import { getStorage, scratchMediaPath } from "@/lib/server/storage";
 
 // Model ids proven by the live smoke test — do not improvise alternatives.
 export const GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image";
@@ -133,10 +138,20 @@ const SAMPLES_ROOT = path.resolve(process.cwd(), "public", "samples");
 const SAMPLE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 
 /**
- * Resolve an app-relative media url to an absolute file path.
- *   "/samples/<name>"      → <repo>/public/samples/<name>
- *   "/api/media/<...segs>" → <repo>/data/<...segs> (runstore traversal guard)
- * Anything else (blob:, http:, absolute paths, ...) is rejected.
+ * Resolve a media url to an absolute LOCAL file path (ffmpeg and the Files
+ * API need real files).
+ *   "/samples/<name>"      → <repo>/public/samples/<name> (bundled with the
+ *                            deploy — always local)
+ *   "/api/media/runs/<runId>/<fileName>" → storage.getMediaToFile(): the fs
+ *                            driver short-circuits to its canonical data/
+ *                            path; remote drivers download into the
+ *                            deterministic scratch path (once per process —
+ *                            the Files-API upload cache stays keyed by it).
+ *   "/api/media/<...segs>" → legacy direct read under <repo>/data (fs only)
+ *   absolute https URL     → accepted only when the active driver can
+ *                            reverse-map it (blob driver publicMediaUrl()
+ *                            values that clients echo back as sourceUrl).
+ * Anything else (blob:, foreign http:, absolute paths, ...) is rejected.
  */
 export async function resolveSourceUrl(sourceUrl: string): Promise<string> {
   if (typeof sourceUrl !== "string" || sourceUrl.length === 0) {
@@ -158,9 +173,35 @@ export async function resolveSourceUrl(sourceUrl: string): Promise<string> {
       .slice("/api/media/".length)
       .split("/")
       .filter((s) => s.length > 0);
+    if (
+      segments.length === 3 &&
+      segments[0] === "runs" &&
+      isValidRunId(segments[1]) &&
+      isValidMediaFileName(segments[2])
+    ) {
+      const [, runId, fileName] = segments;
+      return getStorage().getMediaToFile(
+        runId,
+        fileName,
+        scratchMediaPath(runId, fileName)
+      );
+    }
+    // Legacy non-run data files — only ever local (fs driver's data dir).
     const abs = resolveMediaRequest(segments); // safeJoin under DATA_ROOT
     await fsp.access(abs);
     return abs;
+  }
+
+  if (/^https?:\/\//.test(clean)) {
+    const storage = getStorage();
+    const hit = storage.resolveMediaUrl ? await storage.resolveMediaUrl(sourceUrl) : null;
+    if (hit) {
+      return storage.getMediaToFile(
+        hit.runId,
+        hit.fileName,
+        scratchMediaPath(hit.runId, hit.fileName)
+      );
+    }
   }
 
   throw new Error("Unsupported source url — expected /samples/* or /api/media/*.");
@@ -191,13 +232,14 @@ const IMAGE_EXT_MIME: Record<string, string> = {
 };
 
 /**
- * Load an image reference as base64: either a data URL, or an
- * "/api/media/..." url that we resolve and read server-side (the anchor
- * route returns served urls, not data urls).
+ * Load an image reference as base64: either a data URL, or a served media
+ * url ("/api/media/..." — or, on the blob driver, the blob CDN URL) that we
+ * resolve to a local file and read server-side (the anchor route returns
+ * served urls, not data urls).
  */
 export async function loadImageRef(ref: string): Promise<LoadedImage> {
   if (ref.startsWith("data:")) return parseDataUrl(ref);
-  if (ref.startsWith("/api/media/")) {
+  if (ref.startsWith("/api/media/") || /^https?:\/\//.test(ref)) {
     const abs = await resolveSourceUrl(ref);
     const mimeType = IMAGE_EXT_MIME[path.extname(abs).toLowerCase()];
     if (!mimeType) throw new Error("Unsupported image type for reference image.");

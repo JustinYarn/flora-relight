@@ -2,29 +2,26 @@
  * POST /api/export/side-by-side — build a downloadable comparison video.
  *
  * Body: { runId, version } where version is an attempt number or "final"
- * ("final" picks the highest relit-v*.mp4 present in the run dir — version
- * numbers are whatever the files say, salvaged oddities included).
+ * ("final" picks the highest relit-v*.mp4 present in the run's media —
+ * version numbers are whatever the files say, salvaged oddities included).
  *
  * Composes source.mp4 (left) + relit-v<version>.mp4 (right) at 720p halves
- * with the untouched original audio track, writes
- * data/runs/<runId>/side-by-side-v<version>.mp4, and returns its media URL.
- * Regeneration is skipped when the output already exists and is newer than
- * both inputs. Local ffmpeg only — no API spend.
+ * with the untouched original audio track, persists
+ * side-by-side-v<version>.mp4 via the storage driver, and returns its media
+ * URL. Regeneration is skipped when the output already exists and is newer
+ * than both inputs. Local ffmpeg only — no API spend. ffmpeg needs real
+ * paths, so remote drivers round-trip through the scratch dir
+ * (getMediaToFile / putMediaFromFile); the fs driver short-circuits to its
+ * canonical data/ paths.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import fsp from "node:fs/promises";
+import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { sideBySide } from "@/lib/server/ffmpeg";
-import {
-  isValidRunId,
-  relitVideoPath,
-  runDir,
-  runMediaPath,
-  runMediaUrl,
-  sourceAudioPath,
-  sourcePath,
-} from "@/lib/server/runstore";
+import { isValidRunId } from "@/lib/server/runstore";
+import { getStorage, scratchMediaPath } from "@/lib/server/storage";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -50,24 +47,11 @@ function parseVersion(v: unknown): number | "final" | null {
   return Number.isInteger(n) && n >= 1 ? n : null;
 }
 
-async function statOrNull(p: string): Promise<import("node:fs").Stats | null> {
-  try {
-    return await fsp.stat(p);
-  } catch {
-    return null;
-  }
-}
-
-/** Highest N across relit-v<N>.mp4 files in the run dir, or null when none. */
+/** Highest N across relit-v<N>.mp4 files in the run's media, or null. */
 async function highestRelitVersion(runId: string): Promise<number | null> {
-  let entries: string[];
-  try {
-    entries = await fsp.readdir(runDir(runId));
-  } catch {
-    return null;
-  }
+  const names = await getStorage().listMedia(runId);
   let best: number | null = null;
-  for (const entry of entries) {
+  for (const entry of names) {
     const m = /^relit-v(\d+)\.mp4$/.exec(entry);
     if (!m) continue;
     const n = Number(m[1]);
@@ -77,16 +61,22 @@ async function highestRelitVersion(runId: string): Promise<number | null> {
 }
 
 /**
- * One build per output path at a time: concurrent clicks await the same
- * ffmpeg run instead of racing two writers onto one file.
+ * One build per output at a time: concurrent clicks await the same ffmpeg
+ * run instead of racing two writers onto one file.
+ *
+ * NOTE(vercel-deploy): this in-process Map only dedupes within ONE server
+ * instance. On a multi-instance deploy (serverless scale-out) two instances
+ * can still build the same export concurrently — wasteful but safe, since
+ * each builds to its own temp file and the final persist is atomic
+ * (rename on fs / last-write-wins re-put on blob).
  */
 const inFlight = new Map<string, Promise<void>>();
 
-function buildOnce(outPath: string, build: () => Promise<void>): Promise<void> {
-  const existing = inFlight.get(outPath);
+function buildOnce(key: string, build: () => Promise<void>): Promise<void> {
+  const existing = inFlight.get(key);
   if (existing) return existing;
-  const job = build().finally(() => inFlight.delete(outPath));
-  inFlight.set(outPath, job);
+  const job = build().finally(() => inFlight.delete(key));
+  inFlight.set(key, job);
   return job;
 }
 
@@ -106,7 +96,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return jsonError(400, 'version must be an attempt number or "final".');
   }
 
-  // "final" → the highest relit-v*.mp4 actually on disk.
+  const storage = getStorage();
+
+  // "final" → the highest relit-v*.mp4 actually persisted.
   let version: number;
   if (requested === "final") {
     const highest = await highestRelitVersion(runId);
@@ -121,11 +113,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     version = requested;
   }
 
-  const relit = relitVideoPath(runId, version);
-  const source = sourcePath(runId);
+  const relitName = `relit-v${version}.mp4`;
   const [relitStat, sourceStat] = await Promise.all([
-    statOrNull(relit),
-    statOrNull(source),
+    storage.statMedia(runId, relitName),
+    storage.statMedia(runId, "source.mp4"),
   ]);
   if (!relitStat) {
     return jsonError(
@@ -137,15 +128,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return jsonError(404, "This run has no source video file on disk.");
   }
 
-  // Original audio track; fall back to the source video's own track if the
-  // demuxed m4a is somehow missing.
-  const audioCandidate = sourceAudioPath(runId);
-  const audio = (await statOrNull(audioCandidate)) ? audioCandidate : source;
-
   const outName = `side-by-side-v${version}.mp4`;
-  const outPath = runMediaPath(runId, outName);
 
-  const outStat = await statOrNull(outPath);
+  const outStat = await storage.statMedia(runId, outName);
   const cached =
     outStat !== null &&
     outStat.mtimeMs > relitStat.mtimeMs &&
@@ -153,20 +138,45 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   if (!cached) {
     try {
-      await buildOnce(outPath, async () => {
-        // Compose to a temp name, then rename — the media route never sees a
-        // half-written file and a crash never leaves a torn output behind.
-        const tmpPath = runMediaPath(
+      await buildOnce(`${runId}/${outName}`, async () => {
+        // Materialize the inputs locally (fs driver: canonical paths, zero
+        // copying; blob driver: scratch downloads).
+        const source = await storage.getMediaToFile(
           runId,
+          "source.mp4",
+          scratchMediaPath(runId, "source.mp4")
+        );
+        const relit = await storage.getMediaToFile(
+          runId,
+          relitName,
+          scratchMediaPath(runId, relitName)
+        );
+        // Original audio track; fall back to the source video's own track if
+        // the demuxed m4a is somehow missing.
+        const audio = (await storage.mediaExists(runId, "source-audio.m4a"))
+          ? await storage.getMediaToFile(
+              runId,
+              "source-audio.m4a",
+              scratchMediaPath(runId, "source-audio.m4a")
+            )
+          : source;
+
+        // Compose to a temp name beside the destination, then rename — the
+        // media route never sees a half-written file and a crash never
+        // leaves a torn output behind.
+        const outLocal = await storage.mediaWritePath(runId, outName);
+        const tmpLocal = path.join(
+          path.dirname(outLocal),
           `side-by-side-v${version}.${randomBytes(4).toString("hex")}.tmp.mp4`
         );
         try {
-          await sideBySide(source, relit, audio, tmpPath);
-          await fsp.rename(tmpPath, outPath);
+          await sideBySide(source, relit, audio, tmpLocal);
+          await fsp.rename(tmpLocal, outLocal);
         } catch (err) {
-          await fsp.unlink(tmpPath).catch(() => undefined);
+          await fsp.unlink(tmpLocal).catch(() => undefined);
           throw err;
         }
+        await storage.putMediaFromFile(runId, outName, outLocal);
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -175,7 +185,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   return NextResponse.json({
-    url: runMediaUrl(runId, outName),
+    url: await storage.publicMediaUrl(runId, outName),
     cached,
     version,
   });

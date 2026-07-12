@@ -1,15 +1,36 @@
 /**
  * POST /api/ingest — multipart/form-data { file }
  *
- * Persists an uploaded clip to disk so it survives browser refresh, and
- * enforces the Omni Flash 10-second input cap: anything longer is re-encode
- * trimmed to the first TRIM_TARGET_SECONDS (9.9s) and flagged `trimmed: true`.
+ * Persists an uploaded clip (via the storage driver) so it survives browser
+ * refresh, and enforces the Omni Flash 10-second input cap: anything longer
+ * is re-encode trimmed to the first TRIM_TARGET_SECONDS (9.9s) and flagged
+ * `trimmed: true`.
  *
  * Response:
  *   {
  *     runId, url, durationSec (post-trim), width, height, fps, hasAudio,
  *     trimmed, originalDurationSec, audioSha256 (null when no audio track)
  *   }
+ *
+ * ============================================================================
+ * TODO(vercel-deploy): CLOUD INGEST MUST BECOME CLIENT-DIRECT-TO-BLOB.
+ *
+ * Deployed Vercel functions cap the REQUEST BODY at 4.5MB — this multipart
+ * flow works locally (and in a self-hosted container) but will reject any
+ * real video upload on Vercel serverless. The cloud path is:
+ *
+ *   1. Client uploads straight to Vercel Blob with
+ *      `upload()` from `@vercel/blob/client`, pointing at
+ *   2. an AUTHENTICATED token route implementing `handleUpload()`
+ *      (onBeforeGenerateToken MUST verify the gate cookie / session — the
+ *      token mints write access to the store), then
+ *   3. the client calls a slim ingest endpoint with the resulting blob URL;
+ *      the server downloads it to scratch, runs the same probe/trim/demux
+ *      pipeline below, and persists via the storage driver as usual.
+ *
+ * Follow-up work item — deliberately NOT rewired yet so the local flow stays
+ * byte-identical.
+ * ============================================================================
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -27,15 +48,8 @@ import {
   remuxToMp4,
   trimTo,
 } from "@/lib/server/ffmpeg";
-import {
-  UPLOADS_ROOT,
-  ensureDir,
-  newRunId,
-  runDir,
-  runMediaUrl,
-  sourceAudioPath,
-  sourcePath,
-} from "@/lib/server/runstore";
+import { newRunId } from "@/lib/server/runstore";
+import { getStorage } from "@/lib/server/storage";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -99,12 +113,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return jsonError(400, "Uploaded file is empty.");
   }
 
+  const storage = getStorage();
   const runId = newRunId();
   // Sanitized staging name: keep only the (validated) extension.
   const extMatch = VIDEO_EXT_RE.exec(originalName);
   const ext = extMatch ? extMatch[0].toLowerCase() : ".mp4";
-  await ensureDir(UPLOADS_ROOT);
-  const tmpPath = path.join(UPLOADS_ROOT, `${runId}${ext}`);
+  const tmpPath = path.join(await storage.stagingDir(), `${runId}${ext}`);
 
   try {
     // Stream the upload to disk (no 500MB buffer in memory).
@@ -124,8 +138,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const originalDurationSec = probed.durationSec;
     const needsTrim = originalDurationSec > MAX_GEN_SECONDS;
 
-    await ensureDir(runDir(runId));
-    const destPath = sourcePath(runId);
+    // Local write destination (fs driver → canonical data/ path; blob driver
+    // → scratch path uploaded by putMediaFromFile below).
+    const destPath = await storage.mediaWritePath(runId, "source.mp4");
 
     let trimmed = false;
     if (needsTrim) {
@@ -144,16 +159,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const finalProbe = await probe(destPath);
+    await storage.putMediaFromFile(runId, "source.mp4", destPath);
 
     let audioSha256: string | null = null;
     if (finalProbe.hasAudio) {
-      const { sha256 } = await demuxAudio(destPath, sourceAudioPath(runId));
+      const audioPath = await storage.mediaWritePath(runId, "source-audio.m4a");
+      const { sha256 } = await demuxAudio(destPath, audioPath);
+      await storage.putMediaFromFile(runId, "source-audio.m4a", audioPath);
       audioSha256 = sha256;
     }
 
     return NextResponse.json({
       runId,
-      url: runMediaUrl(runId, "source.mp4"),
+      url: await storage.publicMediaUrl(runId, "source.mp4"),
       durationSec: finalProbe.durationSec,
       width: finalProbe.width,
       height: finalProbe.height,

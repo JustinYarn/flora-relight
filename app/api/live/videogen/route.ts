@@ -26,19 +26,13 @@ import {
   probe,
   remuxAudio,
 } from "@/lib/server/ffmpeg";
-import {
-  ensureDir,
-  genVideoPath,
-  isValidRunId,
-  relitVideoPath,
-  runDir,
-  runMediaUrl,
-  sourceAudioPath,
-  sourcePath,
-} from "@/lib/server/runstore";
+import { isValidRunId } from "@/lib/server/runstore";
+import { getStorage, scratchMediaPath } from "@/lib/server/storage";
 import { PRICE_TABLE } from "@/lib/cost";
 
 export const runtime = "nodejs";
+// Omni generations block 1-7 min; vercel.json raises this to 800s for the
+// deployed function (requires the Pro plan — Hobby caps at 300).
 export const maxDuration = 300;
 
 /** Omni Flash input cap, with a whisker of probe/rounding tolerance. */
@@ -46,15 +40,6 @@ const MAX_INPUT_SECONDS = 10.05;
 
 function jsonError(status: number, message: string): NextResponse {
   return NextResponse.json({ error: message }, { status });
-}
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await fsp.access(p);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 interface VideogenBody {
@@ -93,13 +78,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return jsonError(400, "Unresolvable source url.");
   }
 
+  const storage = getStorage();
+
   try {
-    // --- pin the source (and its audio) into this run's directory ----------
-    await ensureDir(runDir(runId));
-    const src = sourcePath(runId);
-    if (!(await exists(src))) {
-      if (resolvedSource !== src) await fsp.copyFile(resolvedSource, src);
-      else return jsonError(400, "Source file missing.");
+    // --- pin the source (and its audio) into this run's media --------------
+    // fs driver: local paths below are the canonical data/ files and the
+    // putMediaFromFile calls are no-ops — byte-identical pre-seam behavior.
+    // Remote drivers: everything round-trips through the scratch dir because
+    // ffmpeg and the Files API need real local files.
+    let src: string;
+    if (await storage.mediaExists(runId, "source.mp4")) {
+      src = await storage.getMediaToFile(
+        runId,
+        "source.mp4",
+        scratchMediaPath(runId, "source.mp4")
+      );
+    } else {
+      const dest = await storage.mediaWritePath(runId, "source.mp4");
+      if (resolvedSource === dest) return jsonError(400, "Source file missing.");
+      await fsp.copyFile(resolvedSource, dest);
+      await storage.putMediaFromFile(runId, "source.mp4", dest);
+      src = dest;
     }
 
     const srcProbe = await probe(src);
@@ -110,10 +109,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    const audioPath = sourceAudioPath(runId);
     const hasAudio = srcProbe.hasAudio;
-    if (hasAudio && !(await exists(audioPath))) {
-      await demuxAudio(src, audioPath);
+    let audioPath: string | null = null;
+    if (hasAudio) {
+      if (await storage.mediaExists(runId, "source-audio.m4a")) {
+        audioPath = await storage.getMediaToFile(
+          runId,
+          "source-audio.m4a",
+          scratchMediaPath(runId, "source-audio.m4a")
+        );
+      } else {
+        audioPath = await storage.mediaWritePath(runId, "source-audio.m4a");
+        await demuxAudio(src, audioPath);
+        await storage.putMediaFromFile(runId, "source-audio.m4a", audioPath);
+      }
     }
 
     // --- generate (proven call shape; blocks until completed) --------------
@@ -137,12 +146,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // --- download + remux the ORIGINAL audio (model audio discarded) --------
-    const genPath = genVideoPath(runId, iteration);
+    const genName = `gen-v${iteration}.mp4`;
+    const genPath = await storage.mediaWritePath(runId, genName);
     await downloadTo(outUri, genPath);
+    await storage.putMediaFromFile(runId, genName, genPath);
 
-    const relitPath = relitVideoPath(runId, iteration);
+    const relitName = `relit-v${iteration}.mp4`;
+    const relitPath = await storage.mediaWritePath(runId, relitName);
     let audioVerified = false;
-    if (hasAudio) {
+    if (hasAudio && audioPath) {
       await remuxAudio(genPath, audioPath, relitPath);
       const [relitProbe, audioProbe] = await Promise.all([
         probe(relitPath),
@@ -164,13 +176,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       await fsp.copyFile(genPath, relitPath);
       audioVerified = true;
     }
+    await storage.putMediaFromFile(runId, relitName, relitPath);
 
     const finalProbe = await probe(relitPath);
     const durationSec = finalProbe.durationSec;
 
     return NextResponse.json({
-      videoUrl: runMediaUrl(runId, `relit-v${iteration}.mp4`),
-      rawUrl: runMediaUrl(runId, `gen-v${iteration}.mp4`),
+      videoUrl: await storage.publicMediaUrl(runId, relitName),
+      rawUrl: await storage.publicMediaUrl(runId, genName),
       interactionId: gen.id,
       durationSec,
       audioVerified,

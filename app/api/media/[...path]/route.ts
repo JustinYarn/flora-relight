@@ -1,11 +1,21 @@
 /**
- * GET /api/media/<...path> — serve files from <repo>/data.
+ * GET /api/media/<...path> — serve run media through the storage driver.
+ *
+ * Canonical shape: /api/media/runs/<runId>/<fileName>.
+ *   - fs driver: streamed from <repo>/data with HTTP Range support (206 +
+ *     Content-Range / Accept-Ranges — <video> seeking needs it), exactly the
+ *     pre-seam behavior.
+ *   - blob driver (no mediaReadStream): 302-redirect to the blob's public CDN
+ *     URL — public blob URLs support Range natively, so <video> streams and
+ *     seeks against the CDN directly instead of proxying bytes through this
+ *     function.
+ *
+ * Any other path (legacy: arbitrary files under <repo>/data) is served
+ * directly from disk on the fs driver only; the blob driver stores nothing
+ * outside runs/<runId>/, so those 404.
  *
  * - Traversal-guarded: every segment goes through runstore.safeJoin, so
  *   `..`, absolute paths, and embedded separators 404.
- * - HTTP Range support: <video> seeking requires 206 partial responses with
- *   Content-Range / Accept-Ranges; implemented via fs.createReadStream
- *   {start,end}.
  * - Caching: run.json (and any .json) is no-store — it mutates as the client
  *   syncs; media files are written once per name (gen-v1.mp4, anchor-v2.png,
  *   ...) so they get a long immutable cache.
@@ -16,7 +26,12 @@ import { createReadStream } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { resolveMediaRequest } from "@/lib/server/runstore";
+import {
+  isValidMediaFileName,
+  isValidRunId,
+  resolveMediaRequest,
+} from "@/lib/server/runstore";
+import { getStorage } from "@/lib/server/storage";
 
 export const runtime = "nodejs";
 
@@ -75,32 +90,91 @@ function parseRange(
   return { start, end };
 }
 
-/** Node read stream → web ReadableStream for the Response body. */
-function streamFile(filePath: string, opts?: { start: number; end: number }): ReadableStream {
-  const nodeStream = createReadStream(filePath, opts);
-  return Readable.toWeb(nodeStream) as unknown as ReadableStream;
+function notFound(): NextResponse {
+  return NextResponse.json({ error: "Not found" }, { status: 404 });
 }
 
-export async function GET(
+/**
+ * Serve a run media file through the storage driver: stream (with Range)
+ * when the driver exposes bytes, 302-redirect when its media lives on a
+ * directly fetchable public URL (blob).
+ */
+async function serveRunMedia(
   req: NextRequest,
-  { params }: { params: { path: string[] } }
+  runId: string,
+  fileName: string
 ): Promise<Response> {
+  const storage = getStorage();
+
+  if (!storage.mediaReadStream) {
+    // Blob driver: hand the client the public CDN URL (native Range support).
+    // no-store on the redirect itself so the access gate is consulted every
+    // time; the CDN response carries its own cache headers.
+    try {
+      const url = await storage.publicMediaUrl(runId, fileName);
+      return NextResponse.redirect(url, {
+        status: 302,
+        headers: { "Cache-Control": "no-store" },
+      });
+    } catch {
+      return notFound();
+    }
+  }
+
+  const stat = await storage.statMedia(runId, fileName);
+  if (!stat) return notFound();
+
+  const size = stat.size;
+  const baseHeaders: Record<string, string> = {
+    "Content-Type": contentTypeFor(fileName),
+    "Accept-Ranges": "bytes",
+    "Cache-Control": cacheControlFor(fileName),
+    "Last-Modified": new Date(stat.mtimeMs).toUTCString(),
+  };
+
+  const range = parseRange(req.headers.get("range"), size);
+
+  if (range === "unsatisfiable") {
+    return new Response(null, {
+      status: 416,
+      headers: { ...baseHeaders, "Content-Range": `bytes */${size}` },
+    });
+  }
+
+  if (range) {
+    const { start, end } = range;
+    return new Response(await storage.mediaReadStream(runId, fileName, { start, end }), {
+      status: 206,
+      headers: {
+        ...baseHeaders,
+        "Content-Range": `bytes ${start}-${end}/${size}`,
+        "Content-Length": String(end - start + 1),
+      },
+    });
+  }
+
+  return new Response(size === 0 ? null : await storage.mediaReadStream(runId, fileName), {
+    status: 200,
+    headers: { ...baseHeaders, "Content-Length": String(size) },
+  });
+}
+
+/** Legacy fallback: arbitrary (guarded) files under <repo>/data — fs only. */
+async function serveDataFile(req: NextRequest, segments: string[]): Promise<Response> {
   let filePath: string;
   try {
-    filePath = resolveMediaRequest(params.path ?? []);
+    filePath = resolveMediaRequest(segments);
   } catch {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return notFound();
   }
 
   let stat;
   try {
     stat = await fsp.stat(filePath);
   } catch {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return notFound();
   }
-  if (!stat.isFile()) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
+  if (!stat.isFile()) return notFound();
 
   const size = stat.size;
   const baseHeaders: Record<string, string> = {
@@ -119,9 +193,12 @@ export async function GET(
     });
   }
 
+  const streamFile = (opts?: { start: number; end: number }): ReadableStream =>
+    Readable.toWeb(createReadStream(filePath, opts)) as unknown as ReadableStream;
+
   if (range) {
     const { start, end } = range;
-    return new Response(streamFile(filePath, { start, end }), {
+    return new Response(streamFile({ start, end }), {
       status: 206,
       headers: {
         ...baseHeaders,
@@ -131,8 +208,28 @@ export async function GET(
     });
   }
 
-  return new Response(size === 0 ? null : streamFile(filePath), {
+  return new Response(size === 0 ? null : streamFile(), {
     status: 200,
     headers: { ...baseHeaders, "Content-Length": String(size) },
   });
+}
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: { path: string[] } }
+): Promise<Response> {
+  const segments = params.path ?? [];
+
+  if (
+    segments.length === 3 &&
+    segments[0] === "runs" &&
+    isValidRunId(segments[1]) &&
+    isValidMediaFileName(segments[2])
+  ) {
+    return serveRunMedia(req, segments[1], segments[2]);
+  }
+
+  // Non-canonical path: only meaningful on the fs driver's local data dir.
+  if (getStorage().name !== "fs") return notFound();
+  return serveDataFile(req, segments);
 }
