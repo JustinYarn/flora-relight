@@ -416,10 +416,16 @@ export interface SideBySideOpts {
   labels?: { left: string; right: string };
 }
 
-/** Font candidates for the burned-in labels, in preference order. */
+/**
+ * Font candidates for the burned-in labels, in preference order.
+ * The DejaVu path covers Debian-family containers (the Dockerfile installs
+ * fonts-dejavu-core); the macOS paths cover local dev. No match → labels are
+ * skipped, never a failure.
+ */
 const LABEL_FONT_CANDIDATES = [
   "/System/Library/Fonts/Helvetica.ttc",
   "/Library/Fonts/Arial.ttf",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ];
 
 function findLabelFont(): string | null {

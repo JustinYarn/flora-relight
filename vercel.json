@@ -1,0 +1,14 @@
+{
+  // Pin near the Blob store / Neon region to keep media round-trips cheap.
+  "regions": ["iad1"],
+  "functions": {
+    // Omni generations block 1-7 minutes before returning; 800s needs the
+    // Pro plan — Hobby caps maxDuration at 300s.
+    // VERIFY(vercel): confirm this overrides the route file's
+    // `export const maxDuration = 300` on deploy.
+    "app/api/live/videogen/route.ts": { "maxDuration": 800 },
+    "app/api/live/judge/route.ts": { "maxDuration": 300 },
+    "app/api/export/side-by-side/route.ts": { "maxDuration": 300 },
+    "app/api/ingest/route.ts": { "maxDuration": 300 }
+  }
+}
