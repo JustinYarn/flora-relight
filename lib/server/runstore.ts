@@ -63,6 +63,18 @@ export function isValidRunId(id: unknown): id is string {
   return typeof id === "string" && RUN_ID_RE.test(id);
 }
 
+export function isValidMediaFileName(name: unknown): name is string {
+  return typeof name === "string" && FILE_NAME_RE.test(name);
+}
+
+/** Throws unless `name` is a sane single-component media file name. */
+export function assertMediaFileName(name: unknown): string {
+  if (!isValidMediaFileName(name)) {
+    throw new Error(`Invalid media file name: ${JSON.stringify(name)}`);
+  }
+  return name;
+}
+
 /** Throws unless `id` is a sane run id ([a-z0-9_-], 1-64 chars). */
 export function assertRunId(id: unknown): string {
   if (!isValidRunId(id)) {
@@ -145,9 +157,7 @@ export function runJsonPath(runId: string): string {
 
 /** Absolute path for a media file inside a run dir (filename validated). */
 export function runMediaPath(runId: string, fileName: string): string {
-  if (!FILE_NAME_RE.test(fileName)) {
-    throw new Error(`Invalid media file name: ${JSON.stringify(fileName)}`);
-  }
+  assertMediaFileName(fileName);
   return safeJoin(runDir(runId), fileName);
 }
 
