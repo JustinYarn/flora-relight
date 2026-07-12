@@ -27,7 +27,7 @@ const PIPELINE_STEPS = [
   "Review",
 ] as const;
 
-/** Shape of a successful POST /api/ingest response (app/api/ingest/route.ts). */
+/** Shape of a successful ingest response (POST /api/ingest and /api/ingest/finalize). */
 interface IngestResponse {
   runId: string;
   url: string;
@@ -41,39 +41,63 @@ interface IngestResponse {
   audioSha256: string | null;
 }
 
-/** One file's trip through POST /api/ingest, normalized for both flows. */
+/** One file's trip through server ingest, normalized for both flows. */
 type IngestOutcome =
   | { ok: true; video: VideoAsset; trimNote: string | null; trimmedToSec: number | null }
   | { ok: false; serverMissing: boolean; error: string };
 
 /**
- * Ingest one file through the server. Never throws — failures come back as
- * { ok: false } so the multi-file loop can collect errors without aborting.
+ * Which storage driver the server runs — decides the upload path (fs →
+ * multipart /api/ingest; blob → client-direct blob upload, because deployed
+ * Vercel functions cap request bodies at 4.5MB). Fetched once per tab;
+ * anything unexpected (404 in no-API environments, network failure) falls
+ * back to "fs" so the existing multipart flow and its client-side fallback
+ * behave exactly as before.
  */
-async function ingestOne(file: File): Promise<IngestOutcome> {
+let storageDriverPromise: Promise<"fs" | "blob"> | null = null;
+
+function storageDriver(): Promise<"fs" | "blob"> {
+  if (!storageDriverPromise) {
+    storageDriverPromise = fetch("/api/storage/info")
+      .then(async (res) => {
+        if (!res.ok) return "fs" as const;
+        const data = (await res.json().catch(() => null)) as { driver?: string } | null;
+        return data?.driver === "blob" ? ("blob" as const) : ("fs" as const);
+      })
+      .catch(() => "fs" as const);
+  }
+  return storageDriverPromise;
+}
+
+/** Build the { ok: true } outcome both ingest flows share. */
+function successOutcome(file: File, data: IngestResponse): IngestOutcome {
+  return {
+    ok: true,
+    video: {
+      id: uid("video"),
+      kind: "original",
+      url: data.url,
+      label: file.name,
+      durationSec: data.durationSec,
+      width: data.width,
+      height: data.height,
+      hasAudio: data.hasAudio,
+    },
+    trimNote: data.trimmed
+      ? `Trimmed from ${data.originalDurationSec.toFixed(1)}s to ${data.durationSec.toFixed(1)}s — the video model accepts at most 10s.`
+      : null,
+    trimmedToSec: data.trimmed ? data.durationSec : null,
+  };
+}
+
+/** Local/fs path: the whole file goes through multipart POST /api/ingest. */
+async function ingestViaMultipart(file: File): Promise<IngestOutcome> {
   try {
     const form = new FormData();
     form.append("file", file);
     const res = await fetch("/api/ingest", { method: "POST", body: form });
     if (res.ok) {
-      const data = (await res.json()) as IngestResponse;
-      return {
-        ok: true,
-        video: {
-          id: uid("video"),
-          kind: "original",
-          url: data.url,
-          label: file.name,
-          durationSec: data.durationSec,
-          width: data.width,
-          height: data.height,
-          hasAudio: data.hasAudio,
-        },
-        trimNote: data.trimmed
-          ? `Trimmed from ${data.originalDurationSec.toFixed(1)}s to ${data.durationSec.toFixed(1)}s — the video model accepts at most 10s.`
-          : null,
-        trimmedToSec: data.trimmed ? data.durationSec : null,
-      };
+      return successOutcome(file, (await res.json()) as IngestResponse);
     }
     if (res.status === 404) {
       // No API routes in this environment — caller may fall back client-side.
@@ -100,6 +124,68 @@ async function ingestOne(file: File): Promise<IngestOutcome> {
       error: `${file.name}: couldn't reach the ingest API.`,
     };
   }
+}
+
+/**
+ * Cloud/blob path: upload DIRECTLY to Vercel Blob from the browser (client
+ * token from /api/ingest/token — the gate cookie rides the same-origin
+ * fetch), then POST /api/ingest/finalize, which runs the same probe → trim →
+ * demux pipeline server-side and returns the identical response shape.
+ */
+async function ingestViaBlob(
+  file: File,
+  onProgress?: (percentage: number) => void
+): Promise<IngestOutcome> {
+  try {
+    const { upload } = await import("@vercel/blob/client");
+    // Safe basename only — the token route pins the uploads/ prefix and the
+    // store appends a random suffix.
+    const safeName = file.name.replace(/[^\w.-]+/g, "_") || "clip.mp4";
+    const blob = await upload(`uploads/${safeName}`, file, {
+      access: "public",
+      handleUploadUrl: "/api/ingest/token",
+      contentType: file.type || undefined,
+      onUploadProgress: (event) => onProgress?.(event.percentage),
+    });
+    const res = await fetch("/api/ingest/finalize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uploadUrl: blob.url, fileName: file.name }),
+    });
+    if (res.ok) {
+      return successOutcome(file, (await res.json()) as IngestResponse);
+    }
+    const err = (await res.json().catch(() => null)) as
+      | { error?: string }
+      | null;
+    return {
+      ok: false,
+      serverMissing: false,
+      error: err?.error
+        ? `${file.name}: ${err.error}`
+        : `${file.name}: ingest failed (HTTP ${res.status}).`,
+    };
+  } catch (err) {
+    // upload() throws on token-route rejections and transfer failures.
+    return {
+      ok: false,
+      serverMissing: false,
+      error: `${file.name}: ${err instanceof Error ? err.message : "upload failed."}`,
+    };
+  }
+}
+
+/**
+ * Ingest one file through the server. Never throws — failures come back as
+ * { ok: false } so the multi-file loop can collect errors without aborting.
+ * `onProgress` only fires on the blob path (browser → store transfer).
+ */
+async function ingestOne(
+  file: File,
+  onProgress?: (percentage: number) => void
+): Promise<IngestOutcome> {
+  if ((await storageDriver()) === "blob") return ingestViaBlob(file, onProgress);
+  return ingestViaMultipart(file);
 }
 
 const STATUS_META: Record<RunStatus, { color: string; label: string }> = {
@@ -227,11 +313,17 @@ export default function DashboardPage() {
 
   const handleSingle = useCallback(
     async (file: File) => {
-      // Server ingest first: persists the clip under data/runs/<id>/ and
+      // Server ingest first: persists the clip via the storage driver and
       // auto-trims anything over the 10s video-model input cap. The run
       // MUST carry the returned server url — live videogen resolves the
-      // actual file from it.
-      const outcome = await ingestOne(file);
+      // actual file from it. Progress only fires on the blob upload path.
+      const outcome = await ingestOne(file, (pct) =>
+        setProgress(
+          pct < 100
+            ? `Uploading ${file.name} — ${Math.round(pct)}%…`
+            : `Processing ${file.name}…`
+        )
+      );
       let video: VideoAsset | null = null;
       let trimNote: string | null = null;
       if (outcome.ok) {
@@ -284,7 +376,14 @@ export default function DashboardPage() {
       const trimmedToSecs: number[] = [];
       for (let i = 0; i < files.length; i++) {
         setProgress(`Ingesting ${i + 1}/${files.length} — ${files[i].name}…`);
-        const outcome = await ingestOne(files[i]);
+        // Blob-path uploads report transfer progress into the same line.
+        const outcome = await ingestOne(files[i], (pct) =>
+          setProgress(
+            pct < 100
+              ? `Ingesting ${i + 1}/${files.length} — ${files[i].name} (${Math.round(pct)}%)…`
+              : `Ingesting ${i + 1}/${files.length} — ${files[i].name} (processing)…`
+          )
+        );
         if (outcome.ok) {
           assets.push(outcome.video);
           if (outcome.trimmedToSec !== null) {

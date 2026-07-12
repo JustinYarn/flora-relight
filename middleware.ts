@@ -8,44 +8,16 @@
  *
  * Env absent → complete no-op, local dev unchanged.
  *
- * The cookie value is hex(SHA-256(salt:password)) — a static shared token,
- * deliberately simple (single shared password, no sessions/users). Rotating
- * the password invalidates every cookie. Comparison is constant-time.
- * Middleware runs on the Edge runtime, so hashing uses Web Crypto here and
- * node:crypto in the route handler — same derivation, byte-identical tokens.
+ * The cookie derivation + verification live in lib/server/gate.ts (Web
+ * Crypto, Edge-compatible) so the middleware, the gate route, and the blob
+ * upload token route all share one implementation: a static
+ * hex(SHA-256(salt:password)) token, deliberately simple (single shared
+ * password, no sessions/users). Rotating the password invalidates every
+ * cookie. Comparison is constant-time.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-
-const GATE_COOKIE = "flora_gate";
-const TOKEN_SALT = "flora-relight-gate-v1";
-
-let cached: { password: string; token: string } | null = null;
-
-/** hex(SHA-256("<salt>:<password>")) — memoized per process. */
-async function expectedToken(password: string): Promise<string> {
-  if (cached?.password === password) return cached.token;
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(`${TOKEN_SALT}:${password}`)
-  );
-  const token = Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  cached = { password, token };
-  return token;
-}
-
-/** Constant-time string comparison (no early exit on first mismatch). */
-function timingSafeEqualStr(a: string, b: string): boolean {
-  const enc = new TextEncoder();
-  const ab = enc.encode(a);
-  const bb = enc.encode(b);
-  let diff = ab.length ^ bb.length;
-  const len = Math.max(ab.length, bb.length);
-  for (let i = 0; i < len; i++) diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
-  return diff === 0;
-}
+import { verifyGateCookie } from "@/lib/server/gate";
 
 export async function middleware(req: NextRequest): Promise<NextResponse> {
   const password = process.env.FLORA_ACCESS_PASSWORD;
@@ -55,8 +27,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   // The gate itself must stay reachable or nobody can ever log in.
   if (pathname === "/gate" || pathname === "/api/gate") return NextResponse.next();
 
-  const cookie = req.cookies.get(GATE_COOKIE)?.value;
-  if (cookie && timingSafeEqualStr(cookie, await expectedToken(password))) {
+  if (await verifyGateCookie(req)) {
     return NextResponse.next();
   }
 

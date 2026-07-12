@@ -34,6 +34,48 @@ the top bar tracks actual spend, and batches accept a budget cap. All results (v
 scores, prompts) persist to the gitignored `data/` folder on your machine — nothing is
 uploaded anywhere except the API calls themselves.
 
+## Deploying to Vercel
+
+The repo deploys as a **container-image function** — the `Dockerfile` at the repo root is
+picked up automatically — because ingest, videogen remux, and the side-by-side export need a
+real ffmpeg binary. Storage swaps by env (`lib/server/storage/`): with
+`BLOB_READ_WRITE_TOKEN` + `DATABASE_URL` present the app persists media to **Vercel Blob**
+and run/batch JSON to **Neon Postgres**; without them it writes to the local `data/` folder
+(fine on your machine, ephemeral in a deployed container — always configure both for a real
+deploy).
+
+Prerequisites and setup:
+
+1. **Vercel Pro plan** (~$20/mo) — required for the long-running videogen function
+   (`maxDuration: 800` in `vercel.json`; Hobby caps at 300s). At this app's scale the Pro
+   plan covers the infrastructure: Blob storage/bandwidth and marketplace Postgres for a
+   personal review workload sit inside the plan's included usage, so expect the recurring
+   infra bill to stay ≈ the $20/mo plan fee. The real variable spend is the AI APIs
+   (~$1 per 10s generation attempt), which the app estimates and tracks in-product.
+2. `npm i -g vercel`, then `vercel login` and `vercel link` (create/link the project).
+3. **Neon Postgres**: `vercel install neon`, then create a database from the project's
+   Storage tab and connect it — this injects `DATABASE_URL` into the environment.
+4. **Blob store**: project dashboard → Storage → Create Database → Blob, connect it to the
+   project — this injects `BLOB_READ_WRITE_TOKEN`.
+5. **Env vars** — add each with `vercel env add <NAME> production`:
+   - `FLORA_ACCESS_PASSWORD` — the shared access gate password (middleware + `/gate`).
+     Do not deploy without it: every page/API route — including the blob-upload token
+     route and the paid AI routes — is open otherwise.
+   - `GEMINI_API_KEY` — Google AI Studio key (paid tier for image/video models).
+   - `ANTHROPIC_API_KEY` — Claude judge.
+6. `vercel deploy --prod`.
+
+**Cloud uploads are two-step.** Deployed Vercel functions cap request bodies at 4.5MB, so
+the local multipart `/api/ingest` cannot receive videos in production. When the blob driver
+is active the browser instead: (1) asks `POST /api/ingest/token` (gate-cookie
+authenticated) for a client token and streams the file **directly to Vercel Blob**
+(`upload()` from `@vercel/blob/client`; `uploads/` prefix, video/* only, 500MB cap), then
+(2) calls `POST /api/ingest/finalize`, which downloads the blob to scratch, runs the exact
+same probe → auto-trim → audio-demux pipeline as local ingest, persists
+`source.mp4`/`source-audio.m4a` under a new run id, and deletes the raw upload. The client
+picks its path automatically from `GET /api/storage/info` (`fs` → multipart, `blob` →
+client upload); local dev with no blob envs is byte-for-byte unchanged.
+
 ## What MOCK MODE means
 
 Mock mode is the no-keys fallback — you land in it only when the server reports no API keys

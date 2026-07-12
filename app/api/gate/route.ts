@@ -7,23 +7,18 @@
  * httpOnly cookie the middleware checks and 303-redirects to `from`
  * (relative paths only); failure bounces back to /gate?error=1.
  *
- * Token derivation must stay in lockstep with middleware.ts:
- * hex(SHA-256("<salt>:<password>")).
+ * Token derivation lives in lib/server/gate.ts (shared with middleware.ts
+ * and the blob upload token route): hex(SHA-256("<salt>:<password>")).
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { GATE_COOKIE, expectedGateToken } from "@/lib/server/gate";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const GATE_COOKIE = "flora_gate";
-const TOKEN_SALT = "flora-relight-gate-v1";
 const COOKIE_MAX_AGE_S = 30 * 24 * 60 * 60; // 30 days
-
-function tokenFor(password: string): string {
-  return createHash("sha256").update(`${TOKEN_SALT}:${password}`).digest("hex");
-}
 
 function passwordsMatch(submitted: string, actual: string): boolean {
   const a = createHash("sha256").update(submitted).digest();
@@ -62,7 +57,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const res = NextResponse.redirect(new URL(from, req.url), 303);
-  res.cookies.set(GATE_COOKIE, tokenFor(password), {
+  res.cookies.set(GATE_COOKIE, await expectedGateToken(password), {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",

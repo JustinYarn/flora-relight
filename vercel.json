@@ -9,6 +9,8 @@
     "app/api/live/videogen/route.ts": { "maxDuration": 800 },
     "app/api/live/judge/route.ts": { "maxDuration": 300 },
     "app/api/export/side-by-side/route.ts": { "maxDuration": 300 },
-    "app/api/ingest/route.ts": { "maxDuration": 300 }
+    "app/api/ingest/route.ts": { "maxDuration": 300 },
+    // Cloud ingest step 2: blob download + potential re-encode trim.
+    "app/api/ingest/finalize/route.ts": { "maxDuration": 300 }
   }
 }
