@@ -23,7 +23,10 @@ import {
 import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
 import { estimateRun, formatUsd, judgeCallUsd, PRICE_TABLE } from "@/lib/cost";
 import { getEvalDef } from "@/lib/prompts/eval-defs";
-import { RELIGHT_BASE_PROMPT } from "@/lib/prompts/base-prompt";
+import {
+  canonicalLiveAnchorPrompt,
+  DEMO_ANCHOR_PROMPT,
+} from "@/lib/prompts/anchor";
 import { initialMegaPrompt, nextMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { extractFrames } from "@/lib/frames";
 import { clamp, LOW_CONFIDENCE, sleep, uid, verdictFor } from "@/lib/util";
@@ -171,29 +174,6 @@ function round1(n: number): number {
 /** Short, safe error text for run logs (no stacks, no env details). */
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * LIVE MODE Stage-A instruction: derived from the immutable base prompt —
- * the task framing plus the full lighting specification, scoped to a single
- * frame. The Scene Manifest is deliberately NOT rendered here (pink-elephant
- * discipline, same as the video prompt).
- */
-function liveAnchorInstruction(): string {
-  const l = RELIGHT_BASE_PROMPT.lighting;
-  return [
-    `Relight this single video frame. ${RELIGHT_BASE_PROMPT.task}`,
-    "",
-    "Apply exactly this lighting specification:",
-    `Style: ${l.style}`,
-    `Key light: ${l.keyLight}`,
-    `Fill light: ${l.fillLight}`,
-    `Rim light: ${l.rimLight}`,
-    `Color temperature: ${l.colorTemperature}`,
-    `Mood: ${l.mood}`,
-    "",
-    "Change illumination and color response only — do not alter the person, wardrobe, background, or framing.",
-  ].join("\n");
 }
 
 /** Merge N judge verdicts into one EvalResult (measured confidence). */
@@ -493,7 +473,7 @@ export async function runWorkflow(
       // this empty legacy field is ignored by the live adapter and server.
       const relit = await providers.imageGen.relight({
         frameDataUrl: "",
-        prompt: liveAnchorInstruction(),
+        prompt: canonicalLiveAnchorPrompt(),
         iteration: 1,
       });
       anchorDataUrl = relit.imageDataUrl;
@@ -523,8 +503,7 @@ export async function runWorkflow(
         if (refFrame?.dataUrl) {
           const relit = await providers.imageGen.relight({
             frameDataUrl: refFrame.dataUrl,
-            prompt:
-              "Relight this frame to a soft three-point studio look. Change illumination only — do not alter the person, wardrobe, background, or framing.",
+            prompt: DEMO_ANCHOR_PROMPT,
             iteration: enc(1),
           });
           anchorDataUrl = relit.imageDataUrl;

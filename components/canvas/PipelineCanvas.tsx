@@ -10,6 +10,7 @@ import {
   ReactFlow,
   useNodesState,
   type Edge,
+  type NodeChange,
   type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -149,18 +150,61 @@ function latestEvalResult(run: Run, evalId: string): EvalResult | null {
 export function PipelineCanvas({
   workflow,
   run,
+  selectedNodeId,
   onSelectNode,
 }: {
   workflow: WorkflowDefinition;
   /** The run whose nodeStates / eval results drive the live view. */
   run?: Run;
+  /** Controlled selection also lets Rubrics deep-link into one graph node. */
+  selectedNodeId: string | null;
   onSelectNode: (nodeId: string | null) => void;
 }) {
   const initialNodes = useMemo(() => buildNodes(workflow), [workflow]);
   const [nodes, setNodes, onNodesChange] =
     useNodesState<CanvasNode>(initialNodes);
+  const pipelineNodeIds = useMemo(
+    () => new Set(workflow.nodes.map((node) => node.id)),
+    [workflow.nodes]
+  );
 
   const threshold = workflow.config.compositePassThreshold;
+
+  /* Keep the visual selection in sync with the inspector, including nodes
+     opened from /pipeline?node=... rather than a direct canvas click. */
+  useEffect(() => {
+    setNodes((current) =>
+      current.map((node) => {
+        if (node.type !== "pipeline") return node;
+        const selected = node.id === selectedNodeId;
+        return node.selected === selected ? node : { ...node, selected };
+      })
+    );
+  }, [selectedNodeId, setNodes]);
+
+  const handleNodesChange = useCallback(
+    (changes: NodeChange<CanvasNode>[]) => {
+      onNodesChange(changes);
+      const selected = changes.find(
+        (change) =>
+          change.type === "select" &&
+          change.selected &&
+          pipelineNodeIds.has(change.id)
+      );
+      if (selected?.type === "select") {
+        onSelectNode(selected.id);
+        return;
+      }
+      const deselectedCurrent = changes.some(
+        (change) =>
+          change.type === "select" &&
+          !change.selected &&
+          change.id === selectedNodeId
+      );
+      if (deselectedCurrent) onSelectNode(null);
+    },
+    [onNodesChange, onSelectNode, pipelineNodeIds, selectedNodeId]
+  );
 
   /* Sync live run state into node data without clobbering drag positions.
      Return the EXISTING node object when nothing it renders changed — fresh
@@ -302,7 +346,7 @@ export function PipelineCanvas({
       <ReactFlow<CanvasNode, Edge>
         nodes={nodes}
         edges={edges}
-        onNodesChange={onNodesChange}
+        onNodesChange={handleNodesChange}
         nodeTypes={nodeTypes}
         onNodeClick={(_, node) => {
           if (node.type === "pipeline") onSelectNode(node.id);

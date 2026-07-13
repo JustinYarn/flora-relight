@@ -23,7 +23,7 @@ import {
 import { isValidRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
 import { PRICE_TABLE } from "@/lib/cost";
-import { RELIGHT_BASE_PROMPT } from "@/lib/prompts/base-prompt";
+import { canonicalLiveAnchorPrompt } from "@/lib/prompts/anchor";
 import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
 import { extractServerFrames } from "@/lib/server/frame-extraction";
 import {
@@ -55,23 +55,6 @@ interface AnchorResult {
   costUsd: number;
 }
 
-function canonicalAnchorInstruction(): string {
-  const l = RELIGHT_BASE_PROMPT.lighting;
-  return [
-    `Relight this single video frame. ${RELIGHT_BASE_PROMPT.task}`,
-    "",
-    "Apply exactly this lighting specification:",
-    `Style: ${l.style}`,
-    `Key light: ${l.keyLight}`,
-    `Fill light: ${l.fillLight}`,
-    `Rim light: ${l.rimLight}`,
-    `Color temperature: ${l.colorTemperature}`,
-    `Mood: ${l.mood}`,
-    "",
-    "Change illumination and color response only — do not alter the person, wardrobe, background, or framing.",
-  ].join("\n");
-}
-
 export async function POST(req: NextRequest): Promise<NextResponse> {
   let body: AnchorBody;
   try {
@@ -85,7 +68,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (typeof instruction !== "string" || instruction.length === 0) {
     return jsonError(400, "Missing instruction.");
   }
-  if (instruction !== canonicalAnchorInstruction()) {
+  if (instruction !== canonicalLiveAnchorPrompt()) {
     return jsonError(409, "instruction does not match the canonical anchor prompt.");
   }
   if (version !== 1) {

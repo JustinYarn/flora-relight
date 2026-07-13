@@ -1,14 +1,16 @@
 "use client";
 
-import { useMemo } from "react";
-import { Badge, Card, KV, SectionTitle } from "@/components/ui";
+import Link from "next/link";
+import { useMemo, useState, type ReactNode } from "react";
+import { Badge, Card, SectionTitle } from "@/components/ui";
 import { RELIGHT_BASE_PROMPT } from "@/lib/prompts/base-prompt";
 import { MANIFEST_PROMPT } from "@/lib/prompts/manifest";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import type { EvalDefinition, EvalMethod } from "@/lib/types";
+import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
 
-/* ------------------------------------------------------------------------ */
+type CheckFilter = "all" | "rubric" | "code";
 
 const METHOD_COLOR: Record<EvalMethod, string> = {
   "dual-llm-judge": "var(--accent)",
@@ -16,325 +18,622 @@ const METHOD_COLOR: Record<EvalMethod, string> = {
   deterministic: "var(--muted)",
 };
 
-const MEGA_SECTIONS: { tag: string; what: string; why: string }[] = [
-  {
-    tag: "[TASK]",
-    what: "Immutable propagator framing.",
-    why: "The video model is a lighting propagator between two ground truths — the original video (structure, motion, timing) and the approved anchor frame (the light). It is told the test for every change: if a difference is not explainable purely as illumination, do not make it.",
-  },
-  {
-    tag: "[INVARIANT LOCKS]",
-    what: "Region-scoped prohibitions: identity, performance, wardrobe, background, camera, audio.",
-    why: "Pink-elephant discipline — we never name a mutable attribute positively (“keep the red shirt red” invites repainting the shirt and bakes caption errors into every later iteration). Locks say what may not change, scoped by region.",
-  },
-  {
-    tag: "[LIGHTING SPECIFICATION]",
-    what: "The one thing allowed to change, derived from the base spec.",
-    why: "A professional three-point studio brief: soft key ~45° camera-left slightly above eye level, gentle fill, subtle rim for separation, 4800–5600K, flattering contrast — cinematic but believable for a webcam setting.",
-  },
-  {
-    tag: "[ACTIVE CORRECTIONS FROM EVALUATION]",
-    what: "The fix list (constraint ledger) — numbered, unresolved fixes only.",
-    why: "Each eval violation maps to ONE canonical corrective clause keyed by (eval id + aspect); deduped, ordered critical > major > minor, capped at 12. Resolved violations DROP OUT of the next prompt, so it never accretes stale prose. A clause that resolves then reappears gets frozen into the base block and triggers seed rotation.",
-  },
-  {
-    tag: "[NEVER DO]",
-    what: "Negative constraints rendered verbatim from the base prompt.",
-    why: "No added/removed objects, no visible light fixtures, no background replacement, no skin smoothing, no reframing, no retiming, no text or watermarks, no style transfer.",
-  },
-];
+const EVAL_NODE_IDS = new Map(
+  RELIGHT_WORKFLOW.nodes.flatMap((node) =>
+    node.evalId ? [[node.evalId, node.id] as const] : []
+  )
+);
+const EVAL_ORDER = new Map(
+  RELIGHT_WORKFLOW.nodes.flatMap((node, index) =>
+    node.evalId ? [[node.evalId, index] as const] : []
+  )
+);
+const ORDERED_EVAL_DEFS = [...EVAL_DEFS].sort(
+  (a, b) =>
+    (EVAL_ORDER.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+    (EVAL_ORDER.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+);
 
-/* ------------------------------------------------------------------------ */
+const FILTERS: Array<{ id: CheckFilter; label: string }> = [
+  { id: "all", label: "All checks" },
+  { id: "rubric", label: "Rubrics" },
+  { id: "code", label: "Code checks" },
+];
 
 function Pre({ children }: { children: string }) {
   return (
-    <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-lg border border-edge bg-canvas p-4 font-[family-name:var(--font-geist-mono)] text-xs leading-relaxed text-muted">
+    <pre
+      tabIndex={0}
+      aria-label="Prompt or rubric source text"
+      className="max-h-[32rem] overflow-auto whitespace-pre-wrap rounded-lg border border-edge bg-canvas p-4 font-[family-name:var(--font-geist-mono)] text-xs leading-relaxed text-muted focus:outline-none focus:ring-2 focus:ring-accent"
+    >
       {children}
     </pre>
   );
 }
 
-function LongKV({ k, v }: { k: string; v: string }) {
-  // KV right-aligns its value; long prose reads better left-aligned inside a block.
+function codeCheckCaveat(evalId: string): string {
+  if (evalId === "audio-integrity") {
+    return "Target specification, not an exact executable snapshot. The current durable first-cut verifier compares audio-stream MD5 values over the shared minimum duration; Engine node status is the selected-run truth.";
+  }
+  if (evalId === "temporal-alignment") {
+    return "Planned code-check specification. The current durable live first-cut path skips the visual eval loop, including this check; Engine node status is the selected-run truth.";
+  }
+  return "Code-check specification. Open the Engine node to see whether it actually ran on the selected run.";
+}
+
+function EngineLink({ nodeId, children }: { nodeId: string; children?: ReactNode }) {
   return (
-    <KV k={k} v={<span className="block text-left text-xs leading-relaxed text-muted">{v}</span>} />
+    <Link
+      href={`/pipeline?node=${encodeURIComponent(nodeId)}`}
+      className="inline-flex min-h-10 shrink-0 items-center justify-center rounded-lg border border-edge px-3 text-xs font-medium text-muted transition-colors duration-150 hover:border-faint hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+    >
+      {children ?? "Open in Engine"}
+      <span className="ml-1.5" aria-hidden="true">
+        ↗
+      </span>
+    </Link>
   );
 }
 
-function EvalCard({ def, index }: { def: EvalDefinition; index: number }) {
+function FlowNode({
+  index,
+  title,
+  detail,
+  nodeId,
+}: {
+  index: number;
+  title: string;
+  detail: string;
+  nodeId: string;
+}) {
   return (
-    <Card className="p-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="w-6 text-right font-[family-name:var(--font-geist-mono)] text-xs tabular-nums text-faint">
-          {index + 1}
+    <Link
+      href={`/pipeline?node=${encodeURIComponent(nodeId)}`}
+      className="group flex w-40 shrink-0 items-start gap-3 rounded-xl border border-edge bg-surface p-3 text-left transition-[border-color,box-shadow] duration-150 hover:border-faint hover:shadow-[0_1px_2px_rgba(0,0,0,0.08)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+    >
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-raised font-[family-name:var(--font-geist-mono)] text-2xs tabular-nums text-faint">
+        {index}
+      </span>
+      <span className="min-w-0">
+        <span className="block text-xs font-semibold text-ink transition-colors duration-150 group-hover:text-accent">
+          {title}
         </span>
-        <h3 className="text-sm font-semibold text-ink">{def.name}</h3>
-        <Badge>{def.category}</Badge>
-        <Badge color={METHOD_COLOR[def.method]}>{def.method}</Badge>
-        {def.hardGate ? (
-          <Badge color="var(--fail)">
-            <span title="must pass (hard gate) — failing this check fails the attempt">
-              must pass
-            </span>
-          </Badge>
-        ) : (
-          <Badge color="var(--faint)">
-            <span title="advisory (soft) — counts toward the Overall score only">
-              advisory
-            </span>
-          </Badge>
-        )}
-        <span className="ml-auto font-[family-name:var(--font-geist-mono)] text-2xs tabular-nums text-faint">
-          {def.id}
+        <span className="mt-0.5 block text-pretty text-2xs leading-relaxed text-faint">
+          {detail}
         </span>
+      </span>
+    </Link>
+  );
+}
+
+function SourceDisclosure({
+  title,
+  description,
+  badge,
+  badgeColor,
+  children,
+}: {
+  title: string;
+  description: string;
+  badge: string;
+  badgeColor: string;
+  children: ReactNode;
+}) {
+  return (
+    <details className="group rounded-xl border border-edge bg-surface open:shadow-[0_1px_2px_rgba(0,0,0,0.08)]">
+      <summary className="flex min-h-16 cursor-pointer list-none items-center gap-3 px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent [&::-webkit-details-marker]:hidden">
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-ink">{title}</span>
+            <Badge color={badgeColor}>{badge}</Badge>
+          </span>
+          <span className="mt-1 block text-pretty text-xs leading-relaxed text-muted">
+            {description}
+          </span>
+        </span>
+        <span
+          className="flex h-10 w-10 shrink-0 items-center justify-center text-lg text-faint transition-transform duration-200 ease-out group-open:rotate-90"
+          aria-hidden="true"
+        >
+          ›
+        </span>
+      </summary>
+      <div className="border-t border-edge p-4">{children}</div>
+    </details>
+  );
+}
+
+function DefinitionLine({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="grid gap-1 border-b border-edge py-2.5 last:border-0 sm:grid-cols-[8rem_minmax(0,1fr)] sm:gap-4">
+      <dt className="text-2xs font-semibold uppercase tracking-[0.12em] text-faint">
+        {label}
+      </dt>
+      <dd className="text-pretty text-xs leading-relaxed text-muted">{children}</dd>
+    </div>
+  );
+}
+
+function checkKind(def: EvalDefinition): {
+  label: string;
+  color: string;
+  codeOnly: boolean;
+} {
+  if (!def.promptTemplate) {
+    return { label: "code check", color: "var(--muted)", codeOnly: true };
+  }
+  if (def.method === "hybrid") {
+    return {
+      label: "rubric + planned code",
+      color: "var(--running)",
+      codeOnly: false,
+    };
+  }
+  return { label: "rubric", color: "var(--accent)", codeOnly: false };
+}
+
+function CheckRow({
+  def,
+  index,
+  open,
+  onToggle,
+}: {
+  def: EvalDefinition;
+  index: number;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const kind = checkKind(def);
+  const nodeId = EVAL_NODE_IDS.get(def.id);
+
+  return (
+    <article
+      className="rounded-xl border bg-surface transition-[border-color,box-shadow] duration-150"
+      style={{
+        borderColor: open ? "var(--faint)" : "var(--edge)",
+        boxShadow: open ? "0 1px 2px rgba(0, 0, 0, 0.08)" : "none",
+      }}
+    >
+      <div className="flex items-stretch gap-1 p-1.5 sm:gap-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className="flex min-h-14 min-w-0 flex-1 items-start gap-3 rounded-lg px-2.5 py-2 text-left transition-colors duration-150 hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span className="mt-0.5 w-5 shrink-0 text-right font-[family-name:var(--font-geist-mono)] text-2xs tabular-nums text-faint">
+            {index + 1}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold text-ink">{def.name}</span>
+              <Badge color={kind.color}>{kind.label}</Badge>
+              {def.hardGate ? (
+                <Badge color="var(--fail)">must pass</Badge>
+              ) : (
+                <Badge color="var(--faint)">advisory</Badge>
+              )}
+            </span>
+            <span className="mt-1 block text-pretty text-xs leading-relaxed text-muted">
+              {def.description}
+            </span>
+          </span>
+          <span
+            className={`flex h-10 w-10 shrink-0 items-center justify-center text-lg text-faint transition-transform duration-200 ease-out ${
+              open ? "rotate-90" : ""
+            }`}
+            aria-hidden="true"
+          >
+            ›
+          </span>
+        </button>
+        {nodeId ? (
+          <div className="hidden items-center pr-1 sm:flex">
+            <EngineLink nodeId={nodeId}>Engine node</EngineLink>
+          </div>
+        ) : null}
       </div>
 
-      <p className="mt-2 text-xs leading-relaxed text-muted">{def.description}</p>
+      {open ? (
+        <div className="border-t border-edge p-4">
+          <div className="grid gap-5 lg:grid-cols-[13rem_minmax(0,1fr)]">
+            <div>
+              <SectionTitle>Definition</SectionTitle>
+              <dl>
+                <DefinitionLine label="ID">
+                  <span className="font-[family-name:var(--font-geist-mono)] text-2xs">
+                    {def.id}
+                  </span>
+                </DefinitionLine>
+                <DefinitionLine label="Category">{def.category}</DefinitionLine>
+                <DefinitionLine label="Method">{def.method}</DefinitionLine>
+                <DefinitionLine label="Weight">
+                  <span className="tabular-nums">
+                    {def.weight.toFixed(2)} ({Math.round(def.weight * 100)}%)
+                  </span>
+                </DefinitionLine>
+                <DefinitionLine label="Pass">
+                  <span className="tabular-nums text-pass">≥ {def.passThreshold}</span>
+                </DefinitionLine>
+                <DefinitionLine label="Borderline">
+                  <span className="tabular-nums text-borderline">
+                    ≥ {def.borderlineThreshold}
+                  </span>
+                </DefinitionLine>
+              </dl>
+              {nodeId ? (
+                <div className="mt-3 sm:hidden">
+                  <EngineLink nodeId={nodeId} />
+                </div>
+              ) : null}
+            </div>
 
-      <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg border border-edge bg-raised px-3 py-2">
-        <div>
-          <div className="text-2xs uppercase tracking-wider text-faint">Weight</div>
-          <div className="text-sm font-semibold tabular-nums text-ink">
-            {def.weight.toFixed(2)}
-            <span className="ml-1 text-2xs font-normal text-faint">
-              ({Math.round(def.weight * 100)}%)
-            </span>
+            <div className="min-w-0">
+              {kind.codeOnly ? (
+                <>
+                  <SectionTitle right={<Badge color="var(--muted)">no model prompt</Badge>}>
+                    Code-check specification
+                  </SectionTitle>
+                  <p className="mb-3 text-pretty text-xs leading-relaxed text-faint">
+                    {codeCheckCaveat(def.id)}
+                  </p>
+                  <div className="rounded-lg bg-raised p-4 text-pretty text-xs leading-relaxed text-muted">
+                    {def.deterministicNote ?? "No code-check description is available."}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <SectionTitle right={<Badge color={METHOD_COLOR[def.method]}>current source</Badge>}>
+                    Current canonical rubric
+                  </SectionTitle>
+                  <p className="mb-3 text-pretty text-xs leading-relaxed text-faint">
+                    This is the rubric in the current source definition. It is not a
+                    snapshot of a past run or a provider-specific request.
+                  </p>
+                  <Pre>{def.promptTemplate}</Pre>
+                  {def.deterministicNote ? (
+                    <details className="group mt-3 rounded-lg border border-edge bg-raised">
+                      <summary className="flex min-h-10 cursor-pointer list-none items-center justify-between gap-3 px-3 text-xs font-medium text-muted transition-colors duration-150 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent [&::-webkit-details-marker]:hidden">
+                        Code-assisted tier
+                        <span
+                          className="text-base text-faint transition-transform duration-200 ease-out group-open:rotate-90"
+                          aria-hidden="true"
+                        >
+                          ›
+                        </span>
+                      </summary>
+                      <p className="border-t border-edge p-3 text-pretty text-xs leading-relaxed text-muted">
+                        {def.deterministicNote}
+                      </p>
+                    </details>
+                  ) : null}
+                </>
+              )}
+            </div>
           </div>
-        </div>
-        <div>
-          <div className="text-2xs uppercase tracking-wider text-faint">Pass</div>
-          <div className="text-sm font-semibold tabular-nums text-pass">
-            &ge; {def.passThreshold}
-          </div>
-        </div>
-        <div>
-          <div className="text-2xs uppercase tracking-wider text-faint">Borderline</div>
-          <div className="text-sm font-semibold tabular-nums text-borderline">
-            &ge; {def.borderlineThreshold}
-          </div>
-        </div>
-      </div>
-
-      {def.promptTemplate ? (
-        <details className="mt-3">
-          <summary className="cursor-pointer select-none text-2xs font-semibold uppercase tracking-[0.14em] text-accent hover:brightness-110">
-            Full judge rubric
-          </summary>
-          <div className="mt-2">
-            <Pre>{def.promptTemplate}</Pre>
-          </div>
-        </details>
-      ) : (
-        <p className="mt-3 text-2xs text-faint">
-          Checked automatically by code — no judge prompt, no model involved.
-        </p>
-      )}
-
-      {def.deterministicNote ? (
-        <div className="mt-3 rounded-lg border border-edge bg-canvas p-3">
-          <div className="mb-1 text-2xs font-semibold uppercase tracking-[0.14em] text-running">
-            Deterministic tier (future-real metric)
-          </div>
-          <p className="text-xs leading-relaxed text-muted">{def.deterministicNote}</p>
         </div>
       ) : null}
-    </Card>
+    </article>
   );
 }
-
-/* ------------------------------------------------------------------------ */
 
 export default function PromptsPage() {
   const mega = useMemo(() => initialMegaPrompt(), []);
-  const totalWeight = useMemo(
-    () => EVAL_DEFS.reduce((sum, d) => sum + d.weight, 0),
-    []
-  );
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<CheckFilter>("all");
+  const [openId, setOpenId] = useState<string | null>(null);
+
   const base = RELIGHT_BASE_PROMPT;
+  const rubricCount = EVAL_DEFS.filter((def) => Boolean(def.promptTemplate)).length;
+  const codeCount = EVAL_DEFS.length - rubricCount;
+
+  const filteredDefs = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return ORDERED_EVAL_DEFS.filter((def) => {
+      const codeOnly = !def.promptTemplate;
+      if (filter === "rubric" && codeOnly) return false;
+      if (filter === "code" && !codeOnly) return false;
+      if (!needle) return true;
+      return [
+        def.name,
+        def.id,
+        def.category,
+        def.method,
+        def.description,
+        def.promptTemplate,
+        def.deterministicNote ?? "",
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle);
+    });
+  }, [filter, query]);
 
   return (
-    <div className="mx-auto max-w-5xl px-5 py-8">
+    <main className="mx-auto max-w-6xl px-5 pb-16 pt-8">
       <header className="mb-8">
-        <h1 className="text-lg font-semibold text-ink">Prompt Library</h1>
-        <p className="mt-1 max-w-3xl text-sm leading-relaxed text-muted">
-          The exact prompts and rubrics the pipeline uses — in mock mode today,
-          against real Omni / Gemini / Claude adapters later. Everything here is
-          compiled from structured state, never hand-edited: this page is the
-          methodology, rendered.
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-balance text-lg font-semibold text-ink">
+            Prompt &amp; check map
+          </h1>
+          <Badge color="var(--accent)">current definition</Badge>
+        </div>
+        <p className="mt-2 max-w-3xl text-pretty text-sm leading-relaxed text-muted">
+          See which instructions shape generation, which checks evaluate an
+          attempt, and where each check lives in the Engine. Long source text stays
+          folded away until you need it.
+        </p>
+        <p className="mt-2 max-w-3xl text-pretty text-2xs leading-relaxed text-faint">
+          This page maps the full-loop definition. In Engine, the selected run&apos;s
+          node status shows which stages actually ran; durable live first cuts
+          currently skip the anchor and visual-eval loop.
         </p>
       </header>
 
-      {/* (a) Mega prompt compiler ------------------------------------------ */}
-      <section className="mb-10">
+      <section className="mb-9" aria-labelledby="workflow-map-title">
         <SectionTitle
           right={
-            <Badge color="var(--accent)">deterministic compiler</Badge>
+            <span className="text-2xs text-faint">
+              definition map · select a node to continue in Engine
+            </span>
           }
         >
-          How the generation brief (mega prompt) compiles
+          <span id="workflow-map-title">How instructions move through the loop</span>
         </SectionTitle>
-        <Card className="p-4">
-          <p className="text-xs leading-relaxed text-muted">
-            The generation prompt is a pure function of structured state:{" "}
-            <span className="text-ink">
-              immutable base + lighting directive + constraint ledger + negatives
+        <div className="overflow-x-auto pb-2">
+          <div className="flex min-w-max items-center gap-2">
+            <FlowNode
+              index={1}
+              title="Compile the brief"
+              detail="Combine base instructions, lighting, and active fixes."
+              nodeId="compile"
+            />
+            <span className="text-faint" aria-hidden="true">
+              →
             </span>
-            . Same state compiles to the same bytes, so any two iterations&apos;
-            prompts diff cleanly and a correction&apos;s effect can be isolated.
-            The seed is pinned while refining for the same reason; it rotates
-            only when the same violation survives two consecutive iterations.
-          </p>
-          <div className="mt-4 space-y-3">
-            {MEGA_SECTIONS.map((s) => (
-              <div key={s.tag} className="rounded-lg border border-edge bg-raised p-3">
-                <div className="flex flex-wrap items-baseline gap-2">
-                  <span className="font-[family-name:var(--font-geist-mono)] text-xs font-semibold text-accent">
-                    {s.tag}
-                  </span>
-                  <span className="text-xs text-ink">{s.what}</span>
+            <FlowNode
+              index={2}
+              title="Generate a candidate"
+              detail="Send the run-bound brief with the source video."
+              nodeId="videogen"
+            />
+            <span className="text-faint" aria-hidden="true">
+              →
+            </span>
+            <FlowNode
+              index={3}
+              title="Run the checks"
+              detail="10 attempt checks; audio gate after delivery."
+              nodeId="eval-identity"
+            />
+            <span className="text-faint" aria-hidden="true">
+              →
+            </span>
+            <FlowNode
+              index={4}
+              title="Collect fixes"
+              detail="Turn reported violations into a deduplicated fix list."
+              nodeId="ledger"
+            />
+            <span className="text-accent" aria-hidden="true">
+              ↺
+            </span>
+            <FlowNode
+              index={5}
+              title="Compile again"
+              detail="Feed active fixes into the next generation brief."
+              nodeId="compile"
+            />
+          </div>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-2xs text-faint">
+          <span>Side inputs in the full-loop definition:</span>
+          <EngineLink nodeId="manifest">scene inventory → eval context</EngineLink>
+          <EngineLink nodeId="anchor">Look Anchor → generation</EngineLink>
+        </div>
+      </section>
+
+      <section className="mb-9" aria-labelledby="prompt-sources-title">
+        <SectionTitle>
+          <span id="prompt-sources-title">Prompt sources</span>
+        </SectionTitle>
+        <div className="grid gap-3">
+          <SourceDisclosure
+            title="Scene inventory prompt"
+            description="Current extraction instructions for describing the person, room, camera, and starting light before evaluation."
+            badge="prompt"
+            badgeColor="var(--running)"
+          >
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
+                This inventory is intended as evaluation context and is kept out
+                of the generation brief so descriptive guesses do not become edit
+                instructions. Current live judge requests do not attach it yet.
+              </p>
+              <EngineLink nodeId="manifest" />
+            </div>
+            <Pre>{MANIFEST_PROMPT}</Pre>
+          </SourceDisclosure>
+
+          <SourceDisclosure
+            title="Generation brief compiler"
+            description="Current base task, invariant locks, lighting specification, active fixes, and never-do constraints."
+            badge="compiler"
+            badgeColor="var(--accent)"
+          >
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+              <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
+                The compiler assembles structured source blocks into a generation
+                brief. The example below is the current first-version render with
+                an empty fix list, not a historical run snapshot.
+              </p>
+              <EngineLink nodeId="compile" />
+            </div>
+
+            <div className="grid gap-5 lg:grid-cols-2">
+              <div className="min-w-0">
+                <SectionTitle>Base instructions</SectionTitle>
+                <dl className="rounded-lg bg-raised px-3">
+                  <DefinitionLine label="Task">{base.task}</DefinitionLine>
+                  <DefinitionLine label="Identity">{base.locks.identity}</DefinitionLine>
+                  <DefinitionLine label="Performance">
+                    {base.locks.performance}
+                  </DefinitionLine>
+                  <DefinitionLine label="Wardrobe">{base.locks.wardrobe}</DefinitionLine>
+                  <DefinitionLine label="Background">
+                    {base.locks.background}
+                  </DefinitionLine>
+                  <DefinitionLine label="Camera">{base.locks.camera}</DefinitionLine>
+                  <DefinitionLine label="Audio">{base.locks.audio}</DefinitionLine>
+                  <DefinitionLine label="Lighting style">
+                    {base.lighting.style}
+                  </DefinitionLine>
+                  <DefinitionLine label="Key light">
+                    {base.lighting.keyLight}
+                  </DefinitionLine>
+                  <DefinitionLine label="Fill light">
+                    {base.lighting.fillLight}
+                  </DefinitionLine>
+                  <DefinitionLine label="Rim light">
+                    {base.lighting.rimLight}
+                  </DefinitionLine>
+                  <DefinitionLine label="Color temp">
+                    {base.lighting.colorTemperature}
+                  </DefinitionLine>
+                  <DefinitionLine label="Mood">{base.lighting.mood}</DefinitionLine>
+                </dl>
+                <div className="mt-4">
+                  <SectionTitle>Never do</SectionTitle>
+                  <ul className="rounded-lg bg-raised px-3 py-2">
+                    {base.negative.map((item) => (
+                      <li
+                        key={item}
+                        className="flex gap-2 border-b border-edge py-2 text-pretty text-xs leading-relaxed text-muted last:border-0"
+                      >
+                        <span className="text-fail" aria-hidden="true">
+                          ×
+                        </span>
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-                <p className="mt-1 text-xs leading-relaxed text-muted">{s.why}</p>
               </div>
+
+              <div className="min-w-0">
+                <SectionTitle right={<Badge>v{mega.version} · no fixes</Badge>}>
+                  Current compiled example
+                </SectionTitle>
+                <Pre>{mega.rendered}</Pre>
+              </div>
+            </div>
+          </SourceDisclosure>
+        </div>
+      </section>
+
+      <section id="checks" aria-labelledby="checks-title">
+        <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <SectionTitle>
+              <span id="checks-title">Checks</span>
+            </SectionTitle>
+            <p className="-mt-1 text-pretty text-xs leading-relaxed text-faint">
+              Open one check at a time to inspect its thresholds and current source
+              definition.
+            </p>
+          </div>
+          <Badge>
+            {EVAL_DEFS.length} total · {rubricCount} rubric-driven · {codeCount} code
+          </Badge>
+        </div>
+
+        <Card className="mb-4 p-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+            <label className="relative min-w-0 flex-1">
+              <span className="sr-only">Search checks and rubrics</span>
+              <span
+                className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-muted"
+                aria-hidden="true"
+              >
+                ⌕
+              </span>
+              <input
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search names, categories, IDs, or rubric text…"
+                className="min-h-10 w-full rounded-lg border border-edge bg-raised py-2 pl-9 pr-3 text-sm text-ink placeholder:text-faint transition-[border-color,box-shadow] duration-150 focus:border-faint focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+            </label>
+            <div className="flex flex-wrap gap-1.5" aria-label="Filter checks">
+              {FILTERS.map((item) => {
+                const active = filter === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setFilter(item.id)}
+                    aria-pressed={active}
+                    className="min-h-10 rounded-lg border px-3 text-xs font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    style={
+                      active
+                        ? {
+                            color: "var(--ink)",
+                            borderColor: "var(--faint)",
+                            background: "var(--raised)",
+                          }
+                        : {
+                            color: "var(--muted)",
+                            borderColor: "var(--edge)",
+                            background: "transparent",
+                          }
+                    }
+                  >
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <p className="mt-2 text-2xs tabular-nums text-faint" role="status">
+            Showing {filteredDefs.length} of {EVAL_DEFS.length} checks
+            {query || filter !== "all"
+              ? ""
+              : " · full demo loop: 10 per generation attempt; audio runs after delivery · durable live first cuts currently skip the visual eval loop"}
+          </p>
+        </Card>
+
+        {filteredDefs.length > 0 ? (
+          <div className="space-y-2">
+            {filteredDefs.map((def) => (
+              <CheckRow
+                key={def.id}
+                def={def}
+                  index={ORDERED_EVAL_DEFS.indexOf(def)}
+                open={openId === def.id}
+                onToggle={() =>
+                  setOpenId((current) => (current === def.id ? null : def.id))
+                }
+              />
             ))}
           </div>
-        </Card>
-
-        <div className="mt-4">
-          <SectionTitle
-            right={<Badge>version {mega.version} · 0 fixes</Badge>}
-          >
-            Live render — the brief before any fixes (initialMegaPrompt())
-          </SectionTitle>
-          <Card className="p-4">
-            <Pre>{mega.rendered}</Pre>
-          </Card>
-        </div>
-      </section>
-
-      {/* (b) Base prompt --------------------------------------------------- */}
-      <section className="mb-10">
-        <SectionTitle right={<Badge>immutable across iterations</Badge>}>
-          Base prompt — locks &amp; lighting spec
-        </SectionTitle>
-        <div className="grid gap-4 lg:grid-cols-2">
-          <Card className="p-4">
-            <h3 className="mb-2 text-sm font-semibold text-ink">Invariant locks</h3>
-            <p className="mb-2 text-2xs leading-relaxed text-faint">
-              Region-scoped prohibitions — what the model must copy exactly.
-              Never phrased as positive attributes (pink-elephant discipline).
-            </p>
-            <div className="divide-y divide-edge">
-              <LongKV k="identity" v={base.locks.identity} />
-              <LongKV k="performance" v={base.locks.performance} />
-              <LongKV k="wardrobe" v={base.locks.wardrobe} />
-              <LongKV k="background" v={base.locks.background} />
-              <LongKV k="camera" v={base.locks.camera} />
-              <LongKV k="audio" v={base.locks.audio} />
-            </div>
-          </Card>
-          <div className="space-y-4">
-            <Card className="p-4">
-              <h3 className="mb-2 text-sm font-semibold text-ink">
-                Lighting specification
-              </h3>
-              <p className="mb-2 text-2xs leading-relaxed text-faint">
-                The one permitted change: a three-point professional studio
-                setup, believable in a webcam room.
-              </p>
-              <div className="divide-y divide-edge">
-                <LongKV k="style" v={base.lighting.style} />
-                <LongKV k="key light" v={base.lighting.keyLight} />
-                <LongKV k="fill light" v={base.lighting.fillLight} />
-                <LongKV k="rim light" v={base.lighting.rimLight} />
-                <LongKV k="color temp" v={base.lighting.colorTemperature} />
-                <LongKV k="mood" v={base.lighting.mood} />
-              </div>
-            </Card>
-            <Card className="p-4">
-              <h3 className="mb-2 text-sm font-semibold text-ink">Never do</h3>
-              <ul className="space-y-1.5">
-                {base.negative.map((n) => (
-                  <li key={n} className="flex gap-2 text-xs leading-relaxed text-muted">
-                    <span className="text-fail">×</span>
-                    <span>{n}</span>
-                  </li>
-                ))}
-              </ul>
-            </Card>
+        ) : (
+          <div className="rounded-xl border border-dashed border-edge py-12 text-center">
+            <p className="text-sm text-muted">No checks match this search.</p>
+            <button
+              type="button"
+              onClick={() => {
+                setQuery("");
+                setFilter("all");
+              }}
+              className="mt-2 min-h-10 rounded-lg px-3 text-xs font-medium text-accent transition-colors duration-150 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              Clear search and filters
+            </button>
           </div>
-        </div>
+        )}
       </section>
-
-      {/* (c) Manifest prompt ----------------------------------------------- */}
-      <section className="mb-10">
-        <SectionTitle
-          right={<Badge color="var(--running)">runs once, when the clip is read</Badge>}
-        >
-          Scene inventory extraction (manifest)
-        </SectionTitle>
-        <Card className="p-4">
-          <p className="mb-3 text-xs leading-relaxed text-muted">
-            Before any generation, a vision model extracts a structured
-            inventory of the scene as strict JSON. The manifest is{" "}
-            <span className="text-ink">eval ground truth</span> — it is what
-            judges check vanished earrings and repainted walls against. It is
-            deliberately <span className="text-ink">never rendered into
-            generation prompts</span>: naming &quot;the red shirt&quot; invites
-            the model to repaint it, and would bake any captioning error into
-            every subsequent iteration.
-          </p>
-          <details>
-            <summary className="cursor-pointer select-none text-2xs font-semibold uppercase tracking-[0.14em] text-accent hover:brightness-110">
-              Full extraction prompt
-            </summary>
-            <div className="mt-2">
-              <Pre>{MANIFEST_PROMPT}</Pre>
-            </div>
-          </details>
-        </Card>
-      </section>
-
-      {/* (d) Eval registry -------------------------------------------------- */}
-      <section>
-        <SectionTitle
-          right={
-            <Badge>
-              {EVAL_DEFS.length} checks · weights sum {totalWeight.toFixed(2)}
-            </Badge>
-          }
-        >
-          The 11 checks (eval registry)
-        </SectionTitle>
-        <Card className="mb-4 p-4">
-          <p className="text-xs leading-relaxed text-muted">
-            Overall score (composite) = &Sigma; (weight × score). An attempt
-            passes when the Overall score reaches the workflow threshold (75){" "}
-            <span className="text-ink">and every must-pass check passes</span> —
-            a high composite cannot buy back a broken identity or a hallucinated
-            hand. Deterministic metrics run first and short-circuit catastrophic
-            failures before any judge spend; the LLM-judged evals run on Claude
-            and Gemini independently, and{" "}
-            <span className="text-ink">confidence is measured from judge
-            disagreement</span>, never self-reported — low agreement forces
-            borderline and flags the result for human review. Frames are sampled
-            at fixed percentiles plus event-picked frames (max optical flow,
-            largest face, max mouth-open), because drift hides in the hardest
-            frames.
-          </p>
-        </Card>
-        <div className="space-y-4">
-          {EVAL_DEFS.map((def, i) => (
-            <EvalCard key={def.id} def={def} index={i} />
-          ))}
-        </div>
-        <p className="mt-4 text-2xs leading-relaxed text-faint">
-          Future CI: fault-injection fixtures — every eval must demonstrably
-          catch its target defect class (shirt recolor, vanished earring,
-          retimed clip, re-encoded audio) in mock mode before it gates real
-          runs. Regressions only count when the score delta exceeds judge noise
-          (max of 5 points or 1.5&sigma; calibrated from repeated trials).
-        </p>
-      </section>
-    </div>
+    </main>
   );
 }

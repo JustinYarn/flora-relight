@@ -11,6 +11,7 @@ import type {
   ProviderInfo,
 } from "@/lib/types";
 import { Badge, statusColor, VerdictBadge, verdictColor } from "@/components/ui";
+import { promptRoleForNode } from "@/components/canvas/prompt-map";
 
 /** Latest composite vs the pass threshold, shown on the iteration gate card. */
 export type GateSnapshot = {
@@ -59,11 +60,11 @@ export function kindColor(kind: NodeKind): string {
   }
 }
 
-/** Placeholder model ids (from the provider contract); swapped when real keys land. */
+/** Current display labels mirrored from the server-owned provider constants. */
 export const PROVIDER_MODELS: Record<ProviderInfo["id"], string> = {
-  omni: "omni-video-1",
-  gemini: "gemini-3.1-pro",
-  claude: "claude-opus-4-8",
+  omni: "gemini-omni-flash-preview",
+  gemini: "gemini-3-pro-image",
+  claude: "claude-fable-5",
 };
 
 /** Status icon + word — legible at a glance, not just a colored dot. */
@@ -92,6 +93,7 @@ export const PipelineNodeView = memo(function PipelineNodeView({
   const { pipelineNode: node, status, evalResult, iteration, seed, anchorThumb, gateInfo } =
     data;
   const color = kindColor(node.kind);
+  const promptRole = promptRoleForNode(node);
   const glyph = STATUS_GLYPH[status];
   /** Evaluate nodes carry their verdict on the trailing edge of the card. */
   const verdictEdge =
@@ -102,26 +104,30 @@ export const PipelineNodeView = memo(function PipelineNodeView({
   return (
     <div
       title={node.description}
-      className="w-[200px] rounded-lg border bg-surface px-3 py-2"
+      data-node-id={node.id}
+      data-prompt-role={promptRole?.label}
+      className="w-[200px] rounded-lg bg-surface px-3 py-2 transition-[box-shadow,border-color] duration-150 ease-out"
       style={{
+        border: "1px solid transparent",
         borderColor: selected
           ? `color-mix(in srgb, ${color} 60%, var(--edge))`
-          : "var(--edge)",
-        borderLeftColor: color,
-        borderLeftWidth: 3,
+          : "transparent",
+        boxShadow: selected
+          ? `0 0 0 1px ${color}, 0 10px 28px rgba(0, 0, 0, 0.28)`
+          : "0 0 0 1px rgba(255, 255, 255, 0.08), 0 2px 8px rgba(0, 0, 0, 0.14)",
         ...(verdictEdge
           ? { borderRightColor: verdictEdge, borderRightWidth: 3 }
           : {}),
-        boxShadow: selected ? `0 0 0 1px ${color}` : "none",
       }}
     >
       <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
       <div className="flex items-center justify-between gap-2">
         <span
           className="text-2xs font-semibold uppercase tracking-[0.12em]"
-          style={{ color }}
+          style={{ color: promptRole?.color ?? color }}
+          title={promptRole?.description}
         >
-          {node.kind}
+          {promptRole?.label ?? node.kind}
         </span>
         <span
           className={`inline-flex items-center gap-1 text-2xs font-medium ${
@@ -189,7 +195,7 @@ export const PipelineNodeView = memo(function PipelineNodeView({
 
       {node.kind === "generate" && node.providerId ? (
         <p className="mt-1 text-2xs text-faint">
-          {PROVIDER_MODELS[node.providerId]} · mock
+          {PROVIDER_MODELS[node.providerId]}
         </p>
       ) : null}
       <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />

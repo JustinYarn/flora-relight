@@ -141,7 +141,7 @@ addLane(
     id: "lane-evals",
     index: 4,
     title: "The 10 checks",
-    subtitle: "run on every attempt",
+    subtitle: "full loop · selected run may skip",
     color: "var(--running)",
   },
   [

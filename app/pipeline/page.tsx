@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import type { RunStatus } from "@/lib/types";
 import { Badge, Button, EmptyState } from "@/components/ui";
@@ -48,6 +48,28 @@ export default function PipelinePage() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
+  /* Rubrics deep-links to the graph without making the URL the source of
+     truth for normal canvas clicks. Invalid node ids are simply ignored. */
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get("node");
+    if (requested && workflow.nodes.some((node) => node.id === requested)) {
+      setSelectedNodeId(requested);
+    }
+  }, [workflow.nodes]);
+
+  const selectNode = useCallback((nodeId: string | null) => {
+    setSelectedNodeId(nodeId);
+    const url = new URL(window.location.href);
+    if (nodeId) url.searchParams.set("node", nodeId);
+    else url.searchParams.delete("node");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`
+    );
+  }, []);
+  const closeInspector = useCallback(() => selectNode(null), [selectNode]);
+
   /* Default to the newest run (runs are newest-first). */
   const activeRun = useMemo(() => {
     if (selectedRunId) {
@@ -56,6 +78,7 @@ export default function PipelinePage() {
     }
     return runs[0];
   }, [runs, selectedRunId]);
+  const displayedMode = activeRun ? (activeRun.live ? "live" : "mock") : mode;
 
   const selectedNode = selectedNodeId
     ? workflow.nodes.find((n) => n.id === selectedNodeId) ?? null
@@ -83,10 +106,10 @@ export default function PipelinePage() {
         >
           {workflow.name}
         </span>
-        {mode === "live" ? (
-          <Badge color="var(--pass)">LIVE</Badge>
+        {displayedMode === "live" ? (
+          <Badge color="var(--pass)">{activeRun ? "LIVE RUN" : "LIVE MODE"}</Badge>
         ) : (
-          <Badge color="var(--accent)">MOCK MODE</Badge>
+          <Badge color="var(--accent)">{activeRun ? "MOCK RUN" : "MOCK MODE"}</Badge>
         )}
         {latestIteration ? (
           <span
@@ -149,13 +172,28 @@ export default function PipelinePage() {
       {/* Live stage progress — what is happening right now, in plain words. */}
       <StageProgressStrip run={activeRun} config={workflow.config} />
 
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge bg-canvas px-4 py-2">
+        <Badge color="var(--accent)">prompt map</Badge>
+        <p className="text-pretty text-xs text-muted">
+          Open a labeled node to trace the generation brief, the rubric or code
+          check, its result, and the fix that feeds the next attempt.
+        </p>
+        <Link
+          href="/prompts"
+          className="ml-auto inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
+        >
+          Browse every rubric →
+        </Link>
+      </div>
+
       {/* Canvas + inspector */}
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1">
           <PipelineCanvas
             workflow={workflow}
             run={activeRun}
-            onSelectNode={setSelectedNodeId}
+            selectedNodeId={selectedNodeId}
+            onSelectNode={selectNode}
           />
           {runs.length === 0 ? (
             <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-6">
@@ -185,7 +223,9 @@ export default function PipelinePage() {
             node={selectedNode}
             run={activeRun}
             config={workflow.config}
-            onClose={() => setSelectedNodeId(null)}
+            mode={mode}
+            onSelectNode={selectNode}
+            onClose={closeInspector}
           />
         ) : null}
       </div>
