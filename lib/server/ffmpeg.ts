@@ -122,6 +122,27 @@ function bundledFfmpegStatic(): string | null {
   }
 }
 
+/**
+ * Serverless bundles can strip the execute bit from traced binaries, and the
+ * deployed filesystem is read-only — so if a candidate EXISTS but can't run,
+ * copy it to /tmp and chmod it there. Returns the runnable path or null.
+ */
+async function makeRunnable(candidate: string): Promise<string | null> {
+  if (!existsSync(candidate)) return null;
+  if (await candidateWorks(candidate)) return candidate;
+  try {
+    const tmpCopy = path.join(os.tmpdir(), `ffmpeg-bundled-${path.basename(candidate)}`);
+    if (!existsSync(tmpCopy)) {
+      await fsp.copyFile(candidate, tmpCopy);
+    }
+    await fsp.chmod(tmpCopy, 0o755);
+    if (await candidateWorks(tmpCopy)) return tmpCopy;
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
 async function detectTools(): Promise<Tools> {
   const ffmpegCandidates = [
     process.env.FFMPEG_PATH,
@@ -139,6 +160,12 @@ async function detectTools(): Promise<Tools> {
       ffmpegBin = c;
       break;
     }
+  }
+  if (!ffmpegBin) {
+    // Last resort for read-only serverless bundles: the traced ffmpeg-static
+    // binary may exist without its execute bit — copy to /tmp and chmod.
+    const bundled = bundledFfmpegStatic();
+    if (bundled) ffmpegBin = await makeRunnable(bundled);
   }
   if (!ffmpegBin) {
     throw new Error(
