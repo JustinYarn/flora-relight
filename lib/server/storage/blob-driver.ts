@@ -1400,6 +1400,18 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
                        'in_progress', 'reconcile_required'
                      )
                  )
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM batch_executions AS batch
+                   CROSS JOIN LATERAL jsonb_array_elements(
+                     COALESCE(batch.data->'members', '[]'::jsonb)
+                   ) AS member
+                   WHERE member->>'runId' = runs.id
+                     AND (
+                       member->>'state' = 'reconcile_required'
+                       OR batch.status IN ('queued', 'running')
+                     )
+                 )
                )
             RETURNING media
           `,
@@ -1532,19 +1544,50 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
     async createBatchExecution(execution) {
       await migrateLegacyBatches();
       const candidate = assertNewBatchExecution(execution);
-      const rows = (await sql`
-        INSERT INTO batch_executions (
-          batch_id, execution_id, revision, status, updated_at, data
-        )
-        SELECT ${candidate.batchId}, ${candidate.executionId},
-               ${candidate.revision}, ${candidate.status},
-               ${candidate.updatedAt}, ${JSON.stringify(candidate)}::jsonb
-        FROM batch_records
-        WHERE id = ${candidate.batchId}
-          AND data->>'status' = 'ready'
-        ON CONFLICT (batch_id) DO NOTHING
-        RETURNING revision, data
-      `) as BatchExecutionRow[];
+      const memberRunIdsJson = JSON.stringify(
+        candidate.members.map((member) => member.runId)
+      );
+      const transactionResults = await sql.transaction(
+        (transactionSql) => [
+          transactionSql`
+            WITH member_ids AS (
+              SELECT value AS run_id
+              FROM jsonb_array_elements_text(${memberRunIdsJson}::jsonb)
+            )
+            SELECT run.id
+            FROM runs AS run
+            INNER JOIN member_ids AS member ON member.run_id = run.id
+            ORDER BY run.id
+            FOR UPDATE OF run
+          `,
+          transactionSql`
+            WITH member_ids AS (
+              SELECT value AS run_id
+              FROM jsonb_array_elements_text(${memberRunIdsJson}::jsonb)
+            )
+            INSERT INTO batch_executions (
+              batch_id, execution_id, revision, status, updated_at, data
+            )
+            SELECT ${candidate.batchId}, ${candidate.executionId},
+                   ${candidate.revision}, ${candidate.status},
+                   ${candidate.updatedAt}, ${JSON.stringify(candidate)}::jsonb
+            FROM batch_records
+            WHERE id = ${candidate.batchId}
+              AND data->>'status' = 'ready'
+              AND (
+                SELECT COUNT(*)
+                FROM runs AS run
+                INNER JOIN member_ids AS member ON member.run_id = run.id
+                WHERE run.data IS NOT NULL
+                  AND run.deleted_at IS NULL
+              ) = ${candidate.members.length}
+            ON CONFLICT (batch_id) DO NOTHING
+            RETURNING revision, data
+          `,
+        ],
+        { isolationLevel: "ReadCommitted" }
+      );
+      const rows = transactionResults[1] as BatchExecutionRow[];
       if (rows[0]) {
         return {
           created: true as const,

@@ -251,10 +251,21 @@ export function LibraryRow({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const protectedByBatch = useAppStore((state) =>
+    Object.values(state.batchExecutions).some((execution) => {
+      const member = execution.members.find(
+        (candidate) => candidate.runId === run.id
+      );
+      if (!member) return false;
+      if (member.state === "reconcile_required") return true;
+      return execution.status === "queued" || execution.status === "running";
+    })
+  );
   // A freshly uploaded clip deliberately has presentation status "running"
   // before any generation is approved. Only server-owned active work should
   // disable deletion; the route independently rejects stale-tab races.
   const stillRunning =
+    protectedByBatch ||
     run.serverExecution?.status === "queued" ||
     run.serverExecution?.status === "running" ||
     run.serverExecution?.status === "reconcile_required";

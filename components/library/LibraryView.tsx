@@ -3,8 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import type { ReactNode } from "react";
-import type { Run, RunStatus } from "@/lib/types";
+import type { BatchExecutionSummary, Run, RunStatus } from "@/lib/types";
 import { useAppStore } from "@/lib/store";
+import { useBatchExecution } from "@/lib/useBatchExecution";
 import { formatUsd } from "@/lib/cost";
 import { EmptyState } from "@/components/ui";
 import { LibraryRow } from "@/components/library/LibraryRow";
@@ -37,6 +38,30 @@ const SORTS: { key: SortKey; label: string }[] = [
   { key: "score", label: "highest score" },
   { key: "cost", label: "most expensive" },
 ];
+
+function mergeFetchedBatchExecutions(value: unknown): void {
+  if (!Array.isArray(value)) return;
+  useAppStore.setState((state) => {
+    const merged = { ...state.batchExecutions };
+    for (const incoming of value as BatchExecutionSummary[]) {
+      const current = merged[incoming.batchId];
+      if (
+        !current ||
+        (current.executionId === incoming.executionId &&
+          incoming.revision >= current.revision)
+      ) {
+        merged[incoming.batchId] = incoming;
+      }
+    }
+    return { batchExecutions: merged };
+  });
+}
+
+/** Keep one server poller per active Batch so Library actions never use stale work state. */
+function ActiveBatchWatcher({ batchId }: { batchId: string }) {
+  useBatchExecution(batchId);
+  return null;
+}
 
 function Chip({
   active,
@@ -93,6 +118,17 @@ export function LibraryView() {
   const passThreshold = useAppStore(
     (s) => s.workflow.config.compositePassThreshold
   );
+  const activeBatchKey = useAppStore((state) =>
+    Object.values(state.batchExecutions)
+      .filter(
+        (execution) =>
+          execution.status === "queued" || execution.status === "running"
+      )
+      .map((execution) => execution.batchId)
+      .sort()
+      .join("\n")
+  );
+  const activeBatchIds = activeBatchKey ? activeBatchKey.split("\n") : [];
 
   /** Freshness re-fetch: runs persisted by other tabs/sessions, merged below. */
   const [fetched, setFetched] = useState<Run[] | null>(null);
@@ -103,9 +139,10 @@ export function LibraryView() {
     void useAppStore.getState().hydrate();
     void fetch("/api/runs", { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: { runs?: unknown } | null) => {
+      .then((data: { runs?: unknown; batchExecutions?: unknown } | null) => {
         if (!cancelled && data && Array.isArray(data.runs)) {
           setFetched(data.runs as Run[]);
+          mergeFetchedBatchExecutions(data.batchExecutions);
         }
       })
       .catch(() => undefined);
@@ -202,6 +239,9 @@ export function LibraryView() {
 
   return (
     <main className="mx-auto max-w-5xl px-6 pb-16 pt-8">
+      {activeBatchIds.map((batchId) => (
+        <ActiveBatchWatcher key={batchId} batchId={batchId} />
+      ))}
       <header className="flex items-baseline gap-3 pb-5">
         <h1 className="text-base font-semibold text-ink">Library</h1>
         <p className="text-2xs text-faint">

@@ -1,4 +1,9 @@
-import type { PaidOperation, Run, RunExecution } from "../../types";
+import type {
+  BatchExecution,
+  PaidOperation,
+  Run,
+  RunExecution,
+} from "../../types";
 
 const ACTIVE_EXECUTION_STATUSES = new Set<RunExecution["status"]>([
   "queued",
@@ -39,4 +44,18 @@ export function hasDeletionBlockingRunWork(
         isActiveProviderStatus(operation.status)
       )
   );
+}
+
+export function hasDeletionBlockingBatchWork(
+  runId: string,
+  executions: BatchExecution[]
+): boolean {
+  return executions.some((execution) => {
+    const member = execution.members.find(
+      (candidate) => candidate.runId === runId
+    );
+    if (!member) return false;
+    if (member.state === "reconcile_required") return true;
+    return execution.status === "queued" || execution.status === "running";
+  });
 }

@@ -62,6 +62,7 @@ import {
 } from "./run-execution";
 import {
   ActiveRunDeletionError,
+  hasDeletionBlockingBatchWork,
   hasDeletionBlockingRunWork,
 } from "./run-deletion";
 import type { MediaRange, MediaStat, RunPageCursor, StorageDriver } from "./types";
@@ -530,47 +531,59 @@ export function createFsDriver(): StorageDriver {
     },
     async deleteRun(runId: string) {
       const id = assertRunId(runId);
-      return withPaidOperationLock(() =>
-        withRunLock(async () => {
-          const tombstones = await readRunTombstones();
-          const alreadyTombstoned = Object.prototype.hasOwnProperty.call(
-            tombstones,
-            id
-          );
-          const [run, execution, paidOperations] = await Promise.all([
-            readRun(id),
-            readRunExecution(id),
-            readPaidOperations(id),
-          ]);
-          if (
-            !alreadyTombstoned &&
-            hasDeletionBlockingRunWork(run, execution, paidOperations)
-          ) {
-            throw new ActiveRunDeletionError();
-          }
-          let runExists = false;
-          try {
-            await fsp.access(runDir(id));
-            runExists = true;
-          } catch {
-            runExists = false;
-          }
-          let executionExists = false;
-          try {
-            await fsp.access(runExecutionPath(id));
-            executionExists = true;
-          } catch {
-            executionExists = false;
-          }
-          if (!runExists && !executionExists) return false;
-          tombstones[id] = tombstones[id] ?? Date.now();
-          // Commit the non-reusable id before removing files. A delayed
-          // browser PUT therefore fails instead of recreating billing state.
-          await writeJsonAtomic(RUN_TOMBSTONES_PATH, tombstones);
-          const deletedRun = await deleteRunFiles(id);
-          await fsp.rm(runExecutionPath(id), { force: true });
-          return deletedRun || executionExists;
-        })
+      return withBatchLock(() =>
+        withPaidOperationLock(() =>
+          withRunLock(async () => {
+            const tombstones = await readRunTombstones();
+            const alreadyTombstoned = Object.prototype.hasOwnProperty.call(
+              tombstones,
+              id
+            );
+            const batches = await readBatches();
+            const [run, execution, paidOperations, batchExecutions] =
+              await Promise.all([
+                readRun(id),
+                readRunExecution(id),
+                readPaidOperations(id),
+                Promise.all(
+                  batches.map((batch) => readBatchExecution(batch.id))
+                ).then((items) =>
+                  items.filter(
+                    (item): item is BatchExecution => item !== null
+                  )
+                ),
+              ]);
+            if (
+              !alreadyTombstoned &&
+              (hasDeletionBlockingRunWork(run, execution, paidOperations) ||
+                hasDeletionBlockingBatchWork(id, batchExecutions))
+            ) {
+              throw new ActiveRunDeletionError();
+            }
+            let runExists = false;
+            try {
+              await fsp.access(runDir(id));
+              runExists = true;
+            } catch {
+              runExists = false;
+            }
+            let executionExists = false;
+            try {
+              await fsp.access(runExecutionPath(id));
+              executionExists = true;
+            } catch {
+              executionExists = false;
+            }
+            if (!runExists && !executionExists) return false;
+            tombstones[id] = tombstones[id] ?? Date.now();
+            // Commit the non-reusable id before removing files. A delayed
+            // browser PUT therefore fails instead of recreating billing state.
+            await writeJsonAtomic(RUN_TOMBSTONES_PATH, tombstones);
+            const deletedRun = await deleteRunFiles(id);
+            await fsp.rm(runExecutionPath(id), { force: true });
+            return deletedRun || executionExists;
+          })
+        )
       );
     },
     async listRuns() {
@@ -626,6 +639,19 @@ export function createFsDriver(): StorageDriver {
           !(await readBatches()).some(
             (batch) =>
               batch.id === candidate.batchId && batch.status === "ready"
+          )
+        ) {
+          return { created: false as const, execution: null };
+        }
+        const tombstones = await readRunTombstones();
+        const memberRuns = await Promise.all(
+          candidate.members.map((member) => readRun(member.runId))
+        );
+        if (
+          candidate.members.some(
+            (member, index) =>
+              !memberRuns[index] ||
+              Object.prototype.hasOwnProperty.call(tombstones, member.runId)
           )
         ) {
           return { created: false as const, execution: null };

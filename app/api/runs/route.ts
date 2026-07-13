@@ -1180,7 +1180,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
         {
           code: "RUN_ACTIVE",
           error:
-            "This run still has generation work in progress or awaiting reconciliation. Let it settle before deleting it.",
+            "This run still has generation or batch work in progress or awaiting reconciliation. Let it settle before deleting it.",
         },
         {
           status: 409,
