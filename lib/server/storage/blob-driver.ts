@@ -100,6 +100,7 @@ import {
   assertRunExecution,
   assertRunExecutionTransition,
 } from "./run-execution";
+import { ActiveRunDeletionError } from "./run-deletion";
 import { scratchMediaPath, scratchUploadsDir } from "./scratch";
 import type {
   DurableStorageVerification,
@@ -823,25 +824,39 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
     async createRunExecution(execution) {
       await ensureSchema();
       const candidate = assertNewRunExecution(execution);
-      const rows = (await sql`
-        INSERT INTO run_executions (
-          run_id, execution_id, revision, status, phase, updated_at, data
-        )
-        SELECT ${candidate.runId}, ${candidate.executionId},
-               ${candidate.revision}, ${candidate.status}, ${candidate.phase},
-               ${candidate.updatedAt}, ${JSON.stringify(candidate)}::jsonb
-        FROM runs
-        WHERE id = ${candidate.runId}
-          AND data IS NOT NULL
-          AND deleted_at IS NULL
-        ON CONFLICT (run_id) DO NOTHING
-        RETURNING revision, data
-      `) as RunExecutionRow[];
+      // Serialize execution creation with deletion on the canonical Run row.
+      // The second statement receives a fresh READ COMMITTED snapshot after
+      // SELECT FOR UPDATE wins, so it cannot insert from stale pre-tombstone
+      // state (or let deletion miss the new active execution).
+      const transactionResults = await sql.transaction(
+        (transactionSql) => [
+          transactionSql`
+            SELECT id FROM runs
+            WHERE id = ${candidate.runId}
+            FOR UPDATE
+          `,
+          transactionSql`
+            INSERT INTO run_executions (
+              run_id, execution_id, revision, status, phase, updated_at, data
+            )
+            SELECT ${candidate.runId}, ${candidate.executionId},
+                   ${candidate.revision}, ${candidate.status}, ${candidate.phase},
+                   ${candidate.updatedAt}, ${JSON.stringify(candidate)}::jsonb
+            FROM runs
+            WHERE id = ${candidate.runId}
+              AND data IS NOT NULL
+              AND deleted_at IS NULL
+            ON CONFLICT (run_id) DO NOTHING
+            RETURNING revision, data
+          `,
+        ],
+        { isolationLevel: "ReadCommitted" }
+      );
+      const rows = transactionResults[1] as RunExecutionRow[];
       if (rows[0]) {
-        // Close the only tombstone race left by stateless Neon HTTP calls: a
-        // delete may have committed and cleaned up after this INSERT took its
-        // snapshot. Re-read through the live-run join and remove an orphan if
-        // the canonical Run disappeared concurrently.
+        // Defense in depth for legacy/out-of-band tombstones. The row lock
+        // above serializes current application deletes, while this live-run
+        // re-read prevents returning an orphan created by older code.
         const durable = await this.getRunExecution(candidate.runId);
         if (!durable) {
           await sql`
@@ -1205,19 +1220,33 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
       if (!SHA256_RE.test(operation.inputHash)) {
         throw new Error("Paid operation inputHash must be a sha256 hex digest");
       }
-      const rows = (await sql`
-        INSERT INTO paid_operations (
-          run_id, operation_id, input_hash, status, data
-        )
-        SELECT ${id}, ${opId}, ${operation.inputHash}, ${operation.status},
-               ${JSON.stringify(operation)}::jsonb
-        FROM runs
-        WHERE id = ${id}
-          AND data IS NOT NULL
-          AND deleted_at IS NULL
-        ON CONFLICT (run_id, operation_id) DO NOTHING
-        RETURNING data
-      `) as Array<{ data: PaidOperation }>;
+      // Synchronous paid claims use a separate table, so they must take the
+      // same canonical-row lock as deleteRun before inserting. Otherwise a
+      // deletion snapshot could miss a just-created billed-operation claim.
+      const transactionResults = await sql.transaction(
+        (transactionSql) => [
+          transactionSql`
+            SELECT id FROM runs
+            WHERE id = ${id}
+            FOR UPDATE
+          `,
+          transactionSql`
+            INSERT INTO paid_operations (
+              run_id, operation_id, input_hash, status, data
+            )
+            SELECT ${id}, ${opId}, ${operation.inputHash}, ${operation.status},
+                   ${JSON.stringify(operation)}::jsonb
+            FROM runs
+            WHERE id = ${id}
+              AND data IS NOT NULL
+              AND deleted_at IS NULL
+            ON CONFLICT (run_id, operation_id) DO NOTHING
+            RETURNING data
+          `,
+        ],
+        { isolationLevel: "ReadCommitted" }
+      );
+      const rows = transactionResults[1] as Array<{ data: PaidOperation }>;
       if (rows[0]) {
         return {
           claimed: true as const,
@@ -1323,16 +1352,66 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
       // putRun/putMedia/upload completion all reject this id from this point.
       // Keep media intact until the provider confirms deletion so a retry never
       // loses the only private Blob handles.
-      const tombstoned = (await sql`
-        INSERT INTO runs (id, deleted_at)
-        VALUES (${id}, ${now})
-        ON CONFLICT (id) DO UPDATE SET
-          status = NULL,
-          label = NULL,
-          data = NULL,
-          deleted_at = COALESCE(runs.deleted_at, EXCLUDED.deleted_at)
-        RETURNING media
-      `) as Array<{ media: MediaMap | null }>;
+      const transactionResults = await sql.transaction(
+        (transactionSql) => [
+          transactionSql`
+            SELECT id FROM runs
+            WHERE id = ${id}
+            FOR UPDATE
+          `,
+          transactionSql`
+            INSERT INTO runs (id, deleted_at)
+            VALUES (${id}, ${now})
+            ON CONFLICT (id) DO UPDATE SET
+              status = NULL,
+              label = NULL,
+              data = NULL,
+              deleted_at = COALESCE(runs.deleted_at, EXCLUDED.deleted_at)
+            WHERE runs.deleted_at IS NOT NULL
+               OR (
+                 NOT EXISTS (
+                   SELECT 1
+                   FROM run_executions AS execution
+                   WHERE execution.run_id = runs.id
+                     AND execution.status IN (
+                       'queued', 'running', 'reconcile_required'
+                     )
+                 )
+                 AND CASE
+                   WHEN runs.data->'providerOperations' IS NULL THEN TRUE
+                   WHEN jsonb_typeof(
+                     runs.data->'providerOperations'
+                   ) = 'array' THEN NOT EXISTS (
+                     SELECT 1
+                     FROM jsonb_array_elements(
+                       runs.data->'providerOperations'
+                     ) AS operation
+                     WHERE operation->>'status' IN (
+                       'in_progress', 'reconcile_required'
+                     )
+                   )
+                   ELSE FALSE
+                 END
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM paid_operations AS operation
+                   WHERE operation.run_id = runs.id
+                     AND operation.status IN (
+                       'in_progress', 'reconcile_required'
+                     )
+                 )
+               )
+            RETURNING media
+          `,
+        ],
+        { isolationLevel: "ReadCommitted" }
+      );
+      const tombstoned = transactionResults[1] as Array<{
+        media: MediaMap | null;
+      }>;
+      if (!tombstoned[0]) {
+        throw new ActiveRunDeletionError();
+      }
       const media = tombstoned[0]?.media ?? {};
       const [uploadRowsRaw, cleanupRows] = await Promise.all([
         sql`

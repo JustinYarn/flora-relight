@@ -44,6 +44,7 @@ import {
   BlobDeletionIncompleteError,
   LegacyPublicMediaDeletionError,
 } from "@/lib/server/storage/blob-driver";
+import { ActiveRunDeletionError } from "@/lib/server/storage/run-deletion";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -1174,6 +1175,19 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     const existed = await getStorage().deleteRun(id);
     return NextResponse.json({ ok: true, id, existed });
   } catch (err) {
+    if (err instanceof ActiveRunDeletionError) {
+      return NextResponse.json(
+        {
+          code: "RUN_ACTIVE",
+          error:
+            "This run still has generation work in progress or awaiting reconciliation. Let it settle before deleting it.",
+        },
+        {
+          status: 409,
+          headers: { "Cache-Control": "private, no-store, max-age=0" },
+        }
+      );
+    }
     if (err instanceof LegacyPublicMediaDeletionError) {
       return NextResponse.json(
         {

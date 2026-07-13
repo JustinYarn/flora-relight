@@ -766,7 +766,14 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     }
     if (!res.ok) {
       restore();
-      throw new Error(`Delete failed (HTTP ${res.status}).`);
+      const body = (await res.json().catch(() => null)) as
+        | { error?: unknown }
+        | null;
+      throw new Error(
+        typeof body?.error === "string"
+          ? body.error
+          : `Delete failed (HTTP ${res.status}).`
+      );
     }
   },
 

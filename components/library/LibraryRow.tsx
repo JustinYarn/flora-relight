@@ -251,7 +251,13 @@ export function LibraryRow({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const stillRunning = run.status === "running";
+  // A freshly uploaded clip deliberately has presentation status "running"
+  // before any generation is approved. Only server-owned active work should
+  // disable deletion; the route independently rejects stale-tab races.
+  const stillRunning =
+    run.serverExecution?.status === "queued" ||
+    run.serverExecution?.status === "running" ||
+    run.serverExecution?.status === "reconcile_required";
 
   const confirmDelete = async () => {
     if (deleting) return;
@@ -260,8 +266,12 @@ export function LibraryRow({
     try {
       await removeRun(run.id);
       onDeleted?.();
-    } catch {
-      setDeleteError("Couldn't delete this run — the server said no. It's back in the list; try again.");
+    } catch (error) {
+      setDeleteError(
+        error instanceof Error
+          ? error.message
+          : "Couldn't delete this run — the server said no. It's back in the list; try again."
+      );
       setDeleting(false);
       setConfirmingDelete(false);
     }

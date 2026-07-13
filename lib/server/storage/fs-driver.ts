@@ -60,6 +60,10 @@ import {
   assertRunExecution,
   assertRunExecutionTransition,
 } from "./run-execution";
+import {
+  ActiveRunDeletionError,
+  hasDeletionBlockingRunWork,
+} from "./run-deletion";
 import type { MediaRange, MediaStat, RunPageCursor, StorageDriver } from "./types";
 
 const PAID_OPERATION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
@@ -528,6 +532,22 @@ export function createFsDriver(): StorageDriver {
       const id = assertRunId(runId);
       return withPaidOperationLock(() =>
         withRunLock(async () => {
+          const tombstones = await readRunTombstones();
+          const alreadyTombstoned = Object.prototype.hasOwnProperty.call(
+            tombstones,
+            id
+          );
+          const [run, execution, paidOperations] = await Promise.all([
+            readRun(id),
+            readRunExecution(id),
+            readPaidOperations(id),
+          ]);
+          if (
+            !alreadyTombstoned &&
+            hasDeletionBlockingRunWork(run, execution, paidOperations)
+          ) {
+            throw new ActiveRunDeletionError();
+          }
           let runExists = false;
           try {
             await fsp.access(runDir(id));
@@ -543,7 +563,6 @@ export function createFsDriver(): StorageDriver {
             executionExists = false;
           }
           if (!runExists && !executionExists) return false;
-          const tombstones = await readRunTombstones();
           tombstones[id] = tombstones[id] ?? Date.now();
           // Commit the non-reusable id before removing files. A delayed
           // browser PUT therefore fails instead of recreating billing state.

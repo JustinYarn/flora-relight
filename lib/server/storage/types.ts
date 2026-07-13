@@ -291,6 +291,8 @@ export interface StorageDriver {
 
   /**
    * Permanently delete a run: its JSON/state AND its whole media folder.
+   * Active or reconciliation-required provider work must be refused before
+   * tombstoning so its only durable billing/recovery journal remains intact.
    * Returns whether anything existed. Irreversible by design.
    */
   deleteRun(runId: string): Promise<boolean>;

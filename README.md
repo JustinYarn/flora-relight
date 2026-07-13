@@ -126,7 +126,9 @@ The hosted app now has several independent persistence boundaries:
   membership, exact prompts, spend approval, provider operations, and final human grades are
   protected by atomic server updates. A stale browser snapshot cannot move a live execution
   backwards, alter its budget, or erase it. A deleted run id is permanently tombstoned, so an
-  already-open tab cannot resurrect it or reset its billing history.
+  already-open tab cannot resurrect it or reset its billing history. Normal deletion is
+  refused while an execution or provider journal is active or needs reconciliation; a
+  prepared upload with no paid work remains deletable.
 - **Blind grading:** `/grade` restores and autosaves a revisioned grading draft through
   `/api/grade-drafts`. Compare-and-swap revisions prevent an older tab from silently
   overwriting a newer draft. Final submission also uses compare-and-swap, so a stale grader
