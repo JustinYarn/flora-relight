@@ -60,9 +60,9 @@ export const PRICE_TABLE = {
     unitLabel: "output second",
     verified: true,
   },
-  /** VERIFIED 2026-07-11 — gemini-3.1-flash-image edit at 1K output. */
+  /** VERIFIED 2026-07-13 — gemini-3-pro-image (Nano Banana Pro) edit, premium tier. */
   geminiImageEditPerImage: {
-    usd: 0.07,
+    usd: 0.13,
     provider: "gemini",
     unitLabel: "image",
     verified: true,
@@ -81,9 +81,9 @@ export const PRICE_TABLE = {
     unitLabel: "call",
     verified: true,
   },
-  /** VERIFIED 2026-07-11 — claude-opus-4-8 frame-grid judge call (flat per-call figure). */
+  /** VERIFIED 2026-07-13 — claude-fable-5 frame-grid judge call ($10/$50 per MTok, ~2x Opus; incl. always-on thinking). */
   claudeJudgePerCall: {
-    usd: 0.04,
+    usd: 0.12,
     provider: "claude",
     unitLabel: "call",
     verified: true,

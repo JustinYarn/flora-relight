@@ -25,7 +25,12 @@ import {
   uploadVideoCached,
   withRetry,
 } from "@/lib/server/gemini";
-import { CLAUDE_JUDGE_MODEL, getAnthropic } from "@/lib/server/anthropic";
+import {
+  CLAUDE_FALLBACK_BETA,
+  CLAUDE_FALLBACK_MODEL,
+  CLAUDE_JUDGE_MODEL,
+  getAnthropic,
+} from "@/lib/server/anthropic";
 import { getEvalDef } from "@/lib/prompts/eval-defs";
 import { PRICE_TABLE } from "@/lib/cost";
 import { clamp, verdictFor } from "@/lib/util";
@@ -268,9 +273,14 @@ async function judgeWithClaude(
   content.push({ type: "text", text: fillRubric(rubric, "frames") });
 
   const anthropic = getAnthropic();
-  const msg = await anthropic.messages.create({
+  // Fable 5: thinking is always on and counts toward max_tokens (headroom
+  // raised accordingly); a policy refusal is re-served by Opus 4.8 in the
+  // same call via the server-side fallback.
+  const msg = await anthropic.beta.messages.create({
     model: CLAUDE_JUDGE_MODEL,
-    max_tokens: 2048,
+    max_tokens: 8000,
+    betas: [CLAUDE_FALLBACK_BETA],
+    fallbacks: [{ model: CLAUDE_FALLBACK_MODEL }],
     output_config: {
       format: {
         type: "json_schema",
@@ -280,10 +290,13 @@ async function judgeWithClaude(
     messages: [{ role: "user", content }],
   });
 
-  const textBlock = msg.content.find(
-    (b): b is Anthropic.Messages.TextBlock => b.type === "text"
-  );
-  if (!textBlock) throw new Error("Claude judge returned no text content.");
+  if (msg.stop_reason === "refusal") {
+    throw new Error("Claude judge declined this content (refusal, fallback included).");
+  }
+  const textBlock = msg.content.find((b) => b.type === "text");
+  if (!textBlock || textBlock.type !== "text") {
+    throw new Error("Claude judge returned no text content.");
+  }
   return coerceVerdict("claude", evalId, JSON.parse(textBlock.text));
 }
 

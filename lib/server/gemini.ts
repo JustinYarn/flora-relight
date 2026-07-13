@@ -24,7 +24,8 @@ import {
 import { getStorage, scratchMediaPath } from "@/lib/server/storage";
 
 // Model ids proven by the live smoke test — do not improvise alternatives.
-export const GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image";
+// Nano Banana Pro — premium image editing tier for the Look Anchor.
+export const GEMINI_IMAGE_MODEL = "gemini-3-pro-image";
 export const GEMINI_PRO_MODEL = "gemini-3.1-pro-preview";
 export const OMNI_VIDEO_MODEL = "gemini-omni-flash-preview";
 
