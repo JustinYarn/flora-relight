@@ -6,6 +6,8 @@
  * client JS, no new deps. Local dev without the env var never sees this page.
  */
 
+import { safeGateRedirect } from "@/lib/server/gate";
+
 export const dynamic = "force-dynamic";
 
 interface GateSearchParams {
@@ -13,17 +15,14 @@ interface GateSearchParams {
   error?: string;
 }
 
-export default function GatePage({
+export default async function GatePage({
   searchParams,
 }: {
-  searchParams?: GateSearchParams;
+  searchParams?: Promise<GateSearchParams>;
 }) {
-  const rawFrom = searchParams?.from;
-  const from =
-    typeof rawFrom === "string" && rawFrom.startsWith("/") && !rawFrom.startsWith("//")
-      ? rawFrom
-      : "/";
-  const failed = searchParams?.error === "1";
+  const resolvedSearchParams = await searchParams;
+  const from = safeGateRedirect(resolvedSearchParams?.from);
+  const failed = resolvedSearchParams?.error === "1";
 
   return (
     <div className="flex min-h-[70vh] items-center justify-center px-4">

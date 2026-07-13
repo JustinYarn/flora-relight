@@ -3,14 +3,13 @@
  *
  * Standing rule: the team lead is never surprised by spend. Every action in
  * the app shows its estimated live cost BEFORE it runs, every run keeps a
- * cost ledger (Run.cost, driven by lib/engine.ts), and batches can carry a
- * hard budget cap (Batch.budgetUsd, enforced by the lib/store.ts worker queue).
+ * cost ledger, and live batches carry a hard server-owned integer budget cap.
  *
  * MOCK MODE: nothing costs money — every figure this module produces is an
  * "est. live cost": what the run/batch WOULD cost against the real APIs.
- * When live adapters land, actuals accrue through the same Run.cost ledger
- * and this table becomes the rate card. Never render a number from this
- * module without an est/actual label.
+ * Live actuals accrue from server provider journals; mock estimates use the
+ * browser ledger. Never render a number from this module without an
+ * est/actual label.
  *
  * Estimators are driven by the ACTUAL registry/config (EVAL_DEFS,
  * RELIGHT_WORKFLOW.config) — never hardcoded counts — so adding an eval or a
@@ -20,6 +19,9 @@
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
 import type { JudgeId, VideoAsset } from "@/lib/types";
+
+/** Provider-supported output window reserved by generation-only approvals. */
+export const FIRST_CUT_MAX_OUTPUT_SECONDS = 10;
 
 // ---------------------------------------------------------------------------
 // Cost item (lives here, not in lib/types.ts, to keep the core contract stable)
@@ -181,6 +183,29 @@ export function estimateIteration(durationSec: number): CostEstimate {
       provider: "local",
       units: deterministicEvalCount(),
       unitLabel: "checks",
+      usd: 0,
+    },
+  ]);
+}
+
+/**
+ * Durable production milestone: one generated cut plus local audio remux,
+ * with no manifest, anchor, paid judges, or automatic correction attempts.
+ */
+export function estimateFirstCut(durationSec: number): CostEstimate {
+  return total([
+    {
+      label: `First-cut video generation (${durationSec.toFixed(1)}s)`,
+      provider: PRICE_TABLE.omniFlashPerOutputSecond.provider,
+      units: durationSec,
+      unitLabel: PRICE_TABLE.omniFlashPerOutputSecond.unitLabel,
+      usd: durationSec * PRICE_TABLE.omniFlashPerOutputSecond.usd,
+    },
+    {
+      label: "Original-audio remux and verification",
+      provider: "local",
+      units: 1,
+      unitLabel: "cut",
       usd: 0,
     },
   ]);

@@ -12,10 +12,12 @@
  *      - each changed run → debounced PUT /api/runs (800ms per run id,
  *        leading-edge scheduled so a long engine run can't starve the flush);
  *      - the batch list → debounced whole-array PUT /api/batches.
- *      Runs are pushed verbatim — frame dataUrls included (~2MB/run is
- *      acceptable; the server file is the artifact of record).
- *   3. Retries failed PUTs with exponential backoff (max 5 attempts, then
- *      parks as "error" until that run mutates again).
+ *      Embedded frame pixels are omitted from sync payloads; the archived
+ *      videos remain the artifact of record and list/detail payloads stay
+ *      below serverless request limits across multiple iterations.
+ *   3. Retries failed hydration and PUTs with capped exponential backoff.
+ *      Errors remain visible, but working memory never silently switches off
+ *      after a temporary hosted-network failure.
  *
  * Mock-only environments (no /api routes): hydrate() resolves false and the
  * whole module goes inert — no subscription, no network chatter, behavior
@@ -30,9 +32,10 @@ import type { Batch, Run } from "@/lib/types";
 export type PersistStatus = "off" | "saving" | "saved" | "error";
 
 const DEBOUNCE_MS = 800;
-const MAX_RETRIES = 5;
+const MAX_BACKOFF_EXPONENT = 6;
 /** Sentinel key for the batches array in the error set. */
 const BATCHES_KEY = "batches";
+const CONNECTION_KEY = "connection";
 
 type AppStoreApi = typeof useAppStore;
 
@@ -53,7 +56,24 @@ let lastPushedBatches: Batch[] | null = null;
 const retries = new Map<string, number>();
 /** Keys whose most recent PUT failed (drives the "error" status). */
 const errored = new Set<string>();
+/** Keys with an active network write; each key is strictly serialized. */
+const flushing = new Set<string>();
+/** A fresher mutation arrived while this key was in flight. */
+const flushAgain = new Set<string>();
 let inFlight = 0;
+
+/**
+ * A server poll is already a persisted checkpoint. Mark the exact object
+ * reference before putting it in Zustand so the push subscriber does not
+ * echo that read model back through a browser-writable API.
+ */
+export function markServerRunObserved(run: Run): void {
+  lastPushedRun.set(run.id, run);
+}
+
+export function markServerBatchesObserved(batches: Batch[]): void {
+  lastPushedBatches = batches;
+}
 
 // ---------------------------------------------------------------------------
 // Status: tiny external store for the top-bar indicator dot
@@ -108,56 +128,109 @@ async function put(url: string, body: unknown): Promise<boolean> {
   }
 }
 
-/** On failure: exponential backoff (1.6s, 3.2s, … capped attempts). */
+/**
+ * Base64 frame grids grow linearly with attempts and can breach Vercel's
+ * 4.5MB body cap before /api/runs executes. They are transient judge inputs,
+ * not the media artifact of record, so persist timestamps + served media URLs
+ * and keep the pixels only in the active tab.
+ */
+function runForPersistence(run: Run): Run {
+  return {
+    ...run,
+    // Signals the server to preserve any pixels archived by an older version.
+    _compact: true,
+    iterations: run.iterations.map((iteration) => ({
+      ...iteration,
+      relitKeyframeDataUrl: iteration.relitKeyframeDataUrl?.startsWith("data:")
+        ? undefined
+        : iteration.relitKeyframeDataUrl,
+      beforeFrames: iteration.beforeFrames.map((frame) => ({
+        timestampSec: frame.timestampSec,
+      })),
+      afterFrames: iteration.afterFrames.map((frame) => ({
+        timestampSec: frame.timestampSec,
+      })),
+    })),
+  };
+}
+
+/** On failure: retry forever with capped exponential backoff (max ~51s). */
 function handleFailure(key: string, retry: () => void): void {
   const attempt = (retries.get(key) ?? 0) + 1;
   retries.set(key, attempt);
   errored.add(key);
-  if (attempt <= MAX_RETRIES && !timers.has(key)) {
+  if (!timers.has(key)) {
     timers.set(
       key,
       setTimeout(() => {
         timers.delete(key);
         retry();
-      }, DEBOUNCE_MS * 2 ** attempt)
+      }, DEBOUNCE_MS * 2 ** Math.min(attempt, MAX_BACKOFF_EXPONENT))
     );
   }
-  // Past MAX_RETRIES: give up until the object mutates again.
 }
 
 function flushRun(store: AppStoreApi, runId: string): void {
+  if (flushing.has(runId)) {
+    flushAgain.add(runId);
+    refreshStatus();
+    return;
+  }
   const run = store.getState().runs.find((r) => r.id === runId);
   if (!run) {
     refreshStatus();
     return;
   }
+  flushing.add(runId);
   inFlight += 1;
   refreshStatus();
-  void put("/api/runs", { run }).then((ok) => {
+  void put("/api/runs", { run: runForPersistence(run) }).then((ok) => {
     inFlight -= 1;
+    flushing.delete(runId);
     if (ok) {
       lastPushedRun.set(runId, run);
       retries.delete(runId);
       errored.delete(runId);
+    } else if (!store.getState().runs.some((item) => item.id === runId)) {
+      // A delete may win while an older save is in flight. The server's
+      // tombstone correctly rejects that save; do not retry a run the user
+      // intentionally removed or leave the global memory indicator red.
+      lastPushedRun.delete(runId);
+      retries.delete(runId);
+      errored.delete(runId);
+      flushAgain.delete(runId);
     } else {
       handleFailure(runId, () => flushRun(store, runId));
+    }
+    if (flushAgain.delete(runId)) {
+      schedule(runId, () => flushRun(store, runId));
     }
     refreshStatus();
   });
 }
 
 function flushBatches(store: AppStoreApi): void {
+  if (flushing.has(BATCHES_KEY)) {
+    flushAgain.add(BATCHES_KEY);
+    refreshStatus();
+    return;
+  }
   const batches = store.getState().batches;
+  flushing.add(BATCHES_KEY);
   inFlight += 1;
   refreshStatus();
   void put("/api/batches", { batches }).then((ok) => {
     inFlight -= 1;
+    flushing.delete(BATCHES_KEY);
     if (ok) {
       lastPushedBatches = batches;
       retries.delete(BATCHES_KEY);
       errored.delete(BATCHES_KEY);
     } else {
       handleFailure(BATCHES_KEY, () => flushBatches(store));
+    }
+    if (flushAgain.delete(BATCHES_KEY)) {
+      schedule(BATCHES_KEY, () => flushBatches(store));
     }
     refreshStatus();
   });
@@ -194,6 +267,21 @@ function onStoreChange(store: AppStoreApi): void {
   }
 }
 
+/** Flush debounced/backoff work as soon as the tab is backgrounded. */
+function flushPendingNow(store: AppStoreApi): void {
+  for (const [key, timer] of timers) {
+    if (key === CONNECTION_KEY) continue;
+    clearTimeout(timer);
+    timers.delete(key);
+  }
+  const state = store.getState();
+  for (const run of state.runs) {
+    if (lastPushedRun.get(run.id) !== run) flushRun(store, run.id);
+  }
+  if (lastPushedBatches !== state.batches) flushBatches(store);
+  refreshStatus();
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -206,20 +294,41 @@ export function startPersistence(store: AppStoreApi = useAppStore): void {
   if (typeof window === "undefined") return; // browser only
   if (started) return;
   started = true;
-  void (async () => {
-    const ok = await store.getState().hydrate();
-    available = ok;
-    if (!ok) {
-      // Mock-only environment: no persistence API. Stay inert.
+  let subscribed = false;
+  const connect = async (): Promise<void> => {
+    try {
+      const ok = await store.getState().hydrate();
+      available = ok;
+      retries.delete(CONNECTION_KEY);
+      errored.delete(CONNECTION_KEY);
+      if (!ok) {
+        // Static/mock-only environment: no persistence API. Stay inert.
+        refreshStatus();
+        return;
+      }
+      if (!subscribed) {
+        subscribed = true;
+        // Prime the "already pushed" refs from the hydrated state so we never
+        // echo the server's own data straight back at it.
+        const state = store.getState();
+        for (const run of state.runs) lastPushedRun.set(run.id, run);
+        lastPushedBatches = state.batches;
+        store.subscribe(() => onStoreChange(store));
+        const flushWhenHidden = (): void => {
+          if (document.visibilityState === "hidden") flushPendingNow(store);
+        };
+        document.addEventListener("visibilitychange", flushWhenHidden);
+        window.addEventListener("pagehide", () => flushPendingNow(store));
+      }
       refreshStatus();
-      return;
+    } catch {
+      // Hosted APIs can be briefly unavailable during deploys or network
+      // transitions. Keep retrying and make the failed durability boundary
+      // visible instead of treating it like a no-API mock environment.
+      available = true;
+      handleFailure(CONNECTION_KEY, () => void connect());
+      refreshStatus();
     }
-    // Prime the "already pushed" refs from the hydrated state so we never
-    // echo the server's own data straight back at it.
-    const state = store.getState();
-    for (const run of state.runs) lastPushedRun.set(run.id, run);
-    lastPushedBatches = state.batches;
-    store.subscribe(() => onStoreChange(store));
-    refreshStatus();
-  })();
+  };
+  void connect();
 }

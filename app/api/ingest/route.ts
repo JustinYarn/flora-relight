@@ -29,10 +29,11 @@ import {
   IngestError,
   MAX_UPLOAD_BYTES,
   VIDEO_EXT_RE,
+  persistPreparedRun,
   runIngestPipeline,
   videoExtFor,
 } from "@/lib/server/ingest";
-import { newRunId } from "@/lib/server/runstore";
+import { isValidRunId, newRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
 
 export const runtime = "nodejs";
@@ -70,15 +71,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (file.size > MAX_UPLOAD_BYTES) {
     return jsonError(
       413,
-      `File is ${(file.size / (1024 * 1024)).toFixed(1)}MB — the limit is 500MB.`
+      `File is ${(file.size / (1024 * 1024)).toFixed(1)}MB — the limit is ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB.`
     );
   }
   if (file.size === 0) {
     return jsonError(400, "Uploaded file is empty.");
   }
 
+  const requestedRunId = form.get("runId");
+  if (requestedRunId !== null && !isValidRunId(requestedRunId)) {
+    return jsonError(400, "`runId` must match [a-z0-9_-] (1-64 chars).");
+  }
+
   const storage = getStorage();
-  const runId = newRunId();
+  if (storage.name !== "fs") {
+    return jsonError(
+      501,
+      "Multipart ingest is local-only. Hosted uploads must use the Blob token + finalize flow."
+    );
+  }
+  const runId = requestedRunId ?? newRunId();
+  if (await storage.mediaExists(runId, "source.mp4")) {
+    return jsonError(409, "That run id already has an ingested source.");
+  }
   // Sanitized staging name: keep only the (validated) extension.
   const ext = videoExtFor(originalName);
   const tmpPath = path.join(await storage.stagingDir(), `${runId}${ext}`);
@@ -89,6 +104,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     await pipeline(Readable.fromWeb(webStream), createWriteStream(tmpPath));
 
     const result = await runIngestPipeline(runId, tmpPath, ext);
+    await persistPreparedRun(result, originalName);
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof IngestError) return jsonError(err.status, err.message);

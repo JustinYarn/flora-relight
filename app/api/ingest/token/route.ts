@@ -6,7 +6,7 @@
  * deployments the browser uploads the video DIRECTLY to Vercel Blob:
  * `upload()` from @vercel/blob/client POSTs here, `handleUpload()` mints a
  * short-lived client token scoped to what onBeforeGenerateToken returns
- * (video/* only, 500MB cap, uploads/ prefix with a random suffix), the
+ * (private store, video/* only, 150MB cap, deterministic run-owned path), the
  * browser streams the file to the store, then calls /api/ingest/finalize.
  *
  * AUTH — the token grants WRITE access to the blob store, so this route
@@ -21,15 +21,26 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
-import { verifyGateCookie } from "@/lib/server/gate";
-import { MAX_UPLOAD_BYTES } from "@/lib/server/ingest";
+import {
+  hostedGateConfigurationIssue,
+  verifyGateCookie,
+} from "@/lib/server/gate";
+import {
+  MAX_UPLOAD_BYTES,
+  VIDEO_EXT_RE,
+  videoExtFor,
+} from "@/lib/server/ingest";
+import { isValidRunId } from "@/lib/server/runstore";
+import { checkSameOriginRequest } from "@/lib/server/request-security";
 import { getStorage } from "@/lib/server/storage";
+import type { IngestUploadReservation } from "@/lib/server/storage/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  if (getStorage().name !== "blob") {
+  const storage = getStorage();
+  if (storage.name !== "blob") {
     return NextResponse.json(
       {
         error:
@@ -39,45 +50,175 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  if (!(await verifyGateCookie(req))) {
-    return NextResponse.json(
-      { error: "Access gate: authentication required." },
-      { status: 401 }
-    );
-  }
-
-  let body: HandleUploadBody;
+  let parsedBody: unknown;
   try {
-    body = (await req.json()) as HandleUploadBody;
+    parsedBody = await req.json();
   } catch {
     return NextResponse.json({ error: "Expected a JSON body." }, { status: 400 });
+  }
+  if (
+    !parsedBody ||
+    typeof parsedBody !== "object" ||
+    !("type" in parsedBody) ||
+    typeof parsedBody.type !== "string"
+  ) {
+    return NextResponse.json({ error: "Invalid upload event." }, { status: 400 });
+  }
+  const body = parsedBody as HandleUploadBody;
+
+  const isSignedCompletion = body.type === "blob.upload-completed";
+  if (!isSignedCompletion) {
+    if (hostedGateConfigurationIssue(process.env.FLORA_ACCESS_PASSWORD)) {
+      return NextResponse.json(
+        { error: "Production access protection is not configured securely." },
+        { status: 503 }
+      );
+    }
+    const sameOrigin = checkSameOriginRequest(req);
+    if (!sameOrigin.ok) {
+      return NextResponse.json(
+        { error: "Cross-origin request rejected." },
+        { status: 403 }
+      );
+    }
+    if (!(await verifyGateCookie(req))) {
+      return NextResponse.json(
+        { error: "Access gate: authentication required." },
+        { status: 401 }
+      );
+    }
   }
 
   try {
     const jsonResponse = await handleUpload({
       body,
       request: req,
-      onBeforeGenerateToken: async (pathname) => {
-        // The client controls the requested pathname — pin raw uploads to
-        // their own prefix so a token can never target runs/ media keys.
-        if (!pathname.startsWith("uploads/")) {
-          throw new Error("Uploads must use the uploads/ pathname prefix.");
+      onBeforeGenerateToken: async (pathname, clientPayload, multipart) => {
+        if (!storage.reserveIngestUpload) {
+          throw new Error("Durable upload reservations are unavailable.");
+        }
+        let payload: { runId?: unknown; fileName?: unknown };
+        try {
+          payload = JSON.parse(clientPayload ?? "") as {
+            runId?: unknown;
+            fileName?: unknown;
+          };
+        } catch {
+          throw new Error("Upload ownership metadata is missing or invalid.");
+        }
+        if (!isValidRunId(payload.runId)) {
+          throw new Error("Upload runId is invalid.");
+        }
+        if (
+          typeof payload.fileName !== "string" ||
+          payload.fileName.length < 1 ||
+          payload.fileName.length > 255 ||
+          !VIDEO_EXT_RE.test(payload.fileName)
+        ) {
+          throw new Error("Upload fileName must identify a supported video file.");
+        }
+        if (!multipart) {
+          throw new Error("Hosted video uploads must use multipart transfer.");
+        }
+        const expectedPath = `uploads/${payload.runId}/raw${videoExtFor(payload.fileName)}`;
+        if (pathname !== expectedPath) {
+          throw new Error("Upload pathname does not match its reserved run id.");
+        }
+        if (
+          (await storage.getRun(payload.runId)) ||
+          (await storage.mediaExists(payload.runId, "source.mp4"))
+        ) {
+          throw new Error("That run id already belongs to an ingested workflow.");
+        }
+
+        const candidate: IngestUploadReservation = {
+          schema: "flora.ingest-upload.v1",
+          runId: payload.runId,
+          pathname,
+          fileName: payload.fileName,
+          access: "private",
+          createdAt: Date.now(),
+        };
+        const reserved = await storage.reserveIngestUpload(candidate);
+        const durable = reserved.reservation;
+        if (
+          !durable ||
+          durable.runId !== candidate.runId ||
+          durable.pathname !== candidate.pathname ||
+          durable.fileName !== candidate.fileName ||
+          durable.access !== "private"
+        ) {
+          throw new Error("That run id is reserved for a different upload.");
         }
         return {
           allowedContentTypes: ["video/*"],
           maximumSizeInBytes: MAX_UPLOAD_BYTES,
-          addRandomSuffix: true,
+          addRandomSuffix: false,
+          allowOverwrite: false,
+          cacheControlMaxAge: 60,
+          validUntil: Date.now() + 60 * 60 * 1000,
+          tokenPayload: JSON.stringify({
+            runId: durable.runId,
+            pathname: durable.pathname,
+          }),
         };
       },
-      // No onUploadCompleted: the client drives POST /api/ingest/finalize
-      // itself (the store's completion webhook can't reach localhost and
-      // would add nothing here — finalize deletes the raw blob either way).
+      onUploadCompleted: async ({ blob, tokenPayload }) => {
+        if (!storage.completeIngestUpload || !storage.getIngestUpload) {
+          throw new Error("Durable upload completion storage is unavailable.");
+        }
+        let owner: { runId?: unknown; pathname?: unknown };
+        try {
+          owner = JSON.parse(tokenPayload ?? "") as {
+            runId?: unknown;
+            pathname?: unknown;
+          };
+        } catch {
+          throw new Error("Upload completion ownership metadata is invalid.");
+        }
+        if (
+          !isValidRunId(owner.runId) ||
+          typeof owner.pathname !== "string" ||
+          blob.pathname !== owner.pathname
+        ) {
+          throw new Error("Upload completion does not match its reserved owner.");
+        }
+        let blobHost: string;
+        try {
+          blobHost = new URL(blob.url).hostname;
+        } catch {
+          throw new Error("Upload completion URL is invalid.");
+        }
+        if (!blobHost.endsWith(".private.blob.vercel-storage.com")) {
+          throw new Error("Upload completion did not use private Blob access.");
+        }
+        const completed = await storage.completeIngestUpload(
+          owner.runId,
+          owner.pathname,
+          {
+            pathname: owner.pathname,
+            contentType: blob.contentType,
+            etag: blob.etag,
+            completedAt: Date.now(),
+          }
+        );
+        if (!completed) {
+          throw new Error("Upload completion could not be bound to its reservation.");
+        }
+      },
     });
     return NextResponse.json(jsonResponse);
   } catch (err) {
     // handleUpload throws for unknown event types, bad tokens, and our
     // onBeforeGenerateToken rejections — all client-fixable.
-    const message = err instanceof Error ? err.message : "Token generation failed.";
-    return NextResponse.json({ error: message }, { status: 400 });
+    console.error("[ingest/token] Blob upload authorization failed:", err);
+    return NextResponse.json(
+      {
+        error: isSignedCompletion
+          ? "Upload completion callback was rejected."
+          : "Upload authorization failed.",
+      },
+      { status: 400 }
+    );
   }
 }

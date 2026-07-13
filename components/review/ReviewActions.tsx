@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import type { Run } from "@/lib/types";
 import { Badge, Button } from "@/components/ui";
 import { formatClock } from "@/lib/util";
@@ -17,6 +18,36 @@ export function ReviewActions({
   onSubmit: (decision: "approved" | "needs-changes", notes: string) => void;
 }) {
   const [notes, setNotes] = useState("");
+
+  if (run.serverExecution && run.humanGrade) {
+    return (
+      <p className="flex flex-wrap items-center justify-end gap-2 py-4 text-sm text-muted">
+        <span className="text-2xs uppercase tracking-wider text-faint">
+          Human grade saved
+        </span>
+        <Badge color="var(--pass)">complete</Badge>
+        <span className="text-2xs text-faint">
+          at {formatClock(run.humanGrade.gradedAt)}
+        </span>
+      </p>
+    );
+  }
+
+  if (run.serverExecution && run.status === "awaiting-review") {
+    return (
+      <div className="flex flex-wrap items-center justify-end gap-3 py-4">
+        <span className="text-2xs text-faint">
+          Automated quality checks were not run on this first cut.
+        </span>
+        <Link
+          href="/grade"
+          className="inline-flex min-h-10 items-center rounded-lg bg-pass px-3.5 py-1.5 text-sm font-medium text-canvas transition-transform active:scale-[0.96]"
+        >
+          Grade in workspace
+        </Link>
+      </div>
+    );
+  }
 
   if (run.review) {
     return (

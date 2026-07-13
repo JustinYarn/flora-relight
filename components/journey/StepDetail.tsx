@@ -211,7 +211,9 @@ function AttemptDetail({
       ? "passed every check that matters"
       : iteration.status === "failed"
         ? "didn't pass — the problems found were written into the next brief"
-        : "generating and checking…";
+        : iteration.status === "ungraded"
+          ? "generated successfully — automated checks were not run; awaiting your grade"
+          : "generating and checking…";
 
   return (
     <DetailShell title={`Attempt v${iteration.index}`} hint={hint}>

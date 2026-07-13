@@ -66,6 +66,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
   const shipRate = shipRatePct(gradedRuns);
   const aiPassRate = aiPassRatePct(gradedRuns);
   const disagreements = useMemo(() => biggestDisagreements(comps), [comps]);
+  const hasComparisons = comps.length > 0;
 
   return (
     <div>
@@ -85,10 +86,18 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         />
         <Stat
           value={pct(aiPassRate)}
-          label="AI pass rate"
-          title="clips whose shipped attempt passed the AI gates (composite)"
+          label="automated pass rate"
+          title="among clips that actually ran automated gates, the share whose shipped attempt passed"
         />
       </div>
+
+      {!hasComparisons ? (
+        <p className="border-b border-edge py-4 text-sm text-muted">
+          These production first cuts went directly to human grading. Your
+          responses are saved, but there are no automated verdicts to compare
+          with them.
+        </p>
+      ) : null}
 
       {divergence ? (
         <p className="border-b border-edge py-4 text-sm text-ink">
@@ -131,8 +140,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
                     {def.name}
                   </span>
                   <span className="flex-1 text-2xs text-faint">
-                    no data yet — the AI never scored this check on a graded
-                    clip
+                    no data yet — this automated check was not run on a graded clip
                   </span>
                 </div>
               );
@@ -175,8 +183,9 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         <SectionTitle>Biggest disagreements</SectionTitle>
         {disagreements.length === 0 ? (
           <p className="py-4 text-sm text-muted">
-            None yet — on every compared check, you and the AI landed on the
-            same verdict.
+            {hasComparisons
+              ? "None yet — every available automated verdict matches your human verdict."
+              : "No comparison is available because automated quality checks were not run."}
           </p>
         ) : (
           <div className="divide-y divide-edge border-b border-edge">
@@ -227,10 +236,12 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
             })}
           </div>
         )}
-        <p className="pt-4 text-2xs text-faint">
-          Use these to refine the judge rubrics (Rubrics tab) or the generation
-          brief — start with the high-confidence disagreements.
-        </p>
+        {hasComparisons ? (
+          <p className="pt-4 text-2xs text-faint">
+            Use these to refine the judge rubrics (Rubrics tab) or the generation
+            brief — start with the high-confidence disagreements.
+          </p>
+        ) : null}
       </section>
     </div>
   );

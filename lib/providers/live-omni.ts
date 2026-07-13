@@ -1,10 +1,12 @@
 /**
  * Live Omni Flash video-generation adapter — thin fetch() client of
- * POST /api/live/videogen.
+ * POST /api/live/videogen/start + /poll.
  *
  * CLIENT-SAFE: no SDK imports, no keys. The route does the heavy lifting
- * (upload, generation, download, audio remux + verification); a call blocks
- * 1-7 minutes, so the timeout is a generous 8 minutes.
+ * (upload, background generation, download, audio remux + verification).
+ * Starting returns a durable Workflow id promptly. Workflow owns provider
+ * polling/finalization even after the browser closes; this client only watches
+ * status so the in-tab engine can continue into judging when the result lands.
  *
  * Structural guarantee preserved from the mocks: the request carries no
  * audio, and the returned asset's audio is the ORIGINAL stream remuxed
@@ -21,15 +23,30 @@ import type {
 } from "@/lib/types";
 import { postJson, type LiveRunContext } from "./live-gemini";
 
-const VIDEOGEN_TIMEOUT_MS = 8 * 60_000;
+const START_TIMEOUT_MS = 4 * 60_000;
+const POLL_TIMEOUT_MS = 5 * 60_000;
+const POLL_INTERVAL_MS = 8_000;
+
+interface StartResponse {
+  workflowRunId: string;
+  status: string;
+  startedAt: number;
+}
 
 interface VideogenResponse {
+  done: true;
+  status: "completed";
   videoUrl: string;
   rawUrl: string;
   interactionId: string;
   durationSec: number;
   audioVerified: boolean;
   costUsd: number;
+}
+
+interface PendingResponse {
+  done: false;
+  status: string;
 }
 
 export class LiveOmniProvider implements VideoGenProvider {
@@ -39,17 +56,32 @@ export class LiveOmniProvider implements VideoGenProvider {
 
   async generate(req: VideoGenRequest): Promise<VideoGenResult> {
     const started = Date.now();
-    const res = await postJson<VideogenResponse>(
-      "/api/live/videogen",
+    const start = await postJson<StartResponse>(
+      "/api/live/videogen/start",
       {
         runId: this.ctx.runId,
         iteration: req.iteration,
         prompt: renderMegaPrompt(req.megaPrompt),
-        sourceUrl: req.originalVideo.url,
-        previousInteractionId: this.ctx.videoInteractionId,
       },
-      VIDEOGEN_TIMEOUT_MS
+      START_TIMEOUT_MS
     );
+    let res: VideogenResponse;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      const polled = await postJson<VideogenResponse | PendingResponse>(
+        "/api/live/videogen/poll",
+        {
+          runId: this.ctx.runId,
+          iteration: req.iteration,
+          workflowRunId: start.workflowRunId,
+        },
+        POLL_TIMEOUT_MS
+      );
+      if (polled.done) {
+        res = polled;
+        break;
+      }
+    }
 
     // Bookkeeping the engine folds into the run: the interaction id chains
     // the NEXT iteration's correction turn; audioVerified drives the

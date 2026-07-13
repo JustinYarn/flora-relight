@@ -179,8 +179,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         await storage.putMediaFromFile(runId, outName, outLocal);
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return jsonError(500, `Couldn't build the comparison video: ${message}`);
+      console.error("[export/side-by-side] comparison build failed:", {
+        runId,
+        version,
+        error: err,
+      });
+      return jsonError(
+        500,
+        "The comparison video could not be built. Try again or check the server logs."
+      );
+    } finally {
+      // Remote media is materialized under one deterministic per-run /tmp
+      // directory. A warm export worker must not retain every source, relit,
+      // audio, and rendered comparison it has touched. Local fs paths are the
+      // canonical durable store and must never be removed here.
+      if (storage.name === "blob") {
+        const scratchRunDir = path.dirname(
+          scratchMediaPath(runId, "source.mp4")
+        );
+        await fsp.rm(scratchRunDir, { recursive: true, force: true }).catch(
+          (error) => {
+            console.warn(
+              `[export/side-by-side] scratch cleanup failed for ${runId}:`,
+              error instanceof Error ? error.message : error
+            );
+          }
+        );
+      }
     }
   }
 

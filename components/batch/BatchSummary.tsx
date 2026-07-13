@@ -16,7 +16,7 @@ import {
 } from "@/components/ui";
 import { getEvalDef } from "@/lib/prompts/eval-defs";
 import { formatUsd } from "@/lib/cost";
-import type { Batch, Run, Verdict } from "@/lib/types";
+import type { Batch, BatchExecutionSummary, Run, Verdict } from "@/lib/types";
 
 function Stat({
   label,
@@ -58,13 +58,26 @@ const TERMINAL: ReadonlyArray<Run["status"]> = [
   "failed",
 ];
 
+const BATCH_STATUS_META: Record<
+  Batch["status"],
+  { color: string; label: string }
+> = {
+  uploading: { color: "var(--running)", label: "preparing uploads" },
+  ready: { color: "var(--borderline)", label: "uploaded · ready to start" },
+  running: { color: "var(--running)", label: "working through the queue" },
+  done: { color: "var(--pass)", label: "batch done" },
+  failed: { color: "var(--fail)", label: "upload preparation failed" },
+};
+
 export function BatchSummary({
   batch,
   runs,
+  execution,
   passThreshold,
 }: {
   batch: Batch;
   runs: Run[];
+  execution?: BatchExecutionSummary;
   passThreshold: number;
 }) {
   const total = runs.length;
@@ -123,17 +136,119 @@ export function BatchSummary({
     (sum, r) => sum + (r.cost?.estimatedUsd ?? 0),
     0
   );
+  const batchMeta = BATCH_STATUS_META[batch.status];
+
+  if (execution) {
+    const count = (
+      state: BatchExecutionSummary["members"][number]["state"]
+    ): number =>
+      execution.members.filter((member) => member.state === state).length;
+    const awaitingMembers = execution.members.filter(
+      (member) => member.state === "awaiting_review"
+    );
+    const runById = new Map(runs.map((run) => [run.id, run]));
+    const graded = awaitingMembers.filter(
+      (member) => runById.get(member.runId)?.humanGrade !== undefined
+    ).length;
+    const ready = awaitingMembers.length - graded;
+    const skipped = count("skipped_budget");
+    const failed = count("failed");
+    const reconcile = count("reconcile_required");
+    const queued = count("queued");
+    const running = count("running");
+    const settled = awaitingMembers.length + skipped + failed;
+    const executionMeta =
+      execution.status === "done"
+        ? { color: "var(--pass)", label: "batch settled" }
+        : execution.status === "failed"
+          ? { color: "var(--borderline)", label: "needs reconciliation" }
+          : { color: "var(--running)", label: "generating first cuts" };
+
+    return (
+      <Card className="p-5">
+        <SectionTitle
+          right={
+            <Badge color={executionMeta.color}>
+              {executionMeta.label}
+              {execution.status === "running"
+                ? ` · ${execution.concurrency} at a time`
+                : ""}
+            </Badge>
+          }
+        >
+          {batch.name}
+        </SectionTitle>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-5 md:grid-cols-4 xl:grid-cols-7">
+          <Stat
+            label="Settled clips"
+            value={
+              <>
+                {settled}
+                <span className="text-base font-normal text-faint">
+                  /{execution.members.length}
+                </span>
+              </>
+            }
+            sub={
+              <span className="text-2xs text-faint">
+                {running} running · {queued} queued
+              </span>
+            }
+          />
+          <Stat
+            label="Ready to grade"
+            value={ready}
+            sub={<span className="text-2xs text-faint">canonical first cuts</span>}
+          />
+          <Stat
+            label="Human grades"
+            value={graded}
+            sub={<span className="text-2xs text-faint">saved responses</span>}
+          />
+          <Stat
+            label="Skipped by cap"
+            value={skipped}
+            sub={<span className="text-2xs text-faint">no provider call</span>}
+          />
+          <Stat
+            label="Needs attention"
+            value={failed + reconcile}
+            sub={
+              <span className="text-2xs text-faint">
+                {reconcile} awaiting reconciliation
+              </span>
+            }
+          />
+          <Stat
+            label="Confirmed spend"
+            value={formatUsd(execution.settledMicros / 1_000_000)}
+            sub={
+              <span className="text-2xs tabular-nums text-faint">
+                {formatUsd(execution.reservedMicros / 1_000_000)} reserved · {formatUsd(execution.budgetLimitMicros / 1_000_000)} cap
+              </span>
+            }
+          />
+          <Stat
+            label="Quality checks"
+            value="—"
+            sub={<span className="text-2xs text-faint">human grading only</span>}
+          />
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card className="p-5">
       <SectionTitle
         right={
           <Badge
-            color={batch.status === "running" ? "var(--running)" : "var(--pass)"}
+            color={batchMeta.color}
           >
+            {batchMeta.label}
             {batch.status === "running"
-              ? `working through the queue · ${batch.concurrency} at a time`
-              : "batch done"}
+              ? ` · ${batch.concurrency} at a time`
+              : ""}
           </Badge>
         }
       >

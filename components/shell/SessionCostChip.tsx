@@ -29,7 +29,7 @@ const PERSIST_DOT: Record<
 > = {
   saved: {
     color: "var(--pass)",
-    title: "Persistence: saved — runs and batches are synced to data/ on the dev server",
+    title: "Persistence: saved — runs and batches are synced to durable app storage",
   },
   saving: {
     color: "var(--running)",

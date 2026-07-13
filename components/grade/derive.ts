@@ -64,7 +64,14 @@ export function humanVerdictWord(points: HumanCheckGrade["points"]): string {
  */
 export function isGradeable(run: Run): boolean {
   const v = shippedVideo(run);
-  return v !== undefined && !v.simulatedFilter;
+  const serverVerifiedArtifact =
+    shippedIteration(run)?.recoveredFromProviderOperation === true;
+  return (
+    (!run.serverExecution || run.serverExecution.status === "awaiting_review") &&
+    serverVerifiedArtifact &&
+    v !== undefined &&
+    !v.simulatedFilter
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -232,9 +239,12 @@ export function shipRatePct(gradedRuns: Run[]): number | undefined {
 
 /** % of graded runs whose shipped attempt passed the AI gates (composite). */
 export function aiPassRatePct(gradedRuns: Run[]): number | undefined {
-  if (gradedRuns.length === 0) return undefined;
-  const passed = gradedRuns.filter(
-    (r) => shippedComposite(r)?.passed === true
-  ).length;
-  return (passed / gradedRuns.length) * 100;
+  const scored = gradedRuns
+    .map((run) => shippedComposite(run))
+    .filter((composite): composite is { score: number; passed: boolean } =>
+      composite !== undefined
+    );
+  if (scored.length === 0) return undefined;
+  const passed = scored.filter((composite) => composite.passed).length;
+  return (passed / scored.length) * 100;
 }

@@ -1,7 +1,8 @@
 {
   "regions": ["iad1"],
   "functions": {
-    "app/api/live/videogen/route.ts": { "maxDuration": 300 },
+    "app/api/live/videogen/start/route.ts": { "maxDuration": 300 },
+    "app/api/live/videogen/poll/route.ts": { "maxDuration": 300 },
     "app/api/live/judge/route.ts": { "maxDuration": 300 },
     "app/api/export/side-by-side/route.ts": { "maxDuration": 300 },
     "app/api/ingest/route.ts": { "maxDuration": 300 },

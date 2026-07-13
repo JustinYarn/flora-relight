@@ -5,10 +5,9 @@
  *   - fs driver: streamed from <repo>/data with HTTP Range support (206 +
  *     Content-Range / Accept-Ranges — <video> seeking needs it), exactly the
  *     pre-seam behavior.
- *   - blob driver (no mediaReadStream): 302-redirect to the blob's public CDN
- *     URL — public blob URLs support Range natively, so <video> streams and
- *     seeks against the CDN directly instead of proxying bytes through this
- *     function.
+ *   - blob driver: gate-authenticated proxy through @vercel/blob get(). The
+ *     provider URL and read token never reach the browser; single Range
+ *     requests are forwarded so <video> seeking still works.
  *
  * Any other path (legacy: arbitrary files under <repo>/data) is served
  * directly from disk on the fs driver only; the blob driver stores nothing
@@ -31,9 +30,17 @@ import {
   isValidRunId,
   resolveMediaRequest,
 } from "@/lib/server/runstore";
+import {
+  hostedGateConfigurationIssue,
+  verifyGateCookie,
+} from "@/lib/server/gate";
 import { getStorage } from "@/lib/server/storage";
 
 export const runtime = "nodejs";
+
+// Server-side idempotency marker. It contains internal upload identity and is
+// never a browser media asset, even on the local filesystem driver.
+const INTERNAL_INGEST_RECEIPT = "ingest-result.json";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".mp4": "video/mp4",
@@ -56,7 +63,7 @@ function cacheControlFor(filePath: string): string {
   // write-once per filename — cache hard.
   return path.extname(filePath).toLowerCase() === ".json"
     ? "no-store"
-    : "public, max-age=31536000, immutable";
+    : "private, no-cache";
 }
 
 /**
@@ -95,9 +102,9 @@ function notFound(): NextResponse {
 }
 
 /**
- * Serve a run media file through the storage driver: stream (with Range)
- * when the driver exposes bytes, 302-redirect when its media lives on a
- * directly fetchable public URL (blob).
+ * Serve a run media file through the storage driver with Range support. Both
+ * drivers return bytes; the Blob driver performs its authenticated provider
+ * read behind this same-origin route.
  */
 async function serveRunMedia(
   req: NextRequest,
@@ -105,21 +112,6 @@ async function serveRunMedia(
   fileName: string
 ): Promise<Response> {
   const storage = getStorage();
-
-  if (!storage.mediaReadStream) {
-    // Blob driver: hand the client the public CDN URL (native Range support).
-    // no-store on the redirect itself so the access gate is consulted every
-    // time; the CDN response carries its own cache headers.
-    try {
-      const url = await storage.publicMediaUrl(runId, fileName);
-      return NextResponse.redirect(url, {
-        status: 302,
-        headers: { "Cache-Control": "no-store" },
-      });
-    } catch {
-      return notFound();
-    }
-  }
 
   const stat = await storage.statMedia(runId, fileName);
   if (!stat) return notFound();
@@ -216,9 +208,27 @@ async function serveDataFile(req: NextRequest, segments: string[]): Promise<Resp
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { path: string[] } }
+  { params }: { params: Promise<{ path: string[] }> }
 ): Promise<Response> {
-  const segments = params.path ?? [];
+  // Defense in depth: do not rely solely on middleware continuing to include
+  // this sensitive route. Hosted deployments also fail closed when the gate
+  // password itself is absent.
+  if (hostedGateConfigurationIssue(process.env.FLORA_ACCESS_PASSWORD)) {
+    return NextResponse.json(
+      { error: "Production access protection is not configured." },
+      { status: 503, headers: { "Cache-Control": "private, no-store" } }
+    );
+  }
+  if (!(await verifyGateCookie(req))) {
+    return NextResponse.json(
+      { error: "Access gate: authentication required." },
+      { status: 401, headers: { "Cache-Control": "private, no-store" } }
+    );
+  }
+
+  const segments = (await params).path ?? [];
+
+  if (segments.at(-1) === INTERNAL_INGEST_RECEIPT) return notFound();
 
   if (
     segments.length === 3 &&

@@ -4,13 +4,13 @@ import { GradeView } from "@/components/grade/GradeView";
 export const metadata: Metadata = {
   title: "Grade — Flora Relight",
   description:
-    "Blind-grade the before/after cuts on the same 11 checks the AI judges use, then compare",
+    "Blind-grade relit before/after cuts across 11 quality checks and review saved results",
 };
 
 /**
- * /grade — human grading + AI calibration. Mode A grades clips BLIND (no AI
- * verdicts shown); mode B compares the saved grades against the shipped
- * attempt's eval results. All state lives client-side in GradeView.
+ * /grade — blind human grading with optional automated-result comparison.
+ * Draft answers are durable server-side working memory; final grades are
+ * stored atomically on the canonical run document.
  */
 export default function GradePage() {
   return <GradeView />;

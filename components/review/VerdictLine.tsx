@@ -20,6 +20,8 @@ export function VerdictLine({
   threshold: number;
 }) {
   const composite = iteration?.composite;
+  const sentDirectlyToHumanGrade =
+    iteration?.status === "ungraded" && iteration.evalResults.length === 0;
   const meterVerdict: Verdict = composite
     ? composite.passed
       ? "pass"
@@ -72,7 +74,11 @@ export function VerdictLine({
           <span className="text-3xl font-semibold tabular-nums text-faint">—</span>
           <span className="text-2xs text-faint">
             {iteration ? (
-              <span className="animate-pulse">scoring…</span>
+              sentDirectlyToHumanGrade ? (
+                "automated scoring not run · awaiting your grade"
+              ) : (
+                <span className="animate-pulse">scoring…</span>
+              )
             ) : (
               "waiting for the first attempt"
             )}

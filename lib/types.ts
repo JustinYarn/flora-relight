@@ -33,6 +33,13 @@
 
 export interface VideoAsset {
   id: string;
+  /**
+   * Canonical workflow/storage id reserved before ingest. When present, the
+   * Run created for this asset MUST reuse it so source media, run JSON,
+   * generated artifacts, review state, and deletion all share one identity.
+   * Legacy/browser-only assets may omit it and receive a fresh run id.
+   */
+  runId?: string;
   kind: "original" | "generated" | "final";
   /** Object URL (uploads) or a /public path (samples). */
   url: string;
@@ -393,11 +400,18 @@ export interface Iteration {
   /** Stage A artifact: the approved relit keyframe for this iteration. */
   relitKeyframeDataUrl?: string;
   generatedVideo?: VideoAsset;
+  /**
+   * Read-model trust marker: the server reconstructed this real video from a
+   * completed provider journal entry. It is stripped from browser writes.
+   * Such a cut may be graded even if later browser-side judging failed.
+   */
+  recoveredFromProviderOperation?: true;
   beforeFrames: FrameSample[];
   afterFrames: FrameSample[];
   evalResults: EvalResult[];
   composite?: IterationComposite;
-  status: "running" | "passed" | "failed";
+  /** "ungraded" is a canonical generated cut awaiting human evaluation. */
+  status: "running" | "ungraded" | "passed" | "failed";
 }
 
 /**
@@ -411,6 +425,48 @@ export type RunStatus =
   | "approved"
   | "needs-changes"
   | "failed";
+
+/**
+ * Compact server-owned execution state for the durable run coordinator.
+ *
+ * This record deliberately lives outside browser-writable Run JSON. A stale
+ * tab may still save presentation state, but it cannot move the durable
+ * coordinator backwards or erase evidence that execution is in progress.
+ */
+export type RunExecutionStatus =
+  | "queued"
+  | "running"
+  | "awaiting_review"
+  | "failed"
+  | "reconcile_required";
+
+export type RunExecutionPhase =
+  | "queued"
+  | "preparing"
+  | "video_generation"
+  | "finalizing"
+  | "complete";
+
+export interface RunExecution {
+  runId: string;
+  executionId: string;
+  /** SHA-256 of the exact immutable first-cut input bound at creation. */
+  inputHash: string;
+  /** Exact first-cut provider prompt; retained for deployment-safe recovery. */
+  renderedPrompt: string;
+  source: "single" | "batch";
+  batchId?: string;
+  status: RunExecutionStatus;
+  phase: RunExecutionPhase;
+  /** Zero while preparing; one-based once generation begins. */
+  iteration: number;
+  /** Storage compare-and-swap revision. Creation starts at revision 1. */
+  revision: number;
+  startedAt: number;
+  updatedAt: number;
+  workflowRunId?: string;
+  error?: string;
+}
 
 export interface RunLogEntry {
   at: number; // Date.now()
@@ -445,14 +501,140 @@ export interface HumanGrade {
   overallNote?: string;
 }
 
+export interface VideoGenerationOperationResult {
+  videoUrl: string;
+  rawUrl: string;
+  durationSec: number;
+  audioVerified: boolean;
+  costUsd: number;
+}
+
+/** Server-owned journal entry for one potentially billed background operation. */
+export interface ProviderOperation {
+  /** Stable application id (for example `video-generation:1`), not a provider id. */
+  id: string;
+  provider: "gemini";
+  kind: "video_generation";
+  iteration: number;
+  /** Exact rendered prompt bound to the original billed create claim. */
+  renderedPrompt?: string;
+  /** Durable Workflow execution that owns start/poll/finalization. */
+  workflowRunId?: string;
+  workflowStatus?: "pending" | "running" | "completed" | "failed" | "cancelled";
+  /** Atomic server claim proving only one request may enqueue the Workflow. */
+  workflowClaimToken?: string;
+  workflowClaimedAt?: number;
+  /** Provider handle persisted immediately after the one billed start call. */
+  providerInteractionId?: string;
+  status:
+    | "in_progress"
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "incomplete"
+    | "budget_exceeded"
+    | "reconcile_required";
+  startedAt: number;
+  updatedAt: number;
+  result?: VideoGenerationOperationResult;
+  error?: string;
+}
+
+/**
+ * Durable server-only journal entry for a synchronous provider request that
+ * may incur spend. This deliberately lives outside Run JSON in the storage
+ * layer: a stale browser PUT can replace a Run document, but it can never
+ * erase the evidence that a billed request may already have been sent.
+ */
+export interface PaidOperation {
+  /** Stable application id, unique within a run. */
+  id: string;
+  runId: string;
+  provider: "gemini" | "claude";
+  kind: "manifest" | "anchor" | "judge";
+  /** Anchor version or generated-video iteration, when applicable. */
+  iteration?: number;
+  /** Canonical eval id for judge operations. */
+  evalId?: string;
+  /** SHA-256 of the canonical server-validated request. */
+  inputHash: string;
+  status: "in_progress" | "completed" | "reconcile_required";
+  startedAt: number;
+  updatedAt: number;
+  /** Route response, persisted so a lost response can be replayed for free. */
+  result?: unknown;
+  /** Safe operational summary only; never provider secrets or raw responses. */
+  error?: string;
+}
+
+/** Server-issued record of one explicit live-spend confirmation. */
+export interface SpendApproval {
+  id: string;
+  source: "single" | "batch";
+  /** Legacy records without this field are treated as full_pipeline. */
+  scope?: "full_pipeline" | "first_cut";
+  batchId?: string;
+  /** Canonical durable ingest identity and facts this approval was priced for. */
+  runId: string;
+  sourceUrl: string;
+  durationSec: number;
+  approvedAt: number;
+  expiresAt: number;
+  /** Worst-case run estimate authorized by the confirmation, in USD. */
+  maxUsd: number;
+  maxIterations: number;
+}
+
+/** One in-progress answer in the blind grading workspace. */
+export interface GradeDraftAnswer {
+  points: HumanCheckGrade["points"];
+  /** Kept untrimmed while editing so autosave never changes what was typed. */
+  note: string;
+}
+
+/** Unsaved work for one clip. Final scores/verdicts are derived on submit. */
+export interface GradeClipDraft {
+  answers: Record<string, GradeDraftAnswer>;
+  shipIt?: boolean;
+  overallNote: string;
+}
+
+/**
+ * Durable working memory for the whole blind-grading workspace.
+ *
+ * One revisioned document keeps partial clip answers and queue position in a
+ * single compare-and-swap write. `revision` and `updatedAt` are server-owned;
+ * clients send the last revision they observed so an older tab cannot silently
+ * replace newer grading work.
+ */
+export interface GradeDraft {
+  id: string;
+  revision: number;
+  updatedAt: number;
+  clips: Record<string, GradeClipDraft>;
+  skippedRunIds: string[];
+  currentRunId?: string;
+}
+
 export interface Run {
   id: string;
+  /**
+   * Transport-only marker: list hydration omitted embedded frame pixels. The
+   * server removes this before storage and preserves archived pixels on PUT.
+   */
+  _compact?: true;
   workflowId: string;
   createdAt: number;
   originalVideo: VideoAsset;
   status: RunStatus;
   /** True when this run executed against LIVE providers (real spend accrued). */
   live?: boolean;
+  /** Server-owned background provider operations, preserved across client PUTs. */
+  providerOperations?: ProviderOperation[];
+  /** Read-model projection; durable truth lives outside browser-writable Run JSON. */
+  serverExecution?: RunExecution;
+  /** Server-owned live-spend authorization; never accepted from a Run PUT. */
+  spendApproval?: SpendApproval;
   /** Extracted once at ingest; ground truth for all evals. */
   manifest?: SceneManifest;
   iterations: Iteration[];
@@ -498,6 +680,73 @@ export interface Run {
 // Batches (lib/store.ts)
 // ---------------------------------------------------------------------------
 
+export type BatchUploadStatus = "pending" | "uploading" | "ready" | "failed";
+
+/**
+ * Durable preparation state for one selected file. The browser reserves the
+ * canonical run id before upload, then persists each transition so a refresh
+ * never turns already-uploaded media into an invisible orphan.
+ */
+export interface BatchUploadItem {
+  runId: string;
+  label: string;
+  status: BatchUploadStatus;
+  /** Present after ingest/finalize succeeds; enough to resume batch launch. */
+  video?: VideoAsset;
+  error?: string;
+  updatedAt: number;
+}
+
+/** Server-owned lifecycle for the durable generation-only batch dispatcher. */
+export type BatchExecutionStatus = "queued" | "running" | "done" | "failed";
+
+export type BatchExecutionMemberState =
+  | "queued"
+  | "running"
+  | "awaiting_review"
+  | "failed"
+  | "reconcile_required"
+  | "skipped_budget";
+
+export interface BatchExecutionMember {
+  runId: string;
+  position: number;
+  state: BatchExecutionMemberState;
+  /** Worst-case approved reservation for this member, in millionths of USD. */
+  maxReservedMicros: number;
+  /** Confirmed terminal spend, in millionths of USD. */
+  actualMicros?: number;
+  error?: string;
+}
+
+/**
+ * Durable batch dispatch/accounting state. It is stored separately from the
+ * browser-writable Batch document so stale tabs cannot redispatch work or
+ * release reservations.
+ */
+export interface BatchExecution {
+  batchId: string;
+  executionId: string;
+  /** Exact first-cut prompt shared by every admitted member. */
+  renderedPrompt: string;
+  /** Lowercase sha256 of renderedPrompt. */
+  inputHash: string;
+  status: BatchExecutionStatus;
+  revision: number;
+  concurrency: number;
+  budgetLimitMicros: number;
+  reservedMicros: number;
+  settledMicros: number;
+  members: BatchExecutionMember[];
+  startedAt: number;
+  updatedAt: number;
+  workflowRunId?: string;
+  error?: string;
+}
+
+/** Browser-safe batch progress; exact prompt bytes remain server-only. */
+export type BatchExecutionSummary = Omit<BatchExecution, "renderedPrompt">;
+
 /**
  * Mass automation: a named group of runs started together — one Run per input
  * clip, executed through the store's bounded worker queue (`concurrency`
@@ -511,7 +760,10 @@ export interface Batch {
   createdAt: number;
   runIds: string[];
   concurrency: number;
-  status: "running" | "done";
+  status: "uploading" | "ready" | "running" | "done" | "failed";
+  /** Incremental upload preparation; absent on legacy batches. */
+  uploads?: BatchUploadItem[];
+  updatedAt?: number;
   /**
    * Optional cap on the batch's total ESTIMATED live spend (USD). The worker
    * queue stops dispatching once the next run's estimate would exceed it;

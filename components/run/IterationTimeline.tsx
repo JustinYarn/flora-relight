@@ -5,6 +5,7 @@ import { StatusDot, verdictColor } from "@/components/ui";
 
 const ITER_TO_NODE_STATUS: Record<Iteration["status"], NodeRunStatus> = {
   running: "running",
+  ungraded: "queued",
   passed: "succeeded",
   failed: "failed",
 };

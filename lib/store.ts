@@ -9,9 +9,11 @@
 import { create } from "zustand";
 import type {
   Batch,
+  BatchExecutionSummary,
+  BatchUploadItem,
   HumanGrade,
-  NodeRunState,
   Run,
+  RunExecution,
   VideoAsset,
   WorkflowDefinition,
 } from "@/lib/types";
@@ -19,6 +21,13 @@ import { uid } from "@/lib/util";
 import { estimateRun, formatUsd } from "@/lib/cost";
 import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
 import { runWorkflow } from "@/lib/engine";
+import { buildQueuedRun } from "@/lib/run-factory";
+import {
+  isRecoverableBatchRun,
+  isTerminalRun,
+  summarizeBatchRecovery,
+  type BatchRecoverySummary,
+} from "@/lib/batch-recovery";
 
 /**
  * Batch worker pool size: at most this many runWorkflow() executions in
@@ -29,17 +38,40 @@ import { runWorkflow } from "@/lib/engine";
  */
 const BATCH_CONCURRENCY = 2;
 
+/**
+ * One browser tab may own a batch queue at a time. This prevents a second
+ * mock resume click (or React strict-mode re-entry) from dispatching the same
+ * in-memory members twice. It is deliberately not treated as sufficient for
+ * live recovery because it cannot coordinate a second tab or device.
+ */
+const activeBatchQueues = new Set<string>();
+
+export function isBatchQueueActive(batchId: string): boolean {
+  return activeBatchQueues.has(batchId);
+}
+
+export interface BatchResumeResult extends BatchRecoverySummary {
+  resumed: number;
+  alreadyActive: boolean;
+  liveBlocked: boolean;
+}
+
+function hasBudgetSkip(run: Run): boolean {
+  return run.log.some((entry) => entry.message.includes("batch budget reached"));
+}
+
 interface AppStore {
   /** Newest first. */
   runs: Run[];
   /** Newest first. */
   batches: Batch[];
+  /** Server-owned batch progress, cached separately from writable Batch docs. */
+  batchExecutions: Record<string, BatchExecutionSummary>;
   workflow: WorkflowDefinition;
   /**
-   * "mock" until /api/live/health reports that real API keys are configured
-   * (checked during hydrate()). Live mode changes UX only in this store's
-   * consumers: a LIVE badge, actual-spend readout, and confirm-spend dialogs
-   * before anything that costs money.
+   * "mock" until /api/live/health reports that the server-owned first-cut
+   * capability is configured. Live mode also blocks every browser executor;
+   * the server response must explicitly claim live run/batch ownership.
    */
   mode: "mock" | "live";
   /**
@@ -59,14 +91,17 @@ interface AppStore {
    * (no /api routes) resolve false and behave exactly as before.
    */
   hydrate(): Promise<boolean>;
-  /** Creates the run, kicks off the async engine, returns the run id. */
-  startRun(video: VideoAsset): string;
+  /** Persists the run, then kicks off the async engine. */
+  startRun(
+    video: VideoAsset,
+    opts?: { approveLiveSpend?: boolean }
+  ): Promise<string>;
   /**
-   * Mass automation: creates one Run per video plus a Batch pointing at them,
-   * then drains the runs through a concurrency-limited worker queue. The
+   * Mock-only convenience: creates one Run per video plus a Batch pointing at
+   * them, then drains the runs through a browser worker queue. The
    * batch flips to "done" when every run settles at a terminal status
    * (awaiting-review / approved / needs-changes / failed). Returns batch id.
-   * opts.budgetUsd caps the batch's total ESTIMATED live spend: once the next
+   * opts.budgetUsd caps the batch's total ESTIMATED spend: once the next
    * run's estimate would exceed it, remaining runs are failed as skipped.
    */
   startBatch(
@@ -74,6 +109,33 @@ interface AppStore {
     name?: string,
     opts?: { budgetUsd?: number }
   ): string;
+  /** Persist a multi-file selection before the first upload starts. */
+  createBatchDraft(
+    items: Array<{ runId: string; label: string }>,
+    name?: string
+  ): string;
+  /** Persist one upload transition so ready files survive refresh. */
+  updateBatchUpload(
+    batchId: string,
+    runId: string,
+    patch: Partial<Pick<BatchUploadItem, "status" | "video" | "error">>
+  ): void;
+  /** Launch the successfully prepared members of a durable upload batch. */
+  startBatchFromDraft(
+    batchId: string,
+    opts?: {
+      budgetUsd?: number;
+      approveLiveSpend?: boolean;
+      /** Explicitly freeze/start only the ready members of an interrupted upload. */
+      allowIncompleteUploads?: boolean;
+    }
+  ): Promise<string | null>;
+  /**
+   * Mock-only recovery for untouched, durably persisted queue skeletons.
+   * Live server executions use startBatchFromDraft's idempotent dispatch
+   * repair and never enter this browser queue.
+   */
+  resumeBatch(batchId: string): Promise<BatchResumeResult>;
   submitReview(runId: string, decision: "approved" | "needs-changes", notes: string): void;
   /**
    * Record the blind human grade for one run (the /grade flow). Plain
@@ -88,33 +150,6 @@ interface AppStore {
    * caller owns both the confirmation step and the failure message.
    */
   removeRun(runId: string): Promise<void>;
-}
-
-function freshNodeStates(): Record<string, NodeRunState> {
-  const states: Record<string, NodeRunState> = {};
-  for (const node of RELIGHT_WORKFLOW.nodes) {
-    states[node.id] = { nodeId: node.id, status: "idle" };
-  }
-  return states;
-}
-
-function buildRun(video: VideoAsset): Run {
-  return {
-    id: uid("run"),
-    workflowId: RELIGHT_WORKFLOW.id,
-    createdAt: Date.now(),
-    originalVideo: video,
-    status: "running",
-    iterations: [],
-    nodeStates: freshNodeStates(),
-    log: [
-      {
-        at: Date.now(),
-        level: "info",
-        message: `Run created for "${video.label}" — ${RELIGHT_WORKFLOW.name}`,
-      },
-    ],
-  };
 }
 
 /** Append an info entry to one run's log (used by the batch worker queue). */
@@ -162,6 +197,103 @@ function skipRunForBudget(
 }
 
 /**
+ * Drain one prepared batch through the current in-tab worker pool. Queue state
+ * is now persisted before this function starts; a later server-owned worker
+ * can replace this executor without changing the Batch/Run preparation shape.
+ */
+function runMockBatchQueue(
+  batch: Batch,
+  batchRuns: Run[],
+  opts?: { reservedEstimateUsd?: number }
+): boolean {
+  const state = useAppStore.getState();
+  if (state.mode === "live" || state.batchExecutions[batch.id]) {
+    throw new Error(
+      "Browser batch execution is mock-only; the durable server owns this batch."
+    );
+  }
+  if (activeBatchQueues.has(batch.id)) return false;
+  activeBatchQueues.add(batch.id);
+  const budgetUsd = batch.budgetUsd;
+  const concurrency =
+    Number.isSafeInteger(batch.concurrency) && batch.concurrency > 0
+      ? batch.concurrency
+      : BATCH_CONCURRENCY;
+  const estimateById = new Map(
+    batchRuns.map((r) => [
+      r.id,
+      estimateRun(r.originalVideo.durationSec).totalUsd,
+    ])
+  );
+  let dispatchedEstimateUsd = opts?.reservedEstimateUsd ?? 0;
+  const selectedIds = new Set(batchRuns.map((run) => run.id));
+  const pending = batch.runIds.filter((runId) => selectedIds.has(runId));
+  const total = pending.length;
+  let inFlight = 0;
+  let settledCount = 0;
+
+  const finishQueue = (): void => {
+    if (settledCount < total) return;
+    activeBatchQueues.delete(batch.id);
+    const current = useAppStore.getState();
+    const currentRuns = new Map(current.runs.map((run) => [run.id, run]));
+    const allTerminal = batch.runIds.every((runId) => {
+      const run = currentRuns.get(runId);
+      return run ? isTerminalRun(run) : false;
+    });
+    if (!allTerminal) return;
+    useAppStore.setState((state) => ({
+      batches: state.batches.map((b) =>
+        b.id === batch.id
+          ? { ...b, status: "done" as const, updatedAt: Date.now() }
+          : b
+      ),
+    }));
+  };
+
+  const pump = (): void => {
+    while (inFlight < concurrency && pending.length > 0) {
+      const nextEstimate = estimateById.get(pending[0]) ?? 0;
+      if (
+        budgetUsd !== undefined &&
+        dispatchedEstimateUsd + nextEstimate > budgetUsd
+      ) {
+        while (pending.length > 0) {
+          const skippedId = pending.shift() as string;
+          skipRunForBudget(
+            skippedId,
+            dispatchedEstimateUsd + (estimateById.get(skippedId) ?? 0),
+            budgetUsd
+          );
+          settledCount += 1;
+        }
+        break;
+      }
+
+      const runId = pending.shift() as string;
+      dispatchedEstimateUsd += nextEstimate;
+      inFlight += 1;
+      appendRunLog(
+        runId,
+        `Picked up by a batch worker (${inFlight}/${concurrency} slots busy, ${pending.length} still queued)`
+      );
+      void runWorkflow(runId)
+        .catch(() => undefined)
+        .then(() => {
+          inFlight -= 1;
+          settledCount += 1;
+          if (settledCount >= total) finishQueue();
+          else pump();
+        });
+    }
+    if (inFlight === 0) finishQueue();
+  };
+
+  pump();
+  return true;
+}
+
+/**
  * Selector-friendly: what every run in this session WOULD cost against live
  * APIs (sum of pre-flight estimates). Mock mode spends $0 — this is the
  * "keep me in check" number in the top bar.
@@ -180,9 +312,64 @@ function healthSaysLive(data: unknown): boolean {
   return d.live === true || d.mode === "live";
 }
 
+function needsSingleExecutionAdoption(run: Run): boolean {
+  if (
+    !run.spendApproval ||
+    run.spendApproval.source !== "single" ||
+    run.spendApproval.batchId !== undefined
+  ) {
+    return false;
+  }
+  const execution = run.serverExecution;
+  if (!execution) return true;
+  return (
+    execution.source === "single" &&
+    (execution.status === "queued" ||
+      execution.status === "running" ||
+      execution.status === "reconcile_required")
+  );
+}
+
+/** Best-effort durable-outbox adoption; callers keep the saved Run on error. */
+async function adoptSingleExecution(runId: string): Promise<RunExecution | null> {
+  const response = await fetch("/api/runs/recover", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ runId }),
+  });
+  if (!response.ok) return null;
+  const payload = (await response.json()) as { execution?: RunExecution };
+  return payload.execution ?? null;
+}
+
+const scheduledSingleAdoptions = new Set<string>();
+
+function mergeRecoveredExecution(runId: string, execution: RunExecution): void {
+  useAppStore.setState((state) => ({
+    runs: state.runs.map((item) =>
+      item.id === runId ? { ...item, serverExecution: execution } : item
+    ),
+  }));
+}
+
+/** One delayed retry covers a reload that lands inside the enqueue lease. */
+function scheduleSingleExecutionAdoption(runId: string): void {
+  if (scheduledSingleAdoptions.has(runId)) return;
+  scheduledSingleAdoptions.add(runId);
+  window.setTimeout(() => {
+    void adoptSingleExecution(runId)
+      .then((execution) => {
+        if (execution) mergeRecoveredExecution(runId, execution);
+      })
+      .catch(() => undefined)
+      .finally(() => scheduledSingleAdoptions.delete(runId));
+  }, 31_000);
+}
+
 export const useAppStore = create<AppStore>()((set, get) => ({
   runs: [],
   batches: [],
+  batchExecutions: {},
   workflow: RELIGHT_WORKFLOW,
   mode: "mock",
   hydrated: false,
@@ -192,38 +379,83 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   hydrate: () => {
     if (typeof window === "undefined") return Promise.resolve(false); // client-only
     if (hydratePromise) return hydratePromise;
-    hydratePromise = (async (): Promise<boolean> => {
-      // 1. Live-mode health check — absent route or network error → stay mock.
+    const hydration = (async (): Promise<boolean> => {
+      // 1. Live-mode health check. A missing route means a mock-only static
+      // environment; a transient/network/server failure must be retried so a
+      // live deployment never silently boots with persistence disabled.
       let mode: "mock" | "live" = "mock";
-      try {
-        const res = await fetch("/api/live/health", { cache: "no-store" });
-        if (res.ok && healthSaysLive(await res.json())) mode = "live";
-      } catch {
-        /* mock-only environment */
+      const healthResponse = await fetch("/api/live/health", { cache: "no-store" });
+      if (healthResponse.ok) {
+        if (healthSaysLive(await healthResponse.json())) mode = "live";
+      } else if (healthResponse.status !== 404) {
+        throw new Error(`Live readiness failed (${healthResponse.status}).`);
       }
 
-      // 2. Persisted runs/batches — replace in-memory state, newest first.
-      let persisted: { runs: Run[]; batches: Batch[] } | null = null;
-      try {
-        const res = await fetch("/api/runs", { cache: "no-store" });
-        if (res.ok) {
-          const data = (await res.json()) as { runs?: unknown; batches?: unknown };
-          if (Array.isArray(data.runs)) {
-            persisted = {
-              runs: data.runs as Run[],
-              batches: Array.isArray(data.batches) ? (data.batches as Batch[]) : [],
-            };
+      // 2. Persisted runs/batches — compact runs arrive in bounded pages so a
+      // 50+ clip corpus never becomes one oversized serverless response.
+      const persistedRuns: Run[] = [];
+      let persistedBatches: Batch[] = [];
+      let cursor: string | null | undefined;
+      // 20 pages is a generous interactive ceiling (up to 500 runs today) while
+      // still bounding startup work if a malformed server repeats a cursor.
+      for (let page = 0; page < 20; page++) {
+        const url = cursor
+          ? `/api/runs?limit=25&cursor=${encodeURIComponent(cursor)}`
+          : "/api/runs?limit=25";
+        const response = await fetch(url, { cache: "no-store" });
+        if (response.status === 404 && page === 0) {
+          // Static/mock-only hosts intentionally have no persistence API.
+          set({ mode, hydrated: true });
+          return false;
+        }
+        if (!response.ok) {
+          throw new Error(`Run hydration failed (${response.status}).`);
+        }
+        const data = (await response.json()) as {
+          runs?: unknown;
+          batches?: unknown;
+          batchExecutions?: unknown;
+          nextCursor?: unknown;
+        };
+        if (!Array.isArray(data.runs)) {
+          throw new Error("Run hydration returned an invalid payload.");
+        }
+        persistedRuns.push(...(data.runs as Run[]));
+        if (page === 0) {
+          persistedBatches = Array.isArray(data.batches)
+            ? (data.batches as Batch[])
+            : [];
+          if (Array.isArray(data.batchExecutions)) {
+            const executionMap: Record<string, BatchExecutionSummary> = {};
+            for (const execution of data.batchExecutions as BatchExecutionSummary[]) {
+              const current = executionMap[execution.batchId];
+              if (!current || execution.revision >= current.revision) {
+                executionMap[execution.batchId] = execution;
+              }
+            }
+            set((state) => {
+              const merged = { ...state.batchExecutions };
+              for (const incoming of Object.values(executionMap)) {
+                const current = merged[incoming.batchId];
+                if (
+                  !current ||
+                  (current.executionId === incoming.executionId &&
+                    incoming.revision >= current.revision)
+                ) {
+                  merged[incoming.batchId] = incoming;
+                }
+              }
+              return { batchExecutions: merged };
+            });
           }
         }
-      } catch {
-        /* mock-only environment */
+        const nextCursor =
+          typeof data.nextCursor === "string" && data.nextCursor.length > 0
+            ? data.nextCursor
+            : null;
+        if (!nextCursor || nextCursor === cursor) break;
+        cursor = nextCursor;
       }
-
-      if (!persisted) {
-        set({ mode, hydrated: true });
-        return false;
-      }
-      const { runs: persistedRuns, batches: persistedBatches } = persisted;
       set((state) => {
         // Persisted state wins per id; anything created in-memory before
         // hydration finished (rare — a very fast first click) is kept.
@@ -239,32 +471,260 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         ].sort((a, b) => b.createdAt - a.createdAt);
         return { runs, batches, mode, hydrated: true };
       });
+
+      // Adopt confirmed single runs that were interrupted between the durable
+      // Run/RunExecution writes and Workflow submission. Also gives a later
+      // session a non-paid settlement-repair path after an artifact commit.
+      // Keep this bounded and best-effort: hydration truth is still useful if
+      // one recovery request encounters a transient hosted-network failure.
+      for (const run of persistedRuns.filter(needsSingleExecutionAdoption)) {
+        try {
+          const execution = await adoptSingleExecution(run.id);
+          if (!execution) {
+            scheduleSingleExecutionAdoption(run.id);
+            continue;
+          }
+          mergeRecoveredExecution(run.id, execution);
+          if (execution.status === "queued" && !execution.workflowRunId) {
+            scheduleSingleExecutionAdoption(run.id);
+          }
+        } catch {
+          // Detail polling plus one delayed attempt retry idempotent adoption.
+          scheduleSingleExecutionAdoption(run.id);
+        }
+      }
       return true;
     })();
+    hydratePromise = hydration.catch((error) => {
+      // Retry callers must receive a fresh network attempt, not the same
+      // permanently rejected promise.
+      hydratePromise = null;
+      throw error;
+    });
     return hydratePromise;
   },
 
-  startRun: (video: VideoAsset) => {
-    const run = buildRun(video);
-    set((state) => ({ runs: [run, ...state.runs] }));
-    void runWorkflow(run.id); // fire-and-forget; engine drives the store
+  startRun: async (video: VideoAsset, opts?: { approveLiveSpend?: boolean }) => {
+    const response = await fetch("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ video, approveLiveSpend: opts?.approveLiveSpend }),
+    });
+    const payload = (await response.json().catch(() => null)) as
+      | { run?: Run; serverOwned?: boolean; error?: string }
+      | null;
+    if (!response.ok || !payload?.run) {
+      throw new Error(payload?.error ?? `Run preparation failed (${response.status}).`);
+    }
+    const run = payload.run;
+    set((state) => ({
+      runs: [run, ...state.runs.filter((item) => item.id !== run.id)],
+    }));
+    // Live first-cut execution is owned by the durable server Workflow started
+    // by POST /api/runs. Keep the browser engine only for the zero-cost mock.
+    if (payload.serverOwned !== true && get().mode === "mock") {
+      void runWorkflow(run.id); // fire-and-forget; mock engine drives the store
+    } else if (payload.serverOwned !== true) {
+      throw new Error(
+        "The live server did not claim this run, so browser execution was refused."
+      );
+    }
     return run.id;
   },
 
-  startBatch: (videos: VideoAsset[], name = "Batch", opts) => {
-    const batchRuns = videos.map((video) => {
-      const run = buildRun(video);
-      run.log.push({
-        at: Date.now(),
-        level: "info",
-        message: "queued — waiting for a worker slot",
-      });
-      return run;
-    });
+  createBatchDraft: (items, name = "Upload batch") => {
+    const now = Date.now();
     const batch: Batch = {
       id: uid("batch"),
       name,
-      createdAt: Date.now(),
+      createdAt: now,
+      updatedAt: now,
+      runIds: items.map((item) => item.runId),
+      concurrency: BATCH_CONCURRENCY,
+      status: items.length === 0 ? "failed" : "uploading",
+      uploads: items.map((item) => ({
+        ...item,
+        status: "pending" as const,
+        updatedAt: now,
+      })),
+    };
+    set((state) => ({ batches: [batch, ...state.batches] }));
+    return batch.id;
+  },
+
+  updateBatchUpload: (batchId, runId, patch) => {
+    set((state) => ({
+      batches: state.batches.map((batch) => {
+        if (batch.id !== batchId || !batch.uploads) return batch;
+        const uploads = batch.uploads.map((item) =>
+          item.runId === runId
+            ? { ...item, ...patch, updatedAt: Date.now() }
+            : item
+        );
+        const allSettled = uploads.every(
+          (item) => item.status === "ready" || item.status === "failed"
+        );
+        const status: Batch["status"] = allSettled
+          ? uploads.some((item) => item.status === "ready")
+            ? "ready"
+            : "failed"
+          : "uploading";
+        return { ...batch, uploads, status, updatedAt: Date.now() };
+      }),
+    }));
+  },
+
+  startBatchFromDraft: async (batchId, opts) => {
+    const existing = get().batches.find((batch) => batch.id === batchId);
+    if (!existing || existing.status === "done") {
+      return null;
+    }
+    const response = await fetch("/api/batches/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        batchId,
+        budgetUsd: opts?.budgetUsd,
+        approveLiveSpend: opts?.approveLiveSpend,
+        allowIncompleteUploads: opts?.allowIncompleteUploads,
+      }),
+    });
+    const payload = (await response.json().catch(() => null)) as
+      | {
+          batch?: Batch;
+          runs?: Run[];
+          resumed?: boolean;
+          executionOwner?: "server" | "browser_mock";
+          execution?: BatchExecutionSummary | null;
+          error?: string;
+        }
+      | null;
+    if (!response.ok || !payload?.batch || !Array.isArray(payload.runs)) {
+      throw new Error(payload?.error ?? `Batch preparation failed (${response.status}).`);
+    }
+    const batch = payload.batch;
+    const batchRuns = payload.runs;
+    const runIds = batchRuns.map((run) => run.id);
+    if (payload.executionOwner === "server" && !payload.execution) {
+      throw new Error("The server did not return the durable batch execution it owns.");
+    }
+    if (payload.executionOwner !== "server" && payload.executionOwner !== "browser_mock") {
+      throw new Error("The server did not identify who owns this batch execution.");
+    }
+    set((state) => {
+      const currentExecution = state.batchExecutions[batch.id];
+      const incomingExecution = payload.execution ?? undefined;
+      if (
+        currentExecution &&
+        incomingExecution &&
+        currentExecution.executionId !== incomingExecution.executionId
+      ) {
+        throw new Error("A different durable execution already owns this batch.");
+      }
+      const acceptedExecution =
+        incomingExecution &&
+        (!currentExecution || incomingExecution.revision >= currentExecution.revision)
+          ? incomingExecution
+          : currentExecution;
+      return {
+        runs: [
+          ...batchRuns,
+          ...state.runs.filter((run) => !runIds.includes(run.id)),
+        ],
+        batches: state.batches.map((item) =>
+          item.id === batch.id ? batch : item
+        ),
+        batchExecutions: acceptedExecution
+          ? { ...state.batchExecutions, [batch.id]: acceptedExecution }
+          : state.batchExecutions,
+      };
+    });
+    if (payload.executionOwner === "server") {
+      // The durable batch Workflow owns dispatch and progress. Per-run cards
+      // poll their server executions; the board separately refreshes this
+      // batch checkpoint, so closing this tab cannot pause or duplicate work.
+    } else if (payload.resumed === true) {
+      // The server had already committed this start, most commonly because
+      // the first response was lost. Apply the recovery classifier instead
+      // of assuming every member is still untouched.
+      await get().resumeBatch(batch.id);
+    } else {
+      runMockBatchQueue(batch, batchRuns);
+    }
+    return batch.id;
+  },
+
+  resumeBatch: async (batchId) => {
+    const state = get();
+    const batch = state.batches.find((item) => item.id === batchId);
+    if (!batch || batch.status !== "running") {
+      return {
+        queued: 0,
+        protected: 0,
+        terminal: 0,
+        missing: batch?.runIds.length ?? 0,
+        resumed: 0,
+        alreadyActive: false,
+        liveBlocked: false,
+      };
+    }
+
+    const memberIds = new Set(batch.runIds);
+    const memberRuns = state.runs.filter((run) => memberIds.has(run.id));
+    const summary = summarizeBatchRecovery(batch, memberRuns);
+    const queuedRuns = memberRuns.filter(isRecoverableBatchRun);
+    if (state.mode === "live") {
+      return {
+        ...summary,
+        resumed: 0,
+        alreadyActive: false,
+        liveBlocked: false,
+      };
+    }
+    if (queuedRuns.length === 0) {
+      return {
+        ...summary,
+        resumed: 0,
+        alreadyActive: false,
+        liveBlocked: false,
+      };
+    }
+
+    const queuedIds = new Set(queuedRuns.map((run) => run.id));
+    // A resumed queue keeps the original cap conservative: reserve every
+    // already-started/terminal member's estimate, excluding only members the
+    // old queue explicitly skipped because the cap had already been reached.
+    const reservedEstimateUsd = memberRuns
+      .filter((run) => !queuedIds.has(run.id) && !hasBudgetSkip(run))
+      .reduce(
+        (sum, run) =>
+          sum +
+          (run.cost?.estimatedUsd ??
+            estimateRun(run.originalVideo.durationSec).totalUsd),
+        0
+      );
+    const started = runMockBatchQueue(batch, queuedRuns, { reservedEstimateUsd });
+    return {
+      ...summary,
+      resumed: started ? queuedRuns.length : 0,
+      alreadyActive: !started,
+      liveBlocked: false,
+    };
+  },
+
+  startBatch: (videos: VideoAsset[], name = "Batch", opts) => {
+    if (get().mode === "live") {
+      throw new Error(
+        "Direct browser batches are mock-only. Use the durable upload batch flow in live mode."
+      );
+    }
+    const batchRuns = videos.map(buildQueuedRun);
+    const now = Date.now();
+    const batch: Batch = {
+      id: uid("batch"),
+      name,
+      createdAt: now,
+      updatedAt: now,
       runIds: batchRuns.map((r) => r.id),
       concurrency: BATCH_CONCURRENCY,
       status: batchRuns.length === 0 ? "done" : "running",
@@ -274,79 +734,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       runs: [...batchRuns, ...state.runs],
       batches: [batch, ...state.batches],
     }));
-
-    // Bounded worker queue: at most BATCH_CONCURRENCY engines in flight.
-    // runWorkflow() never rejects (it catches internally and fails the run),
-    // but .catch is kept so a queue slot can never leak.
-    //
-    // Budget governance (lib/cost.ts): before dispatching each next run, the
-    // queue checks dispatched-estimates + next-estimate against budgetUsd.
-    // Estimates, not actuals — in mock mode nothing is spent; the same gate
-    // guards real dollars when live adapters land.
-    const budgetUsd = batch.budgetUsd;
-    const estimateById = new Map(
-      batchRuns.map((r) => [
-        r.id,
-        estimateRun(r.originalVideo.durationSec).totalUsd,
-      ])
-    );
-    let dispatchedEstimateUsd = 0;
-    const pending = batch.runIds.slice();
-    const total = pending.length;
-    let inFlight = 0;
-    let settledCount = 0;
-    const finishIfSettled = (): void => {
-      if (settledCount >= total) {
-        set((state) => ({
-          batches: state.batches.map((b) =>
-            b.id === batch.id ? { ...b, status: "done" as const } : b
-          ),
-        }));
-      }
-    };
-    const pump = (): void => {
-      while (inFlight < BATCH_CONCURRENCY && pending.length > 0) {
-        const nextEstimate = estimateById.get(pending[0]) ?? 0;
-        if (
-          budgetUsd !== undefined &&
-          dispatchedEstimateUsd + nextEstimate > budgetUsd
-        ) {
-          // Budget cap reached — do NOT dispatch anything else: settle every
-          // remaining queued run as failed/skipped.
-          while (pending.length > 0) {
-            const skippedId = pending.shift() as string;
-            skipRunForBudget(
-              skippedId,
-              dispatchedEstimateUsd + (estimateById.get(skippedId) ?? 0),
-              budgetUsd
-            );
-            settledCount += 1;
-          }
-          break;
-        }
-        const runId = pending.shift() as string;
-        dispatchedEstimateUsd += nextEstimate;
-        inFlight += 1;
-        appendRunLog(
-          runId,
-          `Picked up by a batch worker (${inFlight}/${BATCH_CONCURRENCY} slots busy, ${pending.length} still queued)`
-        );
-        void runWorkflow(runId)
-          .catch(() => undefined)
-          .then(() => {
-            inFlight -= 1;
-            settledCount += 1;
-            if (settledCount >= total) {
-              finishIfSettled();
-            } else {
-              pump();
-            }
-          });
-      }
-      // Covers the all-skipped case (budget hit with nothing in flight).
-      if (inFlight === 0) finishIfSettled();
-    };
-    pump();
+    runMockBatchQueue(batch, batchRuns);
     return batch.id;
   },
 

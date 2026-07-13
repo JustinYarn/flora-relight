@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { HumanCheckGrade, Run } from "@/lib/types";
+import type { GradeClipDraft, HumanCheckGrade, HumanGrade, Run } from "@/lib/types";
 import { useAppStore } from "@/lib/store";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { Button, verdictColor } from "@/components/ui";
@@ -12,17 +12,18 @@ import {
   shippedVideo,
 } from "@/components/library/derive";
 import { SCALE, scalePoint } from "@/components/grade/derive";
+import type { GradeDraftSaveState } from "@/components/grade/useGradeDraft";
 
 /*
  * Blind grading of ONE clip. Deliberately shows NOTHING from the AI judges —
  * no scores, no verdicts, no violations — so the human read is un-anchored.
- * The same shippedVideo/shippedIteration helpers used by the comparison view
- * pick the cut, so you grade exactly the attempt the AI scored.
+ * The same shippedVideo/shippedIteration helpers used by the results view pick
+ * the delivered cut; automated comparisons appear only when they actually ran.
  */
 
 /** Rows where the check is about sound or timing get a how-to-look hint. */
 const ROW_HINTS: Record<string, string> = {
-  "audio-integrity": "listen with sound",
+  "audio-integrity": "listen to the final relit audio",
   "temporal-alignment": "watch the lips",
 };
 
@@ -82,6 +83,7 @@ function ScaleRow({
           onChange={(e) => onNote(e.target.value)}
           placeholder="note — what did you see? (optional)"
           aria-label="Optional note for this check"
+          maxLength={4000}
           className="mt-2 w-full max-w-md rounded-md bg-raised px-2.5 py-1 text-xs text-ink placeholder:text-faint focus:outline-none"
         />
       ) : null}
@@ -92,17 +94,28 @@ function ScaleRow({
 export function ClipGrader({
   run,
   remaining,
+  draft,
+  draftSaveState,
+  onDraftChange,
+  onRetryDraftSave,
+  onSubmitted,
   onSkip,
 }: {
   run: Run;
   /** Clips still in the queue, this one included. */
   remaining: number;
+  draft: GradeClipDraft;
+  draftSaveState: GradeDraftSaveState;
+  onDraftChange: (update: (current: GradeClipDraft) => GradeClipDraft) => void;
+  onRetryDraftSave: () => void;
+  onSubmitted: (runId: string) => void;
   onSkip: () => void;
 }) {
-  const setHumanGrade = useAppStore((s) => s.setHumanGrade);
-  const [answers, setAnswers] = useState<Record<string, Answer>>({});
-  const [shipIt, setShipIt] = useState<boolean | undefined>(undefined);
-  const [overallNote, setOverallNote] = useState("");
+  const answers = draft.answers;
+  const shipIt = draft.shipIt;
+  const overallNote = draft.overallNote;
+  const [submitting, setSubmitting] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
 
   const shipped = shippedIteration(run);
   const relit = shippedVideo(run);
@@ -112,8 +125,8 @@ export function ClipGrader({
   );
   const complete = answeredCount === EVAL_DEFS.length && shipIt !== undefined;
 
-  const save = () => {
-    if (!complete || shipIt === undefined) return;
+  const save = async (): Promise<void> => {
+    if (!complete || shipIt === undefined || submitting) return;
     const scores: Record<string, HumanCheckGrade> = {};
     for (const def of EVAL_DEFS) {
       const a = answers[def.id];
@@ -126,13 +139,52 @@ export function ClipGrader({
         ...(a.note.trim() ? { note: a.note.trim() } : {}),
       };
     }
-    setHumanGrade(run.id, {
+    const humanGrade: HumanGrade = {
       gradedAt: Date.now(),
       scores,
       shipIt,
       ...(overallNote.trim() ? { overallNote: overallNote.trim() } : {}),
-    });
-    // The queue recomputes upstream — the next ungraded clip mounts fresh.
+    };
+
+    setSubmitting(true);
+    setSubmissionError(null);
+    try {
+      const response = await fetch(`/api/runs?id=${encodeURIComponent(run.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          humanGrade,
+          expectedGradedAt: run.humanGrade?.gradedAt ?? null,
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { run?: Run; current?: Run; error?: string }
+        | null;
+      if (!response.ok || !payload?.run) {
+        if (response.status === 409 && payload?.current) {
+          useAppStore.setState((state) => ({
+            runs: state.runs.map((item) =>
+              item.id === run.id ? payload.current! : item
+            ),
+          }));
+        }
+        throw new Error(payload?.error ?? `Grade save failed (${response.status}).`);
+      }
+
+      // PATCH returns the server's canonical compact record. The full judged
+      // frame evidence remains archived server-side and cannot be erased here.
+      useAppStore.setState((state) => ({
+        runs: state.runs.map((item) => (item.id === run.id ? payload.run! : item)),
+      }));
+      // Only clear the draft after the final grade is durably acknowledged.
+      onSubmitted(run.id);
+    } catch (error) {
+      setSubmissionError(
+        error instanceof Error ? error.message : "The grade could not be saved."
+      );
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const shipButton = (value: boolean, label: string) => {
@@ -141,7 +193,9 @@ export function ClipGrader({
     return (
       <button
         key={label}
-        onClick={() => setShipIt(value)}
+        onClick={() =>
+          onDraftChange((current) => ({ ...current, shipIt: value }))
+        }
         aria-pressed={selected}
         className={`rounded-md border px-2.5 py-1 text-xs transition ${
           selected ? "font-semibold" : "text-muted hover:text-ink"
@@ -175,11 +229,12 @@ export function ClipGrader({
         </span>
       </div>
 
-      {/* The before/after — large, front and center. Original side carries the audio. */}
+      {/* The before/after — the delivered relit file owns audio during grading. */}
       <div className="[&>button]:max-w-none">
         <PairPlayer
           original={run.originalVideo}
           relit={relit}
+          audible="relit"
           relitLabel={
             run.finalVideo
               ? "RELIT · FINAL"
@@ -213,17 +268,29 @@ export function ClipGrader({
             <ScaleRow
               answer={answers[def.id]}
               onPick={(points) =>
-                setAnswers((cur) => ({
-                  ...cur,
-                  [def.id]: { points, note: cur[def.id]?.note ?? "" },
+                onDraftChange((current) => ({
+                  ...current,
+                  answers: {
+                    ...current.answers,
+                    [def.id]: {
+                      points,
+                      note: current.answers[def.id]?.note ?? "",
+                    },
+                  },
                 }))
               }
               onNote={(note) =>
-                setAnswers((cur) => {
-                  const existing = cur[def.id];
+                onDraftChange((current) => {
+                  const existing = current.answers[def.id];
                   return existing
-                    ? { ...cur, [def.id]: { ...existing, note } }
-                    : cur;
+                    ? {
+                        ...current,
+                        answers: {
+                          ...current.answers,
+                          [def.id]: { ...existing, note },
+                        },
+                      }
+                    : current;
                 })
               }
             />
@@ -248,25 +315,72 @@ export function ClipGrader({
           </span>
           <input
             value={overallNote}
-            onChange={(e) => setOverallNote(e.target.value)}
+            onChange={(e) => {
+              const overallNote = e.target.value;
+              onDraftChange((current) => ({ ...current, overallNote }));
+            }}
             placeholder="overall note (optional)"
             aria-label="Optional overall note for this clip"
+            maxLength={8000}
             className="min-w-40 flex-1 rounded-md bg-raised px-2.5 py-1.5 text-xs text-ink placeholder:text-faint focus:outline-none"
           />
+          <span
+            role="status"
+            aria-live="polite"
+            title={draftSaveState.message}
+            className={`text-2xs tabular-nums ${
+              draftSaveState.status === "error"
+                ? "text-fail"
+                : draftSaveState.status === "saved"
+                  ? "text-pass"
+                  : "text-faint"
+            }`}
+          >
+            {draftSaveState.status === "loading"
+              ? "restoring draft…"
+              : draftSaveState.status === "saving"
+                ? "saving draft…"
+                : draftSaveState.status === "saved"
+                  ? `draft saved${
+                      draftSaveState.updatedAt
+                        ? ` · ${new Date(draftSaveState.updatedAt).toLocaleTimeString([], {
+                            hour: "numeric",
+                            minute: "2-digit",
+                          })}`
+                        : ""
+                    }`
+                  : draftSaveState.status === "error"
+                    ? "draft not saved"
+                    : "draft autosave ready"}
+          </span>
+          {draftSaveState.status === "error" && draftSaveState.retryable ? (
+            <button
+              type="button"
+              onClick={onRetryDraftSave}
+              className="min-h-10 rounded-md px-2 text-2xs text-muted transition-colors hover:text-ink active:scale-[0.96]"
+            >
+              Retry
+            </button>
+          ) : null}
+          {submissionError ? (
+            <span className="text-2xs text-fail" role="alert">
+              {submissionError}
+            </span>
+          ) : null}
           <span className="flex items-center gap-2">
             <Button variant="ghost" onClick={onSkip}>
               Skip this clip
             </Button>
             <Button
-              onClick={save}
-              disabled={!complete}
+              onClick={() => void save()}
+              disabled={!complete || submitting}
               title={
                 complete
                   ? undefined
                   : "answer all 11 checks and the ship question first"
               }
             >
-              Save grade &amp; next
+              {submitting ? "Saving grade…" : "Save grade & next"}
             </Button>
           </span>
         </div>

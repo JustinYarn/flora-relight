@@ -149,9 +149,9 @@ const SAMPLE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
  *                            deterministic scratch path (once per process —
  *                            the Files-API upload cache stays keyed by it).
  *   "/api/media/<...segs>" → legacy direct read under <repo>/data (fs only)
- *   absolute https URL     → accepted only when the active driver can
- *                            reverse-map it (blob driver publicMediaUrl()
- *                            values that clients echo back as sourceUrl).
+ *   absolute https URL     → migration-only: accepted when the active driver
+ *                            reverse-maps a legacy persisted Blob URL. New
+ *                            client references are always /api/media paths.
  * Anything else (blob:, foreign http:, absolute paths, ...) is rejected.
  */
 export async function resolveSourceUrl(sourceUrl: string): Promise<string> {
@@ -234,9 +234,9 @@ const IMAGE_EXT_MIME: Record<string, string> = {
 
 /**
  * Load an image reference as base64: either a data URL, or a served media
- * url ("/api/media/..." — or, on the blob driver, the blob CDN URL) that we
- * resolve to a local file and read server-side (the anchor route returns
- * served urls, not data urls).
+ * url (normally "/api/media/..."; legacy persisted Blob URLs are accepted
+ * only through the storage reverse map) that we resolve to a local file and
+ * read server-side (the anchor route returns served urls, not data urls).
  */
 export async function loadImageRef(ref: string): Promise<LoadedImage> {
   if (ref.startsWith("data:")) return parseDataUrl(ref);

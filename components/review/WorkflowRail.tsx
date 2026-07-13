@@ -15,7 +15,7 @@ import Link from "next/link";
 import type { NodeRunStatus, Run } from "@/lib/types";
 import { useAppStore } from "@/lib/store";
 
-type StageState = "idle" | "active" | "done" | "failed";
+type StageState = "idle" | "active" | "done" | "failed" | "skipped";
 
 /** The six stages, mirroring the pipeline canvas lanes (components/canvas). */
 const STAGES: { id: string; label: string; nodeIds: string[] }[] = [
@@ -24,7 +24,7 @@ const STAGES: { id: string; label: string; nodeIds: string[] }[] = [
   { id: "generate", label: "Generate", nodeIds: ["compile", "videogen", "conform"] },
   {
     id: "checks",
-    label: "The 10 checks",
+    label: "Automated checks",
     nodeIds: [
       "sample",
       "eval-align",
@@ -53,6 +53,7 @@ function stageState(run: Run, nodeIds: string[]): StageState {
   );
   if (statuses.some((s) => s === "failed")) return "failed";
   if (statuses.some((s) => s === "running" || s === "queued")) return "active";
+  if (statuses.every((s) => s === "skipped")) return "skipped";
   if (statuses.every((s) => s === "succeeded" || s === "skipped")) return "done";
   return "idle";
 }
@@ -62,6 +63,7 @@ const DOT_COLOR: Record<StageState, string> = {
   active: "var(--running)",
   done: "var(--pass)",
   failed: "var(--fail)",
+  skipped: "var(--faint)",
 };
 
 const LABEL_CLASS: Record<StageState, string> = {
@@ -69,6 +71,7 @@ const LABEL_CLASS: Record<StageState, string> = {
   active: "text-ink",
   done: "text-muted",
   failed: "text-fail",
+  skipped: "text-faint",
 };
 
 export function WorkflowRail({ run }: { run: Run }) {
@@ -127,7 +130,9 @@ export function WorkflowRail({ run }: { run: Run }) {
                 {stage.label}
                 {stage.id === "checks" && checksLanded !== null ? (
                   <span className="rounded-full bg-raised px-1.5 py-px text-2xs tabular-nums text-muted">
-                    {checksLanded}/{CHECKS_PER_ITERATION}
+                    {state === "skipped"
+                      ? "not run"
+                      : `${checksLanded}/${CHECKS_PER_ITERATION}`}
                   </span>
                 ) : null}
               </span>

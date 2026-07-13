@@ -96,6 +96,8 @@ function AttemptChips({
   const dotColor = (status: Iteration["status"]): string =>
     status === "running"
       ? "var(--running)"
+      : status === "ungraded"
+        ? "var(--borderline)"
       : status === "passed"
         ? "var(--pass)"
         : "var(--fail)";

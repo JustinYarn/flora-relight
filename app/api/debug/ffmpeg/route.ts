@@ -1,7 +1,8 @@
 /**
  * Diagnostic: reports how ffmpeg discovery sees the deployed environment.
- * Gate-protected like everything else (middleware). Safe to keep — it reveals
- * only tool paths, no secrets.
+ * Disabled by default because the detailed report includes process paths and
+ * low-level execution errors. Enable only briefly with
+ * FLORA_FFMPEG_DEBUG_ENABLED=1 on a password-protected deployment.
  */
 
 import { NextResponse } from "next/server";
@@ -11,6 +12,10 @@ import { probe } from "@/lib/server/ffmpeg";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+function enabled(): boolean {
+  return process.env.FLORA_FFMPEG_DEBUG_ENABLED === "1";
+}
 
 function tryRun(bin: string): string {
   try {
@@ -24,6 +29,10 @@ function tryRun(bin: string): string {
 }
 
 export async function GET(): Promise<NextResponse> {
+  if (!enabled()) {
+    return NextResponse.json({ error: "Not found." }, { status: 404 });
+  }
+
   let requirePath: string | null = null;
   let requireError: string | null = null;
   try {
@@ -60,5 +69,7 @@ export async function GET(): Promise<NextResponse> {
       : `discovery OK (probe failed on the fake file as expected: ${msg.slice(0, 100)})`;
   }
 
-  return NextResponse.json(report);
+  return NextResponse.json(report, {
+    headers: { "Cache-Control": "private, no-store, max-age=0" },
+  });
 }

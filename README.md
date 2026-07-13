@@ -4,17 +4,19 @@ An internal workflow-pipeline studio for professionally relighting ~10-second
 webcam videos with generative models — same person, same performance, same room, studio-grade
 light. The app wraps the whole loop: ingest → scene manifest → Look Anchor (relit still) →
 video generation → an 11-eval dual-judge gauntlet → automatic prompt correction → human review.
-With API keys configured the app runs **live** against the real providers. Without keys it
-falls back to **mock mode**: every provider is a scripted stand-in behind the interfaces in
-`lib/types.ts` (`lib/mock/`, the mock branch of `lib/providers/`). The mock machinery is a
-no-keys fallback only — it has **no UI entry points** (no sample library, no demo buttons);
-the engine simply uses the mock adapters when no keys exist.
+With API keys configured the app selects its **live** provider adapters. Configuration alone
+does not prove that a particular hosted deployment can complete a provider artifact round
+trip; verify the deployment as described below before treating it as live-functional.
+Without keys it falls back to **mock mode**: every provider is a scripted stand-in behind the
+interfaces in `lib/types.ts` (`lib/mock/`, the mock branch of `lib/providers/`). The mock
+machinery is a no-keys fallback only — it has **no UI entry points** (no sample library, no
+demo buttons); the engine simply uses the mock adapters when no keys exist.
 
 ## Quickstart
 
 Prerequisites:
 
-- **Node >= 20** (the Google GenAI SDK requires it; an `.nvmrc` pins 22 — `nvm use`)
+- **Node 22** (`.nvmrc` is the supported local default)
 - **ffmpeg** on your PATH (`brew install ffmpeg` on macOS) — used for trimming,
   audio demux/remux, and the side-by-side export
 - **API keys** for live mode: copy `.env.local.example` to `.env.local` and add your
@@ -30,37 +32,43 @@ npm run dev
 
 Costs money when live: video generation bills ~$1.00 per 10s clip per attempt, judges a few
 cents per check. Every run/batch shows its price in a confirmation dialog before starting,
-the top bar tracks actual spend, and batches accept a budget cap. All results (videos,
-scores, prompts) persist to the gitignored `data/` folder on your machine — nothing is
-uploaded anywhere except the API calls themselves.
+the top bar tracks actual spend, and batches accept a budget cap. In local development,
+results (videos, scores, prompts, and grading drafts) persist under the gitignored `data/`
+store. In a deployed environment they persist to the configured Blob + Postgres storage.
 
 ## Deploying to Vercel
 
-The repo deploys as a **container-image function** — the `Dockerfile` at the repo root is
-picked up automatically — because ingest, videogen remux, and the side-by-side export need a
-real ffmpeg binary. Storage swaps by env (`lib/server/storage/`): with
-`BLOB_READ_WRITE_TOKEN` + `DATABASE_URL` present the app persists media to **Vercel Blob**
-and run/batch JSON to **Neon Postgres**; without them it writes to the local `data/` folder
-(fine on your machine, ephemeral in a deployed container — always configure both for a real
-deploy).
+The repo deploys as a standard Next.js project. `ffmpeg-static` is bundled into the
+serverless route traces by `next.config.mjs`, supplying the real media binary needed by
+ingest, video finalization, and side-by-side export. Storage swaps by env
+(`lib/server/storage/`): with
+`BLOB_READ_WRITE_TOKEN` + `DATABASE_URL` + `FLORA_BLOB_ACCESS=private` present the app
+persists media to a **private Vercel Blob store** and run/batch JSON to **Neon Postgres**.
+Hosted production fails closed when any part is missing or access is not explicitly private;
+local development may use the `data/` folder.
 
 Prerequisites and setup:
 
-1. **Vercel Pro plan** (~$20/mo) — required for the long-running videogen function
-   (`maxDuration: 800` in `vercel.json`; Hobby caps at 300s). At this app's scale the Pro
-   plan covers the infrastructure: Blob storage/bandwidth and marketplace Postgres for a
-   personal review workload sit inside the plan's included usage, so expect the recurring
-   infra bill to stay ≈ the $20/mo plan fee. The real variable spend is the AI APIs
-   (~$1 per 10s generation attempt), which the app estimates and tracks in-product.
+1. Use **Node 22**, enable **Fluid Compute**, and deploy as a normal Next.js project. The
+   `workflow` adapter in `next.config.mjs` generates the `/.well-known/workflow/*` control
+   plane. Those routes must remain reachable by Vercel's internal queue requests; the
+   password middleware intentionally excludes them.
 2. `npm i -g vercel`, then `vercel login` and `vercel link` (create/link the project).
 3. **Neon Postgres**: `vercel install neon`, then create a database from the project's
    Storage tab and connect it — this injects `DATABASE_URL` into the environment.
-4. **Blob store**: project dashboard → Storage → Create Database → Blob, connect it to the
-   project — this injects `BLOB_READ_WRITE_TOKEN`.
+4. **Private Blob store**: project dashboard → Storage → Create Database → Blob, choose
+   **Private**, and connect it to the project — this injects `BLOB_READ_WRITE_TOKEN`.
+   Vercel cannot change an existing public store to private: create a new private store and
+   reconnect the project. Existing public run media can still be read through Flora's gated
+   proxy during migration, but every new upload and generated artifact uses the private store.
 5. **Env vars** — add each with `vercel env add <NAME> production`:
    - `FLORA_ACCESS_PASSWORD` — the shared access gate password (middleware + `/gate`).
-     Do not deploy without it: every page/API route — including the blob-upload token
-     route and the paid AI routes — is open otherwise.
+     Hosted deployments require at least 20 characters with no surrounding whitespace;
+     use a randomly generated 32+ character value. Missing or weak configuration fails
+     closed. Protect `/api/gate` with Vercel Deployment Protection or another edge/WAF
+     rate limit; an in-memory application counter is not reliable across serverless instances.
+   - `FLORA_BLOB_ACCESS=private` — required explicit access policy. Set this only after the
+     connected `BLOB_READ_WRITE_TOKEN` belongs to the new private store.
    - `GEMINI_API_KEY` — Google AI Studio key (paid tier for image/video models).
    - `ANTHROPIC_API_KEY` — Claude judge.
 6. `vercel deploy --prod`.
@@ -68,13 +76,136 @@ Prerequisites and setup:
 **Cloud uploads are two-step.** Deployed Vercel functions cap request bodies at 4.5MB, so
 the local multipart `/api/ingest` cannot receive videos in production. When the blob driver
 is active the browser instead: (1) asks `POST /api/ingest/token` (gate-cookie
-authenticated) for a client token and streams the file **directly to Vercel Blob**
-(`upload()` from `@vercel/blob/client`; `uploads/` prefix, video/* only, 500MB cap), then
-(2) calls `POST /api/ingest/finalize`, which downloads the blob to scratch, runs the exact
+authenticated and same-origin checked) for a client token and streams the file **directly to
+private Vercel Blob** (`upload()` from `@vercel/blob/client`; deterministic run-owned
+`uploads/` path, multipart, video/* only, 150MB cap), then (2) calls
+`POST /api/ingest/finalize` with only the reserved run id. The server resolves and
+authenticates the private object, downloads it to scratch, and runs the exact
 same probe → auto-trim → audio-demux pipeline as local ingest, persists
-`source.mp4`/`source-audio.m4a` under a new run id, and deletes the raw upload. The client
+`source.mp4`/`source-audio.m4a` under the client's reserved run id, and deletes the raw upload. The client
 picks its path automatically from `GET /api/storage/info` (`fs` → multipart, `blob` →
-client upload); local dev with no blob envs is byte-for-byte unchanged.
+client upload); local dev with no blob envs is unchanged. A signed Blob completion callback
+and the pre-token durable reservation close the upload/finalize crash gap: after a reload,
+Flora can discover the deterministic private object and finish ingest without exposing its
+provider URL.
+
+`GET /api/readiness` does more than inspect environment-variable presence in hosted mode: it
+performs a small private-Blob and Postgres write/read/delete round trip (cached for 60 seconds)
+plus the ffmpeg check. `ready: true` therefore proves the configured storage backends were
+reachable at that moment, without calling an AI provider or uploading user media.
+
+### Hosted durability and working memory
+
+The hosted app now has several independent persistence boundaries:
+
+- **Uploads and run identity:** a multi-file selection is recorded as a batch draft before
+  transfer begins, each file receives a stable run id, and every successful upload is
+  finalized into durable media storage. A run skeleton is written to the server before the
+  browser starts analysis. On reload the Studio checks the finalization receipt for any
+  interrupted-looking item, so a completed server ingest is recovered even if its response
+  was lost. Bytes that were only partway through a browser-to-Blob transfer must be sent
+  again; completed uploads and prepared run records survive.
+- **Run and batch state:** the browser hydrates from paginated server history, but live
+  execution truth is stored separately in revisioned `RunExecution` and `BatchExecution`
+  records. The UI only accepts non-regressing revisions and polls once per selected batch,
+  rather than starting one poller per clip. Canonical source facts, immutable execution
+  membership, exact prompts, spend approval, provider operations, and final human grades are
+  protected by atomic server updates. A stale browser snapshot cannot move a live execution
+  backwards, alter its budget, or erase it. A deleted run id is permanently tombstoned, so an
+  already-open tab cannot resurrect it or reset its billing history.
+- **Blind grading:** `/grade` restores and autosaves a revisioned grading draft through
+  `/api/grade-drafts`. Compare-and-swap revisions prevent an older tab from silently
+  overwriting a newer draft. Final submission also uses compare-and-swap, so a stale grader
+  receives a conflict instead of replacing the latest grade. A completed video reconstructed
+  from the server provider journal remains gradeable even if later browser-side frame/judge
+  work failed; the displayed URL and accepted grade refer to that exact journaled artifact.
+- **Potentially paid calls:** manifest, Look Anchor, each configured judge slot, and video
+  generation all require a valid server-issued spend approval priced from the durable,
+  server-probed ingest—not browser duration or URL metadata. Every action has a stable
+  operation id and durable claim. Completed synchronous responses are replayed from the
+  journal; an in-flight or ambiguous result fails closed and must be reconciled rather than
+  automatically repeating a potentially billed request.
+- **Durable live first cuts:** after server-side spend authorization and an atomic operation
+  claim, a `RunExecution` Workflow owns the provider submission, non-billed polling,
+  generated-file download, original-audio remux, verification, journal settlement, and the
+  transition to human review. The exact rendered prompt is frozen into the execution record.
+  A provider handle is never recreated merely because a poll or deployment was interrupted;
+  ambiguous work remains reserved and enters reconciliation instead. Recovery polling can
+  continue for up to seven days after the initiating tab closes.
+- **Durable live batches:** one immutable `BatchExecution` freezes the ordered members,
+  server-owned concurrency of exactly 2, prompt, and integer micro-dollar budget plan before
+  dispatch. A parent Workflow admits only reserved members and starts durable child
+  `RunExecution` workflows up
+  to two at a time. Its exact member/source/prompt/cost approvals are anchored to admission
+  and remain valid for the seven-day recovery window; a retry cannot roll that window
+  forward. Refreshing, closing the tab, or retrying a lost start
+  response does not create a second paid attempt. Terminal and reconciliation states remain
+  visible after reload, and a lost final batch-status write is repaired on the next start
+  retry.
+
+The live production milestone is intentionally narrower than the product's full evaluation
+design: it creates **one canonical relit first cut**, restores and verifies the original
+audio, and then hands that artifact to the human grader. It does not claim that the manifest,
+Look Anchor, 11-check dual-judge gauntlet, gates, or automatic correction loop ran. Those
+stages remain available in the scripted mock engine for product exploration, but the browser
+engine refuses live execution. Live single runs and batches no longer depend on an open tab;
+their durable result is either ready for grading, safely failed before spend, or explicitly
+waiting for reconciliation.
+
+### Provider-free Workflow deployment test
+
+`GET /api/readiness` proves the configured storage backend and ffmpeg binary only. It does
+not exercise Vercel's Workflow queue and it never calls an AI provider. The gated smoke also
+creates a tiny synthetic clip inside Workflow scratch, encodes it, demuxes/remuxes its audio,
+and probes the result. It uses no uploaded media and makes no provider call. Run it after
+deploying a Workflow change:
+
+1. Temporarily set `FLORA_WORKFLOW_SMOKE_ENABLED=1` for the target environment and redeploy.
+2. Sign in to the deployed app, open the browser console on that origin, and run:
+
+   ```js
+   const token = `smoke_${Date.now()}`;
+   const started = await fetch("/api/debug/workflow", {
+     method: "POST",
+     headers: { "Content-Type": "application/json" },
+     body: JSON.stringify({ token }),
+   }).then(async (response) => {
+     if (!response.ok) throw new Error(await response.text());
+     return response.json();
+   });
+
+   let probe;
+   // Allow up to two minutes: a cold Workflow worker can take longer than a
+   // normal warm invocation even when the deployment is healthy.
+   for (let attempt = 0; attempt < 60; attempt += 1) {
+     await new Promise((resolve) => setTimeout(resolve, 2_000));
+     probe = await fetch(
+       `/api/debug/workflow?id=${encodeURIComponent(started.workflowRunId)}`
+     ).then((response) => response.json());
+     if (probe.status === "completed") break;
+   }
+   probe;
+   ```
+
+3. The loop polls every two seconds for up to 120 seconds. Success is
+   `status: "completed"` with the same token, checkpoints
+   `['started', 'completed']`, and `result.runtime.ready === true`. The runtime
+   result proves the Workflow step could execute ffmpeg and the same provider-free
+   storage round trip used by `/api/readiness`; it starts no AI-provider call and
+   reads or uploads no user media.
+4. Set the flag back to `0` (or remove it) and redeploy. Do not leave the debug starter
+   enabled in production.
+
+A successful smoke test proves the Workflow control plane plus provider-free storage and
+ffmpeg availability inside a Workflow step. Treat provider keys as
+`configured_unverified` until a separate, explicitly approved server-side artifact
+submission/poll/download test succeeds. Never use the smoke test as permission for a paid
+provider call.
+
+The detailed `/api/debug/ffmpeg` route is separately disabled by default. If deployment
+diagnosis requires it, set `FLORA_FFMPEG_DEBUG_ENABLED=1`, redeploy, inspect it while signed
+in, then remove the flag and redeploy immediately; its operator report contains local process
+paths and low-level execution details.
 
 ## What MOCK MODE means
 
@@ -146,19 +277,23 @@ the technical vocabulary. Same concepts, one mapping:
 | `lib/util.ts` | Small shared helpers (ids, clamps, formatting, verdict math) |
 | `lib/cost.ts` | Cost governance: placeholder `PRICE_TABLE`, est.-live-cost estimators, `formatUsd` |
 | `lib/prompts/` | Base prompt, manifest-extraction prompt, the 11 eval definitions, the mega-prompt compiler |
-| `lib/providers/` | `VideoGenProvider` / `ImageGenProvider` / `VisionJudgeProvider` implementations — mock today, real later |
+| `lib/providers/` | Client-safe live/mock adapters for video generation, image generation, and judges |
 | `lib/mock/` | The scripted no-keys fallback scenario: per-iteration outcomes, synthetic sample video, mock scene manifest (no UI entry points) |
 | `lib/engine.ts` | `runWorkflow()` — executes the graph, drives iterations, aggregates evals, updates the store |
 | `lib/workflow-def.ts` | `RELIGHT_WORKFLOW` — the default pipeline graph + run config |
 | `lib/frames.ts` | Client-side frame probing/extraction via canvas |
-| `lib/store.ts` | Zustand store: runs, batches, review actions |
+| `lib/store.ts` | Zustand UI/read cache plus the mock-only in-tab batch worker queue |
+| `lib/persist.ts` | Browser-to-server run/batch synchronization and retry status |
+| `lib/server/storage/` | Local fs or hosted Blob + Postgres persistence drivers |
+| `workflows/` | Durable live run/batch coordination, video finalization, and provider-free Workflow probe |
+| `app/api/grade-drafts/` | Revision-checked blind-grading working memory |
 | `components/ui.tsx` | Shared UI primitives (cards, badges, meters) |
 | `ARCHITECTURE.md` | The full design: pipeline tiers, structural guarantees, eval methodology, loop control |
 
 ## The Library
 
-`/library` is the reader over the on-disk run store (`data/runs/<runId>/run.json` plus the
-media files next to it): every generation the studio has ever produced, newest first, with a
+`/library` reads the active storage backend: `data/runs/<runId>/` locally, or Blob +
+Postgres when deployed. It shows every persisted generation, newest first, with a
 one-line stats strip (total generations, review counts, average Overall score of shipped
 cuts, actual + estimated spend) and filters (clip search, status chips, live-vs-simulated
 toggle, sort). Rows disclose progressively: collapsed — before/after thumbnails, status,
@@ -186,26 +321,24 @@ back to the team.
 
 `/batch` is the answer to "run this against everything." **Batches start from the Studio
 dropzone**: drop (or pick) several clips at once and each is ingested sequentially through
-`/api/ingest` (with per-file progress and per-file error reporting — one bad clip never
-aborts the set; over-long clips are auto-trimmed to the 10s model cap and the trim count is
-surfaced). You then get **one spend confirmation** listing every clip with its per-clip
-estimate, the batch total (`estimateBatch`), and an optional **budget cap** field before
-anything runs. Confirming calls `startBatch(videos, name, { budgetUsd })` in `lib/store.ts`,
-which creates one run per clip and drains them through a bounded worker queue —
-**at most 2 engines in flight**; the rest sit visibly queued ("waiting for a worker slot")
-until a slot frees. The board shows aggregate stats for the whole batch (completion,
-pass-first-try rate, fallback count, mean composite, the hard gate that failed most, mean
-judge confidence) over a grid of live clip cards with gate-failure chips, low-confidence and
-fallback flags, and inline approve. In mock mode each clip deterministically replays one of
-five scripted trajectories (`scenarioForVideo()` in `lib/mock/scenario.ts`), so a multi-clip
-batch exercises the entire outcome spectrum on one screen.
+the active local or direct-to-Blob path (with per-file progress and per-file error reporting
+— one bad clip never aborts the set; over-long clips are auto-trimmed to the 10s model cap
+and the trim count is surfaced). You then get **one spend confirmation** listing every clip
+with its per-clip estimate, the batch total (`estimateBatch`), and an optional **budget cap**
+field before anything runs. Confirming creates one server-persisted run skeleton per clip. In
+live mode the server then freezes one `BatchExecution`: ordered membership, exact first-cut
+prompt, server-owned concurrency of 2, and a hard integer micro-dollar reservation plan. A
+durable parent Workflow starts at most two child run workflows at once, regardless of browser
+or persisted batch input; the rest remain durably queued. A budget that cannot admit every
+clip marks the
+remainder `skipped_budget` before any provider operation is authorized. The board restores
+this state after refresh and uses one batch poll plus targeted member refreshes.
 
-The bounded queue is not a mock convenience; it is the production shape. Real Omni calls are
-rate-limited and each video generation costs real money, so batch throughput will always be
-"N workers against a rate limit and a budget", never "fire everything at once." The batch
-board is the human half of that story: automation produces candidates at machine speed,
-reviewers consume them from a single queue, and every verdict feeds back into the system.
-Scaling this up looks like:
+Every admitted live member produces one audio-verified first cut for manual grading. There
+are no automatic live judge or correction attempts in this milestone. In mock mode only,
+`lib/store.ts` runs the original browser worker queue and each clip deterministically replays
+one of five scripted full-pipeline trajectories (`scenarioForVideo()` in
+`lib/mock/scenario.ts`). Scaling the surrounding batch product further looks like:
 
 - **Folder-scale input** — point the same `startBatch` contract at a directory of 50+ clips;
   worker count becomes a config knob bounded by Omni rate limits and the per-batch cost budget.
@@ -239,39 +372,57 @@ live wiring so going live cannot outrun the accounting.
   item per provider call as the engine executes; the run log closes with an
   "Est. live cost for this run" line. In mock mode all items are `estimated: true` and
   `actualUsd` stays $0.
-- **Batches can carry a budget cap.** `startBatch(videos, name, { budgetUsd })` makes the
-  worker queue check projected spend before dispatching each run; once the next run's
-  estimate would break the cap, remaining runs are skipped (failed with a "budget reached"
-  log entry and a "budget cap" badge on the board) instead of dispatched.
-- **When live mode lands, actuals accrue through the same ledger.** The real adapters flip
-  ledger items to `estimated: false` and accumulate `actualUsd` — the UI keeps the same
-  est/actual framing, and the budget gate starts guarding real dollars.
+- **Live batches have a hard server-owned budget cap.** Before dispatch, the server reserves
+  the maximum cost of one 10-second first cut for each admitted member using integer
+  micro-dollars. Reserved plus settled spend cannot exceed the frozen cap. Completion settles
+  the journaled actual from the raw provider output duration before audio remux can shorten
+  the delivered artifact; an ambiguous provider outcome keeps its reservation instead of
+  freeing money for another call. Mock batches retain the in-tab planning guardrail because
+  they cannot spend anything.
+- **In live mode, confirmed actuals come from server journals.** Completed manifest, anchor,
+  judge, and video operations materialize their recorded costs into the displayed ledger
+  after an interruption; a browser snapshot cannot forge or erase those confirmed items.
+  An operation sealed as `reconcile_required` may have charged upstream but has no confirmed
+  result/cost yet, so the confirmed numeric actual can be a lower bound until manual
+  reconciliation. The batch summary keeps that amount visibly reserved rather than reporting
+  it as available budget.
 
-## Wiring real APIs later
+## Live API boundaries
 
-The architecture is built so that going live touches **only `lib/providers/`**:
+Live and mock implementations share the interfaces in `lib/types.ts`; provider secrets and
+media plumbing stay on server routes:
 
-1. **Implement the three provider interfaces** (defined in `lib/types.ts`):
+1. **Provider interfaces:**
    - `VideoGenProvider` → the Omni video model. Receives the original video, the compiled
-     mega prompt, the approved anchor frame as conditioning, and a seed. Note the interface
+     mega prompt, the approved anchor frame as conditioning, and a seed. The interface
      deliberately does not accept audio.
    - `ImageGenProvider` → Gemini image relighting for the Tier-1 Look Anchor.
    - `VisionJudgeProvider` × 2 → Claude and Gemini as independent vision judges, each
-     receiving an eval rubric plus before/after frames and returning a `JudgeVerdict`.
-2. **Add an ffmpeg service** (local binary or sidecar) for the media plumbing the browser
-   cannot do: demux audio at ingest, hash it, conform/inspect the generated video,
-   stream-copy remux audio onto the winner, and real (non-canvas) frame extraction.
-3. **Swap the deterministic metric stubs** for real ones (face-embedding similarity,
-   masked SSIM, landmark correlation, flicker) as they come online — they slot in behind
-   the same `EvalResult` shape.
-4. Flip `getProviders("mock")` to `getProviders("live")` in the engine call site.
+     receiving an eval rubric plus before/after evidence and returning a `JudgeVerdict`.
+2. **Server media service:** ffmpeg handles ingest probing/trimming, audio demux/remux,
+   generated-video inspection, verification, and exports. `ffmpeg-static` is traced into
+   hosted functions; local development may use the installed binary.
+3. **Paid-operation boundary:** all configured live provider calls require server-issued
+   approval and atomically claim a stable operation id. Ambiguous outcomes are sealed for
+   reconciliation; the app never assumes that an HTTP error means a paid request is safe to
+   repeat.
+4. **Remaining deterministic metric work:** real face-embedding similarity, masked SSIM,
+   landmark correlation, and flicker checks can replace the current stubs behind the same
+   `EvalResult` shape.
+5. `/api/live/health` selects live mode when the Gemini first-cut provider is configured and
+   reports the broader evaluation capability separately. That selection is a configuration
+   fact, not proof that any provider/model is functional in the current deployment.
 
-Everything else — the store, the engine loop, the eval registry and thresholds, the
-mega-prompt compiler, all UI — is designed to remain unchanged.
+The eval registry, thresholds, mega-prompt compiler, and UI still share contracts across live
+and mock modes. The execution owners are intentionally different: Vercel Workflow owns live
+first cuts and batches; the Zustand/browser engine is mock-only.
 
 ## Honest limitations
 
-This is a demo-quality internal tool. The *methodology* (eval design, prompt compilation,
-loop control) is production thinking; the *measurements* in mock mode are scripted. Any
-guarantee you see in the UI about identity preservation or audio integrity is, today, a
-simulation of what the real deterministic checks will enforce.
+This is an internal, still-hardening tool. The *methodology* (eval design, prompt
+compilation, loop control) is production thinking; the *measurements* in mock mode are
+scripted. Any guarantee shown while mock mode is active depicts what the real checks should
+enforce, not a pixel measurement. Hosted live orchestration currently stops after one durable,
+audio-verified first cut per admitted run; it does not run or claim the automated evaluation
+and correction loop. A configured key, a passing build, or a provider-free Workflow smoke
+test must not be described as a successful paid-provider artifact round trip.

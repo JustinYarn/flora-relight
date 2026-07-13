@@ -330,6 +330,11 @@ export async function runWorkflow(
   // replay); everything else follows the store's hydrated mode.
   const mode: "mock" | "live" = instant ? "mock" : useAppStore.getState().mode;
   const live = mode === "live";
+  if (live) {
+    throw new Error(
+      "Live browser execution is disabled. Durable server Workflows own all provider dispatch."
+    );
+  }
   const liveCtx: LiveRunContext | undefined = live
     ? {
         runId,
@@ -424,7 +429,7 @@ export async function runWorkflow(
       try {
         const res = await postJson<{ manifest: SceneManifest; costUsd: number }>(
           "/api/live/manifest",
-          { sourceUrl: original.url },
+          { runId, sourceUrl: original.url },
           4 * 60_000
         );
         mutateRun(runId, (r) => {
@@ -477,39 +482,28 @@ export async function runWorkflow(
     if (config.keyframeFirst && live) {
       const anchorT = config.frameTimestamps[0] ?? 0.5;
       setNode(runId, "anchor", "running");
-      log(runId, "info", `Stage A: extracting reference frame at t=${anchorT}s`, "anchor");
-      let refFrameDataUrl: string | undefined;
-      try {
-        const [refFrame] = await extractFrames(original.url, [anchorT]);
-        refFrameDataUrl = refFrame?.dataUrl;
-      } catch {
-        refFrameDataUrl = undefined;
-      }
-      if (refFrameDataUrl) {
-        // A live relight failure is a real provider error — let it fail the
-        // run (no silent fallback mid-run). Cost accrues via liveCtx.onCost.
-        const relit = await providers.imageGen.relight({
-          frameDataUrl: refFrameDataUrl,
-          prompt: liveAnchorInstruction(),
-          iteration: 1,
-        });
-        anchorDataUrl = relit.imageDataUrl;
-        log(
-          runId,
-          "info",
-          `Look Anchor rendered LIVE by Gemini image edit in ${(relit.latencyMs / 1000).toFixed(1)}s — cheap iteration before any video spend`,
-          "anchor"
-        );
-        setNode(runId, "anchor", "succeeded", "look anchor ready");
-      } else {
-        log(
-          runId,
-          "warn",
-          "Frame extraction unavailable in this environment — continuing without an anchor (no still-tier conditioning or anchor-match reference)",
-          "anchor"
-        );
-        setNode(runId, "anchor", "succeeded", "no anchor — continuing");
-      }
+      log(
+        runId,
+        "info",
+        `Stage A: server extracting the canonical stored source frame at t=${anchorT}s`,
+        "anchor"
+      );
+      // Browser canvas extraction is intentionally not part of the live trust
+      // boundary. The route derives the pixels from run.originalVideo.url;
+      // this empty legacy field is ignored by the live adapter and server.
+      const relit = await providers.imageGen.relight({
+        frameDataUrl: "",
+        prompt: liveAnchorInstruction(),
+        iteration: 1,
+      });
+      anchorDataUrl = relit.imageDataUrl;
+      log(
+        runId,
+        "info",
+        `Look Anchor rendered LIVE by Gemini image edit in ${(relit.latencyMs / 1000).toFixed(1)}s — canonical frame extracted server-side`,
+        "anchor"
+      );
+      setNode(runId, "anchor", "succeeded", "look anchor ready");
 
       // --- anchor gate ---------------------------------------------------------
       setNode(runId, "anchor-gate", "running");
@@ -759,18 +753,16 @@ export async function runWorkflow(
       ) => {
         try {
           return await providers.judges[j].judge(req);
-        } catch {
-          // one retry — transient timeouts under load are the common case
-          try {
-            return await providers.judges[j].judge(req);
-          } catch (err) {
-            log(
-              runId,
-              "warn",
-              `${j} judge failed twice on ${req.evalDef.name} (${err instanceof Error ? err.message : "error"}) — continuing without it`
-            );
-            return null;
-          }
+        } catch (err) {
+          // Never automatically repeat a potentially billed judge call. The
+          // server journal may return a cached completion to an explicit
+          // recovery request, but ambiguity must be reconciled first.
+          log(
+            runId,
+            "warn",
+            `${j} judge could not score ${req.evalDef.name} (${err instanceof Error ? err.message : "error"}) — continuing without it`
+          );
+          return null;
         }
       };
       const runOneEval = async ({ nodeId, evalId }: { nodeId: string; evalId: string }, k: number) => {

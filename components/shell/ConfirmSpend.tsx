@@ -16,6 +16,8 @@ export function ConfirmSpend({
   confirmLabel,
   onConfirm,
   onCancel,
+  busy = false,
+  error,
   children,
 }: {
   title: string;
@@ -23,22 +25,26 @@ export function ConfirmSpend({
   confirmLabel: string;
   onConfirm: () => void;
   onCancel: () => void;
+  busy?: boolean;
+  error?: string | null;
   /** Optional extra controls (e.g. a batch budget input) rendered above the buttons. */
   children?: ReactNode;
 }) {
   // Escape cancels — the cheapest way out of an accidental spend.
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") onCancel();
+      if (e.key === "Escape" && !busy) onCancel();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  }, [busy, onCancel]);
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
-      onClick={onCancel}
+      onClick={() => {
+        if (!busy) onCancel();
+      }}
       role="presentation"
     >
       <div
@@ -56,12 +62,19 @@ export function ConfirmSpend({
             </li>
           ))}
         </ul>
+        {error ? (
+          <p className="mt-3 text-xs leading-relaxed text-fail" role="alert">
+            {error}
+          </p>
+        ) : null}
         {children ? <div className="mt-4">{children}</div> : null}
         <div className="mt-5 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel}>
+          <Button variant="ghost" onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
-          <Button onClick={onConfirm}>{confirmLabel}</Button>
+          <Button onClick={onConfirm} disabled={busy}>
+            {busy ? "Saving work…" : confirmLabel}
+          </Button>
         </div>
       </div>
     </div>

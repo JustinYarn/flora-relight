@@ -1,0 +1,229 @@
+/**
+ * Validation and forward-only transition rules for server-owned executions.
+ * Kept pure so both storage drivers enforce the same lifecycle before CAS.
+ */
+
+import type {
+  RunExecution,
+  RunExecutionPhase,
+  RunExecutionStatus,
+} from "@/lib/types";
+import { assertRunId } from "@/lib/server/runstore";
+import { createHash } from "node:crypto";
+
+const EXECUTION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const MAX_OPTIONAL_ID_LENGTH = 256;
+const MAX_ERROR_LENGTH = 2_000;
+const MAX_RENDERED_PROMPT_LENGTH = 100_000;
+
+const PHASE_RANK: Record<RunExecutionPhase, number> = {
+  queued: 0,
+  preparing: 1,
+  video_generation: 2,
+  finalizing: 3,
+  complete: 4,
+};
+
+const STATUS_TRANSITIONS: Record<
+  RunExecutionStatus,
+  ReadonlySet<RunExecutionStatus>
+> = {
+  queued: new Set([
+    "queued",
+    "running",
+    "failed",
+    "reconcile_required",
+  ]),
+  running: new Set([
+    "running",
+    "awaiting_review",
+    "failed",
+    "reconcile_required",
+  ]),
+  awaiting_review: new Set(["awaiting_review"]),
+  failed: new Set(["failed"]),
+  reconcile_required: new Set([
+    "reconcile_required",
+    "awaiting_review",
+    "failed",
+  ]),
+};
+
+function assertTimestamp(value: unknown, name: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative millisecond timestamp`);
+  }
+}
+
+function assertOptionalText(
+  value: unknown,
+  name: string,
+  maxLength: number
+): asserts value is string | undefined {
+  if (
+    value !== undefined &&
+    (typeof value !== "string" || value.length < 1 || value.length > maxLength)
+  ) {
+    throw new Error(`${name} must be a non-empty string of at most ${maxLength} characters`);
+  }
+}
+
+/** Validate one complete execution record without consulting stored state. */
+export function assertRunExecution(execution: unknown): RunExecution {
+  if (!execution || typeof execution !== "object" || Array.isArray(execution)) {
+    throw new Error("Invalid run execution record");
+  }
+  const candidate = execution as RunExecution;
+  assertRunId(candidate.runId);
+  if (
+    typeof candidate.executionId !== "string" ||
+    !EXECUTION_ID_RE.test(candidate.executionId)
+  ) {
+    throw new Error("Invalid run execution id");
+  }
+  if (typeof candidate.inputHash !== "string" || !SHA256_RE.test(candidate.inputHash)) {
+    throw new Error("Run execution inputHash must be a lowercase sha256 digest");
+  }
+  if (
+    typeof candidate.renderedPrompt !== "string" ||
+    candidate.renderedPrompt.length < 1 ||
+    candidate.renderedPrompt.length > MAX_RENDERED_PROMPT_LENGTH
+  ) {
+    throw new Error(
+      `Run execution renderedPrompt must contain 1-${MAX_RENDERED_PROMPT_LENGTH} characters`
+    );
+  }
+  const renderedPromptHash = createHash("sha256")
+    .update(candidate.renderedPrompt, "utf8")
+    .digest("hex");
+  if (renderedPromptHash !== candidate.inputHash) {
+    throw new Error("Run execution renderedPrompt does not match inputHash");
+  }
+  if (candidate.source !== "single" && candidate.source !== "batch") {
+    throw new Error("Invalid run execution source");
+  }
+  if (candidate.batchId !== undefined) assertRunId(candidate.batchId);
+  if (candidate.source === "single" && candidate.batchId !== undefined) {
+    throw new Error("A single-run execution cannot have a batch id");
+  }
+  if (
+    typeof candidate.status !== "string" ||
+    !Object.prototype.hasOwnProperty.call(STATUS_TRANSITIONS, candidate.status)
+  ) {
+    throw new Error("Invalid run execution status");
+  }
+  if (
+    typeof candidate.phase !== "string" ||
+    !Object.prototype.hasOwnProperty.call(PHASE_RANK, candidate.phase)
+  ) {
+    throw new Error("Invalid run execution phase");
+  }
+  if (!Number.isSafeInteger(candidate.iteration) || candidate.iteration < 0) {
+    throw new Error("Run execution iteration must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(candidate.revision) || candidate.revision < 1) {
+    throw new Error("Run execution revision must be a positive safe integer");
+  }
+  assertTimestamp(candidate.startedAt, "startedAt");
+  assertTimestamp(candidate.updatedAt, "updatedAt");
+  if (candidate.updatedAt < candidate.startedAt) {
+    throw new Error("Run execution updatedAt cannot precede startedAt");
+  }
+  assertOptionalText(
+    candidate.workflowRunId,
+    "workflowRunId",
+    MAX_OPTIONAL_ID_LENGTH
+  );
+  assertOptionalText(candidate.error, "error", MAX_ERROR_LENGTH);
+
+  if (candidate.status === "queued" && candidate.phase !== "queued") {
+    throw new Error("A queued execution must be in the queued phase");
+  }
+  if (
+    candidate.status === "running" &&
+    (candidate.phase === "queued" || candidate.phase === "complete")
+  ) {
+    throw new Error("A running execution must be in an active phase");
+  }
+  if (
+    candidate.status === "awaiting_review" &&
+    candidate.phase !== "complete"
+  ) {
+    throw new Error("An execution awaiting review must be complete");
+  }
+
+  return candidate;
+}
+
+/** Creation is the first durable version of a newly queued execution. */
+export function assertNewRunExecution(execution: RunExecution): RunExecution {
+  assertRunExecution(execution);
+  if (
+    execution.revision !== 1 ||
+    execution.status !== "queued" ||
+    execution.phase !== "queued" ||
+    execution.iteration !== 0
+  ) {
+    throw new Error(
+      "A new run execution must start queued at iteration 0 and revision 1"
+    );
+  }
+  return execution;
+}
+
+/** Validate a candidate only after its expected revision still owns the CAS. */
+export function assertRunExecutionTransition(
+  current: RunExecution,
+  candidate: RunExecution,
+  expectedRevision: number
+): RunExecution {
+  assertRunExecution(current);
+  assertRunExecution(candidate);
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+    throw new Error("expectedRevision must be a positive safe integer");
+  }
+  if (current.revision !== expectedRevision) {
+    throw new Error("Current run execution revision does not match the expected revision");
+  }
+  if (candidate.revision !== expectedRevision + 1) {
+    throw new Error("Run execution candidate must be the next revision");
+  }
+  if (
+    candidate.runId !== current.runId ||
+    candidate.executionId !== current.executionId ||
+    candidate.inputHash !== current.inputHash ||
+    candidate.renderedPrompt !== current.renderedPrompt ||
+    candidate.source !== current.source ||
+    candidate.batchId !== current.batchId ||
+    candidate.startedAt !== current.startedAt
+  ) {
+    throw new Error("Run execution identity fields are immutable");
+  }
+  if (
+    current.workflowRunId !== undefined &&
+    candidate.workflowRunId !== current.workflowRunId
+  ) {
+    throw new Error("Run execution workflowRunId is immutable after binding");
+  }
+  if (candidate.updatedAt < current.updatedAt) {
+    throw new Error("Run execution updatedAt cannot move backwards");
+  }
+  if (candidate.iteration < current.iteration) {
+    throw new Error("Run execution iteration cannot move backwards");
+  }
+  // Phase order is per iteration. A later attempt intentionally resets to
+  // preparing/video_generation while remaining lexicographically ahead.
+  if (
+    candidate.iteration === current.iteration &&
+    PHASE_RANK[candidate.phase] < PHASE_RANK[current.phase]
+  ) {
+    throw new Error("Run execution phase cannot move backwards");
+  }
+  if (!STATUS_TRANSITIONS[current.status].has(candidate.status)) {
+    throw new Error(
+      `Run execution status cannot move from ${current.status} to ${candidate.status}`
+    );
+  }
+  return candidate;
+}

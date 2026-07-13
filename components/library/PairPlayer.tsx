@@ -18,18 +18,21 @@ function OverlayTag({ text }: { text: string }) {
 
 /**
  * Level-2 side-by-side players: original next to the shipped cut, click to
- * play both together. The original owns the audio; the relit side is always
- * muted (in mock mode it is literally the same track behind a CSS filter).
+ * play both together. Callers choose which real media file owns the audio so
+ * grading can listen to the delivered relit artifact rather than the source.
  */
 export function PairPlayer({
   original,
   relit,
   relitLabel,
+  audible = "original",
 }: {
   original: VideoAsset;
   /** Undefined when this run never produced a relit cut. */
   relit?: VideoAsset;
   relitLabel: string;
+  /** Which actual media file supplies sound while the pair stays synchronized. */
+  audible?: "original" | "relit";
 }) {
   const originalRef = useRef<HTMLVideoElement | null>(null);
   const relitRef = useRef<HTMLVideoElement | null>(null);
@@ -66,6 +69,7 @@ export function PairPlayer({
           src={original.url}
           preload="metadata"
           playsInline
+          muted={audible !== "original"}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onEnded={() => relitRef.current?.pause()}
@@ -81,7 +85,7 @@ export function PairPlayer({
               src={relit.url}
               preload="metadata"
               playsInline
-              muted
+              muted={audible !== "relit"}
               onError={() => setRelitBroken(true)}
               style={
                 relit.simulatedFilter ? { filter: relit.simulatedFilter } : undefined
@@ -102,7 +106,8 @@ export function PairPlayer({
         <OverlayTag text={relitLabel} />
       </span>
       <span className="col-span-2 text-center text-2xs text-faint">
-        {playing ? "click to pause" : "click to play both — relit side muted"}
+        {playing ? "click to pause" : "click to play both"} · audio from the{" "}
+        {audible} clip
       </span>
     </button>
   );

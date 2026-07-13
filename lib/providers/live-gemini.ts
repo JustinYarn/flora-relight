@@ -105,7 +105,6 @@ export class LiveGeminiImageProvider implements ImageGenProvider {
       "/api/live/anchor",
       {
         runId: this.ctx.runId,
-        frameDataUrl: req.frameDataUrl,
         instruction: req.prompt,
         previousInteractionId: this.ctx.anchorInteractionId,
         version: req.iteration,
@@ -140,6 +139,8 @@ export class LiveGeminiJudge implements VisionJudgeProvider {
     const res = await postJson<JudgeResponse>(
       "/api/live/judge",
       {
+        runId: this.ctx.runId,
+        iteration: req.iteration,
         evalId: req.evalDef.id,
         judge: "gemini",
         rubric: req.evalDef.promptTemplate,

@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { useAppStore } from "@/lib/store";
+import { useRunDetails } from "@/lib/useRunDetails";
 import type { Iteration, Run, RunStatus } from "@/lib/types";
 import { Badge, EmptyState } from "@/components/ui";
 import { ShareButton } from "@/components/share/ShareButton";
@@ -47,8 +49,9 @@ function bestIteration(run: Run): Iteration | undefined {
  * The Review page: two videos + eleven flat rows. Everything else — prompt
  * evolution, frames, log, pipeline detail — lives one click away in Journey.
  */
-export default function RunReviewPage({ params }: { params: { id: string } }) {
-  const run = useAppStore((s) => s.runs.find((r) => r.id === params.id));
+export default function RunReviewPage() {
+  const params = useParams<{ id: string }>();
+  const run = useRunDetails(params.id);
   const workflow = useAppStore((s) => s.workflow);
   const submitReview = useAppStore((s) => s.submitReview);
   // null = follow the newest attempt automatically; a string pins the view.
@@ -100,7 +103,13 @@ export default function RunReviewPage({ params }: { params: { id: string } }) {
           ← Studio
         </Link>
         <span className="text-sm font-medium text-ink">{run.originalVideo.label}</span>
-        <Badge color={STATUS_COLOR[run.status]}>{STATUS_LABEL[run.status]}</Badge>
+        <Badge
+          color={run.serverExecution && run.humanGrade ? "var(--pass)" : STATUS_COLOR[run.status]}
+        >
+          {run.serverExecution && run.humanGrade
+            ? "human grade saved"
+            : STATUS_LABEL[run.status]}
+        </Badge>
         <span className="font-mono text-2xs text-faint">{shortId}</span>
         <span className="ml-auto flex items-center gap-3">
           <RunTabs runId={run.id} active="review" />

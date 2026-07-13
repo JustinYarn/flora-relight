@@ -9,7 +9,9 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { useAppStore } from "@/lib/store";
+import { useRunDetails } from "@/lib/useRunDetails";
 import type { RunStatus } from "@/lib/types";
 import { Badge, EmptyState } from "@/components/ui";
 import { ShareButton } from "@/components/share/ShareButton";
@@ -33,8 +35,9 @@ const STATUS_LABEL: Record<RunStatus, string> = {
   failed: "failed",
 };
 
-export default function RunJourneyPage({ params }: { params: { id: string } }) {
-  const run = useAppStore((s) => s.runs.find((r) => r.id === params.id));
+export default function RunJourneyPage() {
+  const params = useParams<{ id: string }>();
+  const run = useRunDetails(params.id);
   const threshold = useAppStore((s) => s.workflow.config.compositePassThreshold);
   // null = follow the newest step automatically; a string pins the panel.
   const [pinned, setPinned] = useState<string | null>(null);

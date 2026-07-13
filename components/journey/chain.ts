@@ -180,9 +180,20 @@ export function buildJourneySteps(run: Run): JourneyStep[] {
       kind: "attempt",
       id: `attempt-${it.index}`,
       label: `Attempt v${it.index}`,
-      sub: it.composite ? `score ${it.composite.score}` : "generating…",
+      sub:
+        it.composite
+          ? `score ${it.composite.score}`
+          : it.status === "ungraded"
+            ? "awaiting your grade"
+            : "generating…",
       tone:
-        it.status === "running" ? "running" : it.status === "passed" ? "pass" : "fail",
+        it.status === "running"
+          ? "running"
+          : it.status === "passed"
+            ? "pass"
+            : it.status === "ungraded"
+              ? "warn"
+              : "fail",
       thumb: firstDataUrl(it.afterFrames) ?? it.relitKeyframeDataUrl,
       glyph: "▶",
       iteration: it,

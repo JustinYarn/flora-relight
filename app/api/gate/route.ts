@@ -13,12 +13,17 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { GATE_COOKIE, expectedGateToken } from "@/lib/server/gate";
+import {
+  GATE_COOKIE,
+  expectedGateToken,
+  hostedGateConfigurationIssue,
+  safeGateRedirect,
+} from "@/lib/server/gate";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const COOKIE_MAX_AGE_S = 30 * 24 * 60 * 60; // 30 days
+const COOKIE_MAX_AGE_S = 12 * 60 * 60; // 12 hours
 
 function passwordsMatch(submitted: string, actual: string): boolean {
   const a = createHash("sha256").update(submitted).digest();
@@ -26,15 +31,20 @@ function passwordsMatch(submitted: string, actual: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-/** Only same-site relative paths make valid redirect targets. */
-function safeFrom(raw: unknown): string {
-  return typeof raw === "string" && raw.startsWith("/") && !raw.startsWith("//")
-    ? raw
-    : "/";
-}
-
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const password = process.env.FLORA_ACCESS_PASSWORD;
+  if (hostedGateConfigurationIssue(password)) {
+    return new NextResponse(
+      "Production access protection is not configured securely.",
+      {
+        status: 503,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "private, no-store, max-age=0",
+        },
+      }
+    );
+  }
   if (!password) {
     // Gate disabled — nothing to authenticate against.
     return NextResponse.redirect(new URL("/", req.url), 303);
@@ -47,7 +57,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.redirect(new URL("/gate?error=1", req.url), 303);
   }
   const submitted = form.get("password");
-  const from = safeFrom(form.get("from"));
+  const from = safeGateRedirect(form.get("from"));
 
   if (typeof submitted !== "string" || !passwordsMatch(submitted, password)) {
     const url = new URL("/gate", req.url);
@@ -64,5 +74,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     path: "/",
     maxAge: COOKIE_MAX_AGE_S,
   });
+  res.headers.set("Cache-Control", "private, no-store, max-age=0");
   return res;
 }

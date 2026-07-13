@@ -6,7 +6,7 @@
  *
  *   data/
  *     uploads/                    transient ingest staging (cleaned per request)
- *     batches.json                Batch[] — whole-array writes, low volume
+ *     batches.json                Batch[] — monotonic per-record merges
  *     index.json                  light run summaries (id/status/createdAt/label)
  *     runs/<runId>/
  *       run.json                  full Run JSON (client store is the in-session
@@ -25,7 +25,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import type { Batch, Run } from "@/lib/types";
+import type { Batch, GradeDraft, Run } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Roots
@@ -50,6 +50,7 @@ export const RUNS_ROOT = path.join(DATA_ROOT, "runs");
 export const UPLOADS_ROOT = path.join(DATA_ROOT, "uploads");
 const BATCHES_PATH = path.join(DATA_ROOT, "batches.json");
 const INDEX_PATH = path.join(DATA_ROOT, "index.json");
+const GRADE_DRAFTS_PATH = path.join(DATA_ROOT, "grade-drafts.json");
 
 // ---------------------------------------------------------------------------
 // Guards
@@ -278,4 +279,20 @@ export async function readBatches(): Promise<Batch[]> {
 
 export async function writeBatches(batches: Batch[]): Promise<void> {
   await writeJsonAtomic(BATCHES_PATH, batches);
+}
+
+// ---------------------------------------------------------------------------
+// Blind-grading working memory
+// ---------------------------------------------------------------------------
+
+/** Whole draft map; compare-and-swap semantics live in the fs driver lock. */
+export async function readGradeDrafts(): Promise<Record<string, GradeDraft>> {
+  return (await readJson<Record<string, GradeDraft>>(GRADE_DRAFTS_PATH)) ?? {};
+}
+
+/** Atomic whole-map write (draft volume is tiny, like batches). */
+export async function writeGradeDrafts(
+  drafts: Record<string, GradeDraft>
+): Promise<void> {
+  await writeJsonAtomic(GRADE_DRAFTS_PATH, drafts);
 }

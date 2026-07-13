@@ -5,6 +5,8 @@ import type { Iteration, Run } from "@/lib/types";
 function dotColor(status: Iteration["status"]): string {
   return status === "running"
     ? "var(--running)"
+    : status === "ungraded"
+      ? "var(--borderline)"
     : status === "passed"
       ? "var(--pass)"
       : "var(--fail)";
