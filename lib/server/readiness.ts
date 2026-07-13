@@ -18,6 +18,20 @@ export type ReadinessStorageVerification =
   | { status: "not_required"; checkedAt: null; blob: null; database: null }
   | ({ status: "verified" | "failed" } & DurableStorageVerification);
 
+export type ReadinessStorageStatus =
+  | "ready"
+  | "configuration_incomplete"
+  | "durability_required"
+  | "verification_failed";
+
+export interface ReadinessDeployment {
+  /** Vercel environment when hosted; otherwise the current Node environment. */
+  environment: string;
+  /** Vercel system Git metadata. Null when unavailable (for example, local development). */
+  gitSha: string | null;
+  gitRef: string | null;
+}
+
 export interface AppReadiness {
   schema: "flora.readiness.v1";
   generatedAt: string;
@@ -30,10 +44,18 @@ export interface AppReadiness {
   /** The real ffmpeg discovery path successfully executed `ffmpeg -version`. */
   ffmpegReady: boolean;
   runtime: StorageConfiguration["runtime"];
+  deployment: ReadinessDeployment;
   storage: Omit<Pick<
     StorageConfiguration,
     "driver" | "configured" | "durable" | "status" | "cloud" | "missing" | "verification"
-  >, "verification"> & { verification: ReadinessStorageVerification };
+  >, "verification"> & {
+    /** Effective storage readiness after any required active verification. */
+    ready: boolean;
+    readinessStatus: ReadinessStorageStatus;
+    /** Explicit name for the configuration-only status retained in `status`. */
+    configurationStatus: StorageConfiguration["status"];
+    verification: ReadinessStorageVerification;
+  };
   ffmpeg: FfmpegReadiness;
 }
 
@@ -42,6 +64,19 @@ let verificationCache:
   | { expiresAt: number; value: DurableStorageVerification }
   | null = null;
 let verificationInFlight: Promise<DurableStorageVerification> | null = null;
+
+function safeDeploymentMetadata(value: string | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (
+    normalized.length === 0 ||
+    normalized.length > 256 ||
+    /[\u0000-\u001f\u007f]/.test(normalized)
+  ) {
+    return null;
+  }
+  return normalized;
+}
 
 async function verifyCloudStorage(): Promise<DurableStorageVerification> {
   const now = Date.now();
@@ -106,6 +141,13 @@ export async function getAppReadiness(): Promise<AppReadiness> {
   const storageReady = storage.configured && (
     !storage.runtime.requiresDurable || (storage.durable && verification.status === "verified")
   );
+  const storageReadinessStatus: ReadinessStorageStatus = storageReady
+    ? "ready"
+    : !storage.configured
+      ? "configuration_incomplete"
+      : storage.runtime.requiresDurable && !storage.durable
+        ? "durability_required"
+        : "verification_failed";
 
   return {
     schema: "flora.readiness.v1",
@@ -115,10 +157,18 @@ export async function getAppReadiness(): Promise<AppReadiness> {
     durable: storage.durable,
     ffmpegReady: ffmpeg.ready,
     runtime: storage.runtime,
+    deployment: {
+      environment: storage.runtime.environment,
+      gitSha: safeDeploymentMetadata(process.env.VERCEL_GIT_COMMIT_SHA),
+      gitRef: safeDeploymentMetadata(process.env.VERCEL_GIT_COMMIT_REF),
+    },
     storage: {
       driver: storage.driver,
       configured: storage.configured,
       durable: storage.durable,
+      ready: storageReady,
+      readinessStatus: storageReadinessStatus,
+      configurationStatus: storage.status,
       status: storage.status,
       cloud: storage.cloud,
       missing: storage.missing,

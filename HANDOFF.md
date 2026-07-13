@@ -18,9 +18,12 @@ rationale; this file is the "where were we" note.
   plus `source.mp4`, `source-audio.m4a`, `relit-vN.mp4`, `anchor-vN.jpg`, …).
   `data/` is gitignored — it is the artifact of record on this machine.
 - **GitHub**: public repo at `github.com/JustinYarn/flora-relight`.
-  Branches: `main` (current) and `vercel-prep` — **vercel-prep is merged into
-  main as of 2026-07-13**; the worktree at `../flora-relight-vercel` is now
-  redundant.
+  The durable release candidate is on `codex/flora-durable-production`; `main`
+  remains the older production baseline. The first consolidated hardening commit
+  is `46c8a49`; always verify and deploy the branch's exact current
+  `git rev-parse HEAD` because follow-up hardening may advance it. The older
+  `vercel-prep` branch was merged into `main`; the worktree at
+  `../flora-relight-vercel` is redundant.
 - **Vercel deployment target**: the existing production URL is
   **https://flora-relight.vercel.app** (project `flora-relight`, org
   `justin-5763s-projects`). The current working tree is a standard Next.js
@@ -60,7 +63,8 @@ rationale; this file is the "where were we" note.
   client retry; exact-once journals for every potentially paid provider action;
   single-owner Workflow enqueue and leased video finalization; truthful readiness
   gating; server-probed approval inputs; and permanent run deletion tombstones.
-  These changes must be committed/deployed before production behavior changes.
+  These changes are committed on the release-candidate branch but still must be
+  deployed before production behavior changes.
 - **Durability boundary**: completed uploads, run skeletons, batch drafts, run
   history, exact execution inputs, provider-operation handles/results, paid-call
   claims/responses, batch reservations, and revisioned `/grade` drafts are

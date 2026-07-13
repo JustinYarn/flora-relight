@@ -61,16 +61,24 @@ Prerequisites and setup:
    Vercel cannot change an existing public store to private: create a new private store and
    reconnect the project. Existing public run media can still be read through Flora's gated
    proxy during migration, but every new upload and generated artifact uses the private store.
-5. **Env vars** — add each with `vercel env add <NAME> production`:
-   - `FLORA_ACCESS_PASSWORD` — the shared access gate password (middleware + `/gate`).
+5. **Environment scopes** — Preview is hosted and fails closed just like Production.
+   Connect the private Blob and Neon integrations to **Preview + Production**, then set:
+   - **Preview + Production:** `FLORA_ACCESS_PASSWORD` — the shared access gate password
+     (middleware + `/gate`).
      Hosted deployments require at least 20 characters with no surrounding whitespace;
      use a randomly generated 32+ character value. Missing or weak configuration fails
      closed. Protect `/api/gate` with Vercel Deployment Protection or another edge/WAF
      rate limit; an in-memory application counter is not reliable across serverless instances.
-   - `FLORA_BLOB_ACCESS=private` — required explicit access policy. Set this only after the
-     connected `BLOB_READ_WRITE_TOKEN` belongs to the new private store.
-   - `GEMINI_API_KEY` — Google AI Studio key (paid tier for image/video models).
-   - `ANTHROPIC_API_KEY` — Claude judge.
+   - **Preview + Production:** `FLORA_BLOB_ACCESS=private` — required explicit access policy.
+     Set this only after the connected `BLOB_READ_WRITE_TOKEN` belongs to the new private
+     store. Both environments also need their private-store token and database URL from the
+     scoped integrations.
+   - **Production only by default:** `GEMINI_API_KEY` (Google AI Studio, paid tier for
+     image/video models) and `ANTHROPIC_API_KEY` (Claude judge). Keep these out of Preview
+     during provider-free deployment validation; add them to another environment only for
+     an explicitly approved provider test.
+   With the CLI, add a value separately for each intended scope, for example
+   `vercel env add FLORA_ACCESS_PASSWORD preview` and then `... production`.
 6. `vercel deploy --prod`.
 
 **Cloud uploads are two-step.** Deployed Vercel functions cap request bodies at 4.5MB, so
@@ -82,17 +90,23 @@ private Vercel Blob** (`upload()` from `@vercel/blob/client`; deterministic run-
 `POST /api/ingest/finalize` with only the reserved run id. The server resolves and
 authenticates the private object, downloads it to scratch, and runs the exact
 same probe → auto-trim → audio-demux pipeline as local ingest, persists
-`source.mp4`/`source-audio.m4a` under the client's reserved run id, and deletes the raw upload. The client
-picks its path automatically from `GET /api/storage/info` (`fs` → multipart, `blob` →
-client upload); local dev with no blob envs is unchanged. A signed Blob completion callback
-and the pre-token durable reservation close the upload/finalize crash gap: after a reload,
-Flora can discover the deterministic private object and finish ingest without exposing its
-provider URL.
+`source.mp4`/`source-audio.m4a` under the client's reserved run id, and then makes a
+best-effort deletion of the redundant raw upload. A cleanup failure is logged but does not
+invalidate the committed ingest receipt, so the raw object may require later operator cleanup.
+The client picks its path automatically from `GET /api/storage/info` (`fs` → multipart,
+`blob` → client upload); local dev with no blob envs is unchanged. A signed Blob completion
+callback and the pre-token durable reservation close the upload/finalize crash gap: after a
+reload, Flora can discover the deterministic private object and finish ingest without
+exposing its provider URL.
 
 `GET /api/readiness` does more than inspect environment-variable presence in hosted mode: it
 performs a small private-Blob and Postgres write/read/delete round trip (cached for 60 seconds)
 plus the ffmpeg check. `ready: true` therefore proves the configured storage backends were
 reachable at that moment, without calling an AI provider or uploading user media.
+`storage.readinessStatus` and `storage.ready` are the effective post-probe result;
+`storage.configurationStatus` (and the backward-compatible `storage.status` alias) describe
+configuration only. The response also reports the Vercel Git SHA/ref when those system
+variables are available, so an authenticated operator can verify the deployed source.
 
 ### Hosted durability and working memory
 
@@ -174,25 +188,61 @@ deploying a Workflow change:
      return response.json();
    });
 
+   const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
    let probe;
    // Allow up to two minutes: a cold Workflow worker can take longer than a
    // normal warm invocation even when the deployment is healthy.
    for (let attempt = 0; attempt < 60; attempt += 1) {
      await new Promise((resolve) => setTimeout(resolve, 2_000));
-     probe = await fetch(
+     const response = await fetch(
        `/api/debug/workflow?id=${encodeURIComponent(started.workflowRunId)}`
-     ).then((response) => response.json());
-     if (probe.status === "completed") break;
+     );
+     if (!response.ok) throw new Error(await response.text());
+     probe = await response.json();
+     if (terminalStatuses.has(probe.status)) break;
    }
+
+   if (!probe || !terminalStatuses.has(probe.status)) {
+     throw new Error("Workflow smoke timed out before reaching a terminal state.");
+   }
+   if (probe.status !== "completed") {
+     throw new Error(`Workflow smoke ended with status: ${probe.status}`);
+   }
+
+   const result = probe.result;
+   const media = result?.runtime?.mediaTransform;
+   const expect = (condition, message) => {
+     if (!condition) throw new Error(`Workflow smoke assertion failed: ${message}`);
+   };
+   expect(result?.token === token, "token mismatch");
+   expect(
+     JSON.stringify(result?.checkpoints) === JSON.stringify(["started", "completed"]),
+     "checkpoint mismatch"
+   );
+   expect(result?.runtime?.ready === true, "runtime not ready");
+   expect(result?.runtime?.durable === true, "storage is not durable");
+   expect(result?.runtime?.ffmpegReady === true, "ffmpeg unavailable");
+   expect(result?.runtime?.storageDriver === "blob", "Blob driver not active");
+   expect(result?.runtime?.storageVerification === "verified", "storage probe not verified");
+   expect(media?.binarySource === "bundled", "bundled ffmpeg was not used");
+   expect(media?.scratchWritable === true, "scratch is not writable");
+   expect(media?.encoded === true, "encode failed");
+   expect(media?.audioDemuxed === true, "audio demux failed");
+   expect(media?.remuxed === true, "audio remux failed");
+   expect(media?.probed === true, "final probe failed");
+   expect(media?.width === 64 && media?.height === 64, "unexpected frame dimensions");
+   expect(media?.hasAudio === true, "final clip has no audio");
+   expect(media?.durationMs >= 250 && media?.durationMs <= 1_500, "unexpected duration");
+   expect(media?.outputBytes > 0 && media?.outputBytes <= 524_288, "unexpected output size");
    probe;
    ```
 
-3. The loop polls every two seconds for up to 120 seconds. Success is
-   `status: "completed"` with the same token, checkpoints
-   `['started', 'completed']`, and `result.runtime.ready === true`. The runtime
-   result proves the Workflow step could execute ffmpeg and the same provider-free
-   storage round trip used by `/api/readiness`; it starts no AI-provider call and
-   reads or uploads no user media.
+3. The loop polls every two seconds for up to 120 seconds, stops on every terminal
+   status, and throws unless the completed result passes all storage, packaged-ffmpeg,
+   encode, audio-demux/remux, probe, dimension, duration, and output-size assertions.
+   That result proves the Workflow step could execute the same provider-free storage
+   round trip used by `/api/readiness`; it starts no AI-provider call and reads or
+   uploads no user media.
 4. Set the flag back to `0` (or remove it) and redeploy. Do not leave the debug starter
    enabled in production.
 
