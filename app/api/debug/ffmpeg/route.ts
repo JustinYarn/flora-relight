@@ -27,7 +27,7 @@ export async function GET(): Promise<NextResponse> {
   let requirePath: string | null = null;
   let requireError: string | null = null;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
     requirePath = require("ffmpeg-static") as string | null;
   } catch (e) {
     requireError = e instanceof Error ? e.message : String(e);

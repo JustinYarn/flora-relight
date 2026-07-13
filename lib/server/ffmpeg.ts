@@ -114,7 +114,7 @@ async function ffmpegStaticCandidates(): Promise<string[]> {
  */
 function bundledFfmpegStatic(): string | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
     const p = require("ffmpeg-static") as string | null;
     return typeof p === "string" && p.length > 0 ? p : null;
   } catch {
