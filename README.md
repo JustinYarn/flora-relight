@@ -132,8 +132,9 @@ the technical vocabulary. Same concepts, one mapping:
 | --- | --- |
 | `/` | Studio — hero, new-run dropzone (drop one clip for a run, several for a batch), runs table |
 | `/library` | The Library — browse every past generation with progressive disclosure |
+| `/grade` | Grade — blind-grade the before/after cuts on the same 11 checks (5-point scale + ship call), then "Compare with AI" for agreement stats, score gaps, and the biggest disagreements |
 | `/pipeline` | The workflow canvas — the node graph of the pipeline with live run status |
-| `/batch` | Batch review board — queue many clips at once, watch the worker pool drain them, approve inline |
+| `/batch` | Batch review board — queue many clips at once, watch the worker pool drain them, approve inline. No nav entry (removed by request) — still routable by URL |
 | `/prompts` | Prompt library — the base prompt, manifest extractor, all 11 eval rubrics, mega-prompt compiler |
 | `/runs/[id]` | Run review — iterations, eval scorecards, judge verdicts, prompt diffs, approve / needs-changes |
 

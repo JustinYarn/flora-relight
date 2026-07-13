@@ -419,6 +419,32 @@ export interface RunLogEntry {
   message: string;
 }
 
+/** One human verdict on one check, recorded in the blind grading flow (/grade). */
+export interface HumanCheckGrade {
+  /** 5-point scale: 5 perfect · 4 minor issues · 3 noticeable · 2 clear problems · 1 badly wrong. */
+  points: 1 | 2 | 3 | 4 | 5;
+  /** The point mapped onto the evals' 0–100 scale (95/85/72/55/30) so human and AI scores compare directly. */
+  score: number;
+  /** Derived from points: 5–4 → pass, 3 → borderline, 2–1 → fail. */
+  verdict: Verdict;
+  note?: string;
+}
+
+/**
+ * A human's blind grade of one run's shipped cut — the same 11 checks the AI
+ * judges scored, graded WITHOUT seeing the AI's verdicts (that's the point:
+ * no anchoring). Compared against the shipped attempt's evalResults on the
+ * /grade "Compare with AI" view to calibrate the judge rubrics.
+ */
+export interface HumanGrade {
+  gradedAt: number;
+  /** Keyed by evalId (EVAL_DEFS ids). */
+  scores: Record<string, HumanCheckGrade>;
+  /** The gut call: would you ship this cut as-is? */
+  shipIt: boolean;
+  overallNote?: string;
+}
+
 export interface Run {
   id: string;
   workflowId: string;
@@ -448,6 +474,12 @@ export interface Run {
     notes: string;
     reviewedAt: number;
   };
+  /**
+   * Blind human grade from /grade (see HumanGrade). Persists automatically
+   * through the normal run sync — fs and cloud drivers alike — because it
+   * rides inside run.json like every other Run field.
+   */
+  humanGrade?: HumanGrade;
   /**
    * Cost ledger (rates + estimators in lib/cost.ts). `estimatedUsd` is the
    * pre-flight estimate of what this run would cost against live APIs;

@@ -9,6 +9,7 @@
 import { create } from "zustand";
 import type {
   Batch,
+  HumanGrade,
   NodeRunState,
   Run,
   VideoAsset,
@@ -74,6 +75,12 @@ interface AppStore {
     opts?: { budgetUsd?: number }
   ): string;
   submitReview(runId: string, decision: "approved" | "needs-changes", notes: string): void;
+  /**
+   * Record the blind human grade for one run (the /grade flow). Plain
+   * immutable update — the persistence subscriber pushes the changed run to
+   * /api/runs like every other mutation, so the grade lands in run.json.
+   */
+  setHumanGrade(runId: string, grade: HumanGrade): void;
   /**
    * Permanently delete one run: optimistically drop it from the store, then
    * DELETE /api/runs?id=… (the server removes run.json and the whole media
@@ -373,6 +380,14 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       restore();
       throw new Error(`Delete failed (HTTP ${res.status}).`);
     }
+  },
+
+  setHumanGrade: (runId, grade) => {
+    set((state) => ({
+      runs: state.runs.map((r) =>
+        r.id === runId ? { ...r, humanGrade: grade } : r
+      ),
+    }));
   },
 
   submitReview: (runId, decision, notes) => {

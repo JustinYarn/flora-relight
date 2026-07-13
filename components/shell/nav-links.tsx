@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+// /batch has no nav entry by request — the page is still routable by URL.
 const LINKS = [
   { href: "/", label: "Studio" },
   { href: "/library", label: "Library" },
-  { href: "/batch", label: "Batch" },
+  { href: "/grade", label: "Grade" },
   { href: "/pipeline", label: "Engine" },
   { href: "/prompts", label: "Rubrics" },
 ] as const;
