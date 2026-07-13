@@ -107,6 +107,21 @@ async function ffmpegStaticCandidates(): Promise<string[]> {
   return out;
 }
 
+/**
+ * The bundled ffmpeg-static dependency — the binary that ships inside the
+ * Vercel serverless bundle (via next.config outputFileTracingIncludes).
+ * Resolved lazily: the module just exports the absolute binary path.
+ */
+function bundledFfmpegStatic(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const p = require("ffmpeg-static") as string | null;
+    return typeof p === "string" && p.length > 0 ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 async function detectTools(): Promise<Tools> {
   const ffmpegCandidates = [
     process.env.FFMPEG_PATH,
@@ -114,6 +129,7 @@ async function detectTools(): Promise<Tools> {
     "/opt/homebrew/bin/ffmpeg",
     "/usr/local/bin/ffmpeg",
     "/usr/bin/ffmpeg",
+    bundledFfmpegStatic(),
     ...(await ffmpegStaticCandidates()),
   ].filter((c): c is string => Boolean(c));
 

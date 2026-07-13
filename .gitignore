@@ -37,3 +37,4 @@ next-env.d.ts
 
 # server-side media + run persistence (safe to delete to reset)
 /data
+.env*
