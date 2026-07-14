@@ -8,6 +8,7 @@ import { probeVideo } from "@/lib/frames";
 import {
   estimateFirstCut,
   estimateLampRun,
+  FIRST_CUT_MAX_OUTPUT_SECONDS,
   formatUsd,
 } from "@/lib/cost";
 import { formatClock, uid } from "@/lib/util";
@@ -30,6 +31,7 @@ import type {
   WorkflowMode,
 } from "@/lib/types";
 import { workflowModeLabel } from "@/lib/workflow-mode";
+import { parseOptionalPositiveBudgetUsd } from "@/lib/budget-input";
 
 const FLORA_FLOW = [
   {
@@ -1015,12 +1017,10 @@ export default function DashboardPage() {
     [appendError, handleMany, handleSingle, hydrated, ingesting, readiness]
   );
 
-  /** Parsed budget cap for the pending batch — undefined means "no cap". */
-  const parsedBudgetUsd = useMemo(() => {
-    if (budgetInput.trim() === "") return undefined;
-    const n = Number(budgetInput);
-    return Number.isFinite(n) && n > 0 ? n : undefined;
-  }, [budgetInput]);
+  const parsedBudget = useMemo(
+    () => parseOptionalPositiveBudgetUsd(budgetInput),
+    [budgetInput]
+  );
   const workflowCopy = MODE_COPY[workflowMode];
   const workflowFlow = workflowMode === "lamp" ? LAMP_FLOW : FLORA_FLOW;
   return (
@@ -1335,7 +1335,7 @@ export default function DashboardPage() {
               ? [
                   `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
                   `Estimated provider cost: ${formatUsd(estimateLampRun(pendingLaunch.video.durationSec).totalUsd)}`,
-                  `Hard authorization: exactly two video generations and two holistic evaluation calls, up to ${formatUsd(estimateLampRun(10).totalUsd)} at the 10-second model cap. There is no open-ended retry loop.`,
+                  `Hard authorization: exactly two video generations and two holistic evaluation calls, up to ${formatUsd(estimateLampRun(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd)} including the 50ms-per-generation container allowance above the 10-second model cap. There is no open-ended retry loop.`,
                   "For both Initial and Final, Lamp restores and verifies source audio before the whole-video evaluation. The fixed two-pass run continues on the server if this tab closes.",
                   "Final enters blind human grading. The AI evaluation is revealed only after your grade is saved.",
                   ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
@@ -1343,7 +1343,7 @@ export default function DashboardPage() {
               : [
                   `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
                   `Estimated provider cost: ${formatUsd(estimateFirstCut(pendingLaunch.video.durationSec).totalUsd)}`,
-                  `Hard authorization: one video generation, up to ${formatUsd(estimateFirstCut(10).totalUsd)} at the 10-second model cap.`,
+                  `Hard authorization: one video generation, up to ${formatUsd(estimateFirstCut(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd)} including the 50ms container allowance above the 10-second model cap.`,
                   "Flora restores and verifies the original audio, then sends the one-pass cut to human review.",
                   ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
                 ]
@@ -1402,8 +1402,22 @@ export default function DashboardPage() {
             pendingBatch.workflowMode === "lamp"
               ? "Every Lamp clip uses exactly two generations and two holistic evaluations, then waits for a blind human grade."
               : "Every Flora clip uses one generation and lands in the established human review queue.",
+            mode === "live"
+              ? `Hard batch authorization: up to ${formatUsd(
+                  pendingBatchAssets.length *
+                    estimateWorkflowRun(
+                      pendingBatch.workflowMode ?? "flora",
+                      FIRST_CUT_MAX_OUTPUT_SECONDS
+                    ).totalUsd
+                )} total (${formatUsd(
+                  estimateWorkflowRun(
+                    pendingBatch.workflowMode ?? "flora",
+                    FIRST_CUT_MAX_OUTPUT_SECONDS
+                  ).totalUsd
+                )} per clip), including the bounded 50ms container allowance per generation. An optional budget cap can only reduce how many clips dispatch.`
+              : "This is a demo batch; actual mock spend is $0.00.",
             mode === "mock"
-              ? "This is a demo batch; actual mock spend is $0.00."
+              ? "The demo keeps the same bounded queue shape without calling a provider."
               : "The server owns the bounded live queue and preserves progress if this tab closes.",
             ...pendingBatchAssets.map(
               (asset) =>
@@ -1412,14 +1426,19 @@ export default function DashboardPage() {
           ]}
           confirmLabel={mode === "live" ? "Start live batch" : "Start demo batch"}
           busy={launching === "batch"}
-          error={launchError}
+          confirmDisabled={!parsedBudget.ok}
+          error={parsedBudget.ok ? launchError : parsedBudget.error}
           onConfirm={async () => {
             if (launching) return;
+            if (!parsedBudget.ok) {
+              setLaunchError(parsedBudget.error);
+              return;
+            }
             setLaunching("batch");
             setLaunchError(null);
             try {
               const id = await startBatchFromDraft(pendingBatch.id, {
-                budgetUsd: parsedBudgetUsd,
+                budgetUsd: parsedBudget.value,
                 approveLiveSpend: mode === "live",
                 allowIncompleteUploads: pendingBatch.status === "uploading",
                 workflowMode: pendingBatch.workflowMode ?? "flora",
@@ -1448,12 +1467,15 @@ export default function DashboardPage() {
             before dispatch
             <input
               type="number"
-              min={0}
+              min={0.01}
               step="0.01"
               inputMode="decimal"
               placeholder="no cap"
               value={budgetInput}
-              onChange={(e) => setBudgetInput(e.target.value)}
+              onChange={(e) => {
+                setBudgetInput(e.target.value);
+                setLaunchError(null);
+              }}
               className="min-h-10 rounded-lg border border-edge bg-raised px-2.5 py-1.5 text-sm text-ink focus:border-accent focus:outline-none"
             />
           </label>

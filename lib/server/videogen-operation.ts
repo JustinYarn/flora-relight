@@ -13,17 +13,19 @@ import {
   probe,
   remuxAudio,
   stripAudio,
+  trimAndStripAudio,
 } from "@/lib/server/ffmpeg";
 import {
+  AUDIO_DURATION_TOLERANCE_SEC,
   audioIntegrityDurationsAgree,
   audioPresenceMatchesSource,
 } from "@/lib/server/audio-integrity";
 import { getStorage, scratchMediaPath, type StorageDriver } from "@/lib/server/storage";
-import { PRICE_TABLE } from "@/lib/cost";
+import { authorizedRawOutputCostUsd } from "@/lib/server/video-generation-cost";
 import {
-  firstCutMaximumMicros,
-  usdToMicros,
-} from "@/lib/server/batch-budget";
+  automaticVideoGenerationStopReason,
+  videoGenerationWorkflowErrorMessage,
+} from "@/lib/server/run-execution-failure";
 import { assertVideoGenerationAuthorized } from "@/lib/server/spend-approval";
 import type {
   ProviderOperation,
@@ -39,20 +41,6 @@ const TERMINAL_FAILURES = new Set([
   "incomplete",
   "budget_exceeded",
 ]);
-
-function authorizedRawOutputCostUsd(rawDurationSec: number): number {
-  if (!Number.isFinite(rawDurationSec) || rawDurationSec <= 0) {
-    throw new Error("The raw provider output has no valid billable duration.");
-  }
-  const costUsd =
-    rawDurationSec * PRICE_TABLE.omniFlashPerOutputSecond.usd;
-  if (usdToMicros(costUsd) > firstCutMaximumMicros()) {
-    throw new Error(
-      "The raw provider output exceeds the immutable per-generation authorization."
-    );
-  }
-  return costUsd;
-}
 
 interface PreparedSource {
   storage: StorageDriver;
@@ -326,6 +314,8 @@ export async function pollVideoGeneration(
       ...existing.result,
     };
   }
+  const automaticStopReason = automaticVideoGenerationStopReason(existing);
+  if (automaticStopReason !== null) throw new Error(automaticStopReason);
 
   const interaction = await getGemini().interactions.get(input.interactionId);
   const status = safeStatus(interaction.status);
@@ -422,7 +412,14 @@ export async function pollVideoGeneration(
     try {
       // Provider billing is based on generated output before `-shortest`
       // audio remux can shorten the delivered review artifact.
-      costUsd = authorizedRawOutputCostUsd(rawProbe.durationSec);
+      costUsd = authorizedRawOutputCostUsd(rawProbe.durationSec, {
+        maxAuthorizedCostMicros:
+          latestOperation?.maxAuthorizedCostMicros ??
+          existing.maxAuthorizedCostMicros,
+        billingUsdPerOutputSecond:
+          latestOperation?.billingUsdPerOutputSecond ??
+          existing.billingUsdPerOutputSecond,
+      });
     } catch (error) {
       const message =
         error instanceof Error
@@ -456,9 +453,20 @@ export async function pollVideoGeneration(
         await remuxAudio(genPath, prepared.audioPath, relitPath);
       } else {
         // A silent source must stay silent even if the provider invents an
-        // audio stream. Finalization strips it deterministically, then the
-        // probe below verifies that no soundtrack survived.
-        await stripAudio(genPath, relitPath);
+        // audio stream. Re-encode only when container padding extends beyond
+        // the strict source timeline; aligned raws retain their video bytes.
+        if (
+          rawProbe.durationSec >
+          prepared.sourceDurationSec + AUDIO_DURATION_TOLERANCE_SEC
+        ) {
+          await trimAndStripAudio(
+            genPath,
+            relitPath,
+            prepared.sourceDurationSec
+          );
+        } else {
+          await stripAudio(genPath, relitPath);
+        }
       }
       await prepared.storage.putMediaFromFile(input.runId, relitName, relitPath);
     }
@@ -574,6 +582,6 @@ export async function markVideoGenerationWorkflowError(
     status: "reconcile_required",
     startedAt: existing?.startedAt ?? Date.now(),
     updatedAt: Date.now(),
-    error: error.slice(0, 500),
+    error: videoGenerationWorkflowErrorMessage(existing, error),
   });
 }

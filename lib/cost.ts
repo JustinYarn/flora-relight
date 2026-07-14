@@ -20,8 +20,15 @@ import { EVAL_DEFS } from "./prompts/eval-defs.ts";
 import { RELIGHT_WORKFLOW } from "./workflow-def.ts";
 import type { JudgeId, VideoAsset } from "@/lib/types";
 
-/** Provider-supported output window reserved by generation-only approvals. */
-export const FIRST_CUT_MAX_OUTPUT_SECONDS = 10;
+/**
+ * Absolute billable output ceiling reserved by generation approvals.
+ *
+ * The model's requested timeline is capped at 10s, but provider MP4s can probe
+ * a few hundredths longer because of container timebases. Reserving 50ms
+ * covers that bounded bookkeeping variance without hiding the actual duration
+ * or opening a meaningful spend overrun.
+ */
+export const FIRST_CUT_MAX_OUTPUT_SECONDS = 10.05;
 /** Lamp always performs two generations and two one-shot holistic evaluations. */
 export const LAMP_GENERATION_COUNT = 2;
 export const LAMP_EVALUATION_COUNT = 2;

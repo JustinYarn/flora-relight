@@ -13,6 +13,12 @@ import {
   LAMP_USER_ACTION_REQUIRED_PREFIX,
 } from "@/lib/server/run-execution-resume";
 import {
+  isGradeableVideoGeneration,
+  runExecutionFailureStatus,
+  videoGenerationPollErrorDisposition,
+  type VideoGenerationPollErrorDisposition,
+} from "@/lib/server/run-execution-failure";
+import {
   claimAndStartVideoGeneration,
   VideoGenerationStartError,
   type ClaimAndStartVideoGenerationResult,
@@ -30,11 +36,7 @@ import {
   videoGenerationOperationId,
   type PollVideoGenerationResult,
 } from "@/lib/server/videogen-operation";
-import type {
-  ProviderOperation,
-  RunExecution,
-  VideoGenerationOperationResult,
-} from "@/lib/types";
+import type { RunExecution, VideoGenerationOperationResult } from "@/lib/types";
 
 export interface DurableRelightRunInput {
   runId: string;
@@ -54,12 +56,6 @@ export interface DurableRelightRunResult {
 const MAX_POLLS = 150; // 20 minutes at 8s; expected provider latency is 1-7m.
 const MAX_RECONCILIATION_POLLS = 7 * 24 * 12;
 const MAX_RETRY_SAFE_GAP_ATTEMPTS = 7 * 24 * 12;
-const KNOWN_PROVIDER_FAILURES = new Set<ProviderOperation["status"]>([
-  "failed",
-  "cancelled",
-  "incomplete",
-  "budget_exceeded",
-]);
 
 /**
  * Lamp runs use the fixed two-pass contract, whether started alone or by the
@@ -954,16 +950,17 @@ async function pollAttempt(input: {
   return pollVideoGeneration(input);
 }
 
-pollAttempt.maxRetries = 2;
-
-type PollErrorDisposition = "completed" | "retryable" | "terminal" | "unrecoverable";
+// The outer loop classifies the durable journal after every error. Retrying the
+// step first would repeat deterministic artifact finalization even after that
+// journal has already been sealed as reconcile_required.
+pollAttempt.maxRetries = 0;
 
 async function inspectAttemptAfterPollError(
   input: DurableRelightRunInput,
   workflowRunId: string,
   iteration: 1 | 2,
   renderedPrompt: string
-): Promise<PollErrorDisposition> {
+): Promise<VideoGenerationPollErrorDisposition> {
   "use step";
   const storage = getStorage();
   const [execution, run] = await Promise.all([
@@ -984,9 +981,7 @@ async function inspectAttemptAfterPollError(
   if (!operation || operation.renderedPrompt !== renderedPrompt) {
     return "unrecoverable";
   }
-  if (operation.status === "completed" && operation.result) return "completed";
-  if (KNOWN_PROVIDER_FAILURES.has(operation.status)) return "terminal";
-  return operation.providerInteractionId ? "retryable" : "unrecoverable";
+  return videoGenerationPollErrorDisposition(operation);
 }
 
 inspectAttemptAfterPollError.maxRetries = 2;
@@ -996,7 +991,7 @@ async function inspectAttemptAfterPollErrorWithRecovery(
   workflowRunId: string,
   iteration: 1 | 2,
   renderedPrompt: string
-): Promise<PollErrorDisposition> {
+): Promise<VideoGenerationPollErrorDisposition> {
   let lastError: unknown;
   for (let attempt = 0; attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS; attempt += 1) {
     try {
@@ -1096,6 +1091,7 @@ async function settleLegacyFirstCut(
     execution.renderedPrompt !== input.renderedPrompt ||
     operation?.status !== "completed" ||
     !operation.result ||
+    !operation.result.audioVerified ||
     operation.renderedPrompt !== input.renderedPrompt
   ) {
     throw new Error("Completed batch first cut is not bound to this execution.");
@@ -1265,7 +1261,7 @@ async function recordExecutionFailure(
     (operation) => operation.id === videoGenerationOperationId(1)
   );
   const lamp = input.executionId.startsWith("lamp:");
-  if (!lamp && first?.status === "completed" && first.result) {
+  if (!lamp && isGradeableVideoGeneration(first)) {
     return "legacy_completed";
   }
   const final = run?.providerOperations?.find(
@@ -1293,18 +1289,13 @@ async function recordExecutionFailure(
           lampEvaluationOperationId(execution.iteration)
         )
       : null;
-  const ambiguousEvaluation = Boolean(
+  const evaluationAmbiguous = Boolean(
     currentEvaluation && currentEvaluation.status !== "completed"
   );
-  const ambiguousGeneration = Boolean(
-    currentGeneration &&
-      !KNOWN_PROVIDER_FAILURES.has(currentGeneration.status) &&
-      currentGeneration.status !== "completed"
-  );
-  const status =
-    ambiguousEvaluation || ambiguousGeneration
-      ? "reconcile_required"
-      : "failed";
+  const status = runExecutionFailureStatus({
+    evaluationAmbiguous,
+    generation: currentGeneration,
+  });
   execution = await storage.getRunExecution(input.runId);
   if (
     !execution ||

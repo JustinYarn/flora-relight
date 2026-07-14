@@ -1,6 +1,7 @@
 import "server-only";
 
 import { isValidRunId } from "@/lib/server/runstore";
+import { firstCutMaximumMicros } from "@/lib/server/batch-budget";
 import { assertVideoGenerationAuthorized } from "@/lib/server/spend-approval";
 import { getStorage } from "@/lib/server/storage";
 import {
@@ -9,6 +10,7 @@ import {
   videoGenerationOperationId,
 } from "@/lib/server/videogen-operation";
 import type { ProviderOperation } from "@/lib/types";
+import { PRICE_TABLE } from "@/lib/cost";
 
 export type VideoGenerationStartErrorCode =
   | "invalid_request"
@@ -199,6 +201,9 @@ export async function claimAndStartVideoGeneration(
     provider: "gemini",
     kind: "video_generation",
     iteration: input.iteration,
+    maxAuthorizedCostMicros: firstCutMaximumMicros(),
+    billingUsdPerOutputSecond:
+      PRICE_TABLE.omniFlashPerOutputSecond.usd,
     renderedPrompt: input.renderedPrompt,
     status: "in_progress",
     workflowStatus: "pending",

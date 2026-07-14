@@ -623,6 +623,37 @@ export async function stripAudio(
 }
 
 /**
+ * Preserve a silent source when provider/container padding extends the raw
+ * video beyond the source timeline. Stream-copy trimming can overshoot on
+ * packet boundaries, so this narrow path re-encodes for frame-accurate length
+ * while discarding every audio stream.
+ */
+export async function trimAndStripAudio(
+  videoPath: string,
+  outPath: string,
+  maxSec: number
+): Promise<void> {
+  if (!Number.isFinite(maxSec) || maxSec <= 0) {
+    throw new Error("Silent-video trim requires a positive finite duration.");
+  }
+  const tools = await getTools();
+  await runOrThrow(tools.ffmpeg, [
+    "-y",
+    "-ss", "0",
+    "-i", videoPath,
+    "-t", String(maxSec),
+    "-map", "0:v:0",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "18",
+    "-pix_fmt", "yuv420p",
+    "-an",
+    "-movflags", "+faststart",
+    outPath,
+  ]);
+}
+
+/**
  * MD5 of the raw audio bitstream (stream copy, no re-encode), optionally
  * limited to the first `maxSec` seconds of output. Because remuxAudio()
  * stream-copies packets, an output whose audio survived intact produces the

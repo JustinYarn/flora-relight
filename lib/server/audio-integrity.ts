@@ -6,6 +6,14 @@
  */
 export const AUDIO_DURATION_TOLERANCE_SEC = 0.05;
 
+/**
+ * A raw provider MP4 may carry up to 150ms of trailing container padding.
+ * The delivered artifact is still finalized to the source timeline and held to
+ * AUDIO_DURATION_TOLERANCE_SEC; this wider allowance applies only to raw
+ * output being longer, never to a shortened generation or final artifact.
+ */
+export const RAW_VIDEO_TRAILING_PADDING_TOLERANCE_SEC = 0.15;
+
 export interface AudioIntegrityDurations {
   sourceVideoDurationSec: number;
   rawVideoDurationSec: number;
@@ -33,26 +41,39 @@ export function audioPresenceMatchesSource(
  */
 export function audioIntegrityDurationsAgree(
   durations: AudioIntegrityDurations,
-  toleranceSec = AUDIO_DURATION_TOLERANCE_SEC
+  toleranceSec = AUDIO_DURATION_TOLERANCE_SEC,
+  rawTrailingPaddingToleranceSec = RAW_VIDEO_TRAILING_PADDING_TOLERANCE_SEC
 ): boolean {
-  const values = [
+  const timelineValues = [
     durations.sourceVideoDurationSec,
-    durations.rawVideoDurationSec,
     durations.finalVideoDurationSec,
     ...(durations.sourceAudioDurationSec === undefined
       ? []
       : [durations.sourceAudioDurationSec]),
   ];
+  const values = [durations.rawVideoDurationSec, ...timelineValues];
   if (
     !Number.isFinite(toleranceSec) ||
     toleranceSec < 0 ||
+    !Number.isFinite(rawTrailingPaddingToleranceSec) ||
+    rawTrailingPaddingToleranceSec < toleranceSec ||
     values.some((value) => !Number.isFinite(value) || value <= 0)
   ) {
     return false;
   }
 
-  const durationSpreadSec = Math.max(...values) - Math.min(...values);
   const floatingPointSlack =
     Number.EPSILON * Math.max(1, ...values.map(Math.abs)) * values.length;
-  return durationSpreadSec <= toleranceSec + floatingPointSlack;
+  const timelineMin = Math.min(...timelineValues);
+  const timelineMax = Math.max(...timelineValues);
+  if (timelineMax - timelineMin > toleranceSec + floatingPointSlack) {
+    return false;
+  }
+
+  const rawDurationSec = durations.rawVideoDurationSec;
+  return (
+    rawDurationSec >= timelineMax - toleranceSec - floatingPointSlack &&
+    rawDurationSec <=
+      timelineMin + rawTrailingPaddingToleranceSec + floatingPointSlack
+  );
 }

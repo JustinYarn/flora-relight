@@ -10,6 +10,7 @@ import {
 import { getStorage } from "@/lib/server/storage";
 import { runExecutionInputHash } from "@/lib/server/run-execution-input";
 import { requeueLampExecutionAfterApproval } from "@/lib/server/run-execution-resume";
+import { isGradeableVideoGeneration } from "@/lib/server/run-execution-failure";
 import {
   hasReusableFirstCutApproval,
   hasReusableLampApproval,
@@ -100,7 +101,7 @@ export async function repairCompletedRunExecution(
       operation?.status !== "completed" ||
       !operation.result ||
       operation.renderedPrompt !== expectedPrompt ||
-      (lamp && !operation.result.audioVerified) ||
+      !isGradeableVideoGeneration(operation) ||
       !finalEvaluationComplete
     ) {
       return execution;

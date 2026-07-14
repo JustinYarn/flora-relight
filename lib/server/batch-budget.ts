@@ -1,5 +1,7 @@
-import { PRICE_TABLE } from "../cost.ts";
-import { MAX_GEN_SECONDS } from "./ffmpeg.ts";
+import {
+  FIRST_CUT_MAX_OUTPUT_SECONDS,
+  PRICE_TABLE,
+} from "../cost.ts";
 
 export const USD_MICROS = 1_000_000;
 
@@ -50,10 +52,9 @@ export function microsToUsd(micros: number): number {
  * complete supported output window before the call starts.
  */
 export function firstCutMaximumMicros(): number {
-  return Math.ceil(
-    MAX_GEN_SECONDS *
-      PRICE_TABLE.omniFlashPerOutputSecond.usd *
-      USD_MICROS
+  return usdToMicros(
+    FIRST_CUT_MAX_OUTPUT_SECONDS *
+      PRICE_TABLE.omniFlashPerOutputSecond.usd
   );
 }
 

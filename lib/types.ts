@@ -525,6 +525,9 @@ export interface ProviderOperation {
   provider: "gemini";
   kind: "video_generation";
   iteration: number;
+  /** Immutable price snapshot captured by the atomic billed-operation claim. */
+  maxAuthorizedCostMicros?: number;
+  billingUsdPerOutputSecond?: number;
   /** Exact rendered prompt bound to the original billed create claim. */
   renderedPrompt?: string;
   /** Durable Workflow execution that owns start/poll/finalization. */

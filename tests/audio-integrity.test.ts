@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   AUDIO_DURATION_TOLERANCE_SEC,
+  RAW_VIDEO_TRAILING_PADDING_TOLERANCE_SEC,
   audioIntegrityDurationsAgree,
   audioPresenceMatchesSource,
 } from "../lib/server/audio-integrity.ts";
@@ -24,15 +25,53 @@ test("audio integrity rejects a shorter raw provider output", () => {
   );
 });
 
-test("audio integrity rejects a longer raw provider output hidden by remux -shortest", () => {
+test("audio integrity accepts bounded raw container padding while source, final, and audio stay strict", () => {
+  assert.equal(
+    audioIntegrityDurationsAgree({
+      sourceVideoDurationSec: 9.9,
+      rawVideoDurationSec: 10.01,
+      finalVideoDurationSec: 9.9,
+      sourceAudioDurationSec: 9.9,
+    }),
+    true
+  );
+});
+
+test("silent-source integrity accepts a frame-accurate final trimmed from a padded raw", () => {
+  assert.equal(
+    audioIntegrityDurationsAgree({
+      sourceVideoDurationSec: 9.9,
+      rawVideoDurationSec: 10.01,
+      finalVideoDurationSec: 9.92,
+    }),
+    true
+  );
+  assert.equal(audioPresenceMatchesSource(false, false), true);
+});
+
+test("audio integrity rejects raw padding beyond the bounded trailing allowance", () => {
   assert.equal(
     audioIntegrityDurationsAgree({
       sourceVideoDurationSec: SOURCE_DURATION_SEC,
-      rawVideoDurationSec: SOURCE_DURATION_SEC + OUTSIDE_TOLERANCE_SEC,
+      rawVideoDurationSec:
+        SOURCE_DURATION_SEC + RAW_VIDEO_TRAILING_PADDING_TOLERANCE_SEC + 0.01,
       finalVideoDurationSec: SOURCE_DURATION_SEC,
       sourceAudioDurationSec: SOURCE_DURATION_SEC,
     }),
     false
+  );
+});
+
+test("audio integrity admits exactly the bounded raw trailing allowance", () => {
+  assert.equal(
+    audioIntegrityDurationsAgree({
+      sourceVideoDurationSec: SOURCE_DURATION_SEC,
+      rawVideoDurationSec:
+        SOURCE_DURATION_SEC + RAW_VIDEO_TRAILING_PADDING_TOLERANCE_SEC,
+      finalVideoDurationSec: SOURCE_DURATION_SEC,
+      sourceAudioDurationSec: SOURCE_DURATION_SEC,
+    }),
+    true
   );
 });
 
@@ -42,6 +81,18 @@ test("audio integrity rejects a remuxed final with a shorter timeline", () => {
       sourceVideoDurationSec: SOURCE_DURATION_SEC,
       rawVideoDurationSec: SOURCE_DURATION_SEC,
       finalVideoDurationSec: SOURCE_DURATION_SEC - OUTSIDE_TOLERANCE_SEC,
+      sourceAudioDurationSec: SOURCE_DURATION_SEC,
+    }),
+    false
+  );
+});
+
+test("audio integrity rejects a raw provider output shorter than the strict timeline tolerance", () => {
+  assert.equal(
+    audioIntegrityDurationsAgree({
+      sourceVideoDurationSec: SOURCE_DURATION_SEC,
+      rawVideoDurationSec: SOURCE_DURATION_SEC - OUTSIDE_TOLERANCE_SEC,
+      finalVideoDurationSec: SOURCE_DURATION_SEC,
       sourceAudioDurationSec: SOURCE_DURATION_SEC,
     }),
     false

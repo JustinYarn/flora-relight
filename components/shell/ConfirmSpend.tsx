@@ -17,6 +17,7 @@ export function ConfirmSpend({
   onConfirm,
   onCancel,
   busy = false,
+  confirmDisabled = false,
   error,
   children,
 }: {
@@ -26,6 +27,7 @@ export function ConfirmSpend({
   onConfirm: () => void;
   onCancel: () => void;
   busy?: boolean;
+  confirmDisabled?: boolean;
   error?: string | null;
   /** Optional extra controls (e.g. a batch budget input) rendered above the buttons. */
   children?: ReactNode;
@@ -72,7 +74,7 @@ export function ConfirmSpend({
           <Button variant="ghost" onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
-          <Button onClick={onConfirm} disabled={busy}>
+          <Button onClick={onConfirm} disabled={busy || confirmDisabled}>
             {busy ? "Saving work…" : confirmLabel}
           </Button>
         </div>

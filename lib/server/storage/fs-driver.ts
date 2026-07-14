@@ -164,6 +164,10 @@ function mergeProviderOperation(
     workflowClaimedAt: incoming.workflowClaimedAt ?? current.workflowClaimedAt,
     providerInteractionId:
       incoming.providerInteractionId ?? current.providerInteractionId,
+    // The atomic claim snapshots these before the billed create call. Later
+    // status/finalization writes may never widen or reprice that grant.
+    maxAuthorizedCostMicros: current.maxAuthorizedCostMicros,
+    billingUsdPerOutputSecond: current.billingUsdPerOutputSecond,
     result: incoming.result ?? current.result,
     error: incoming.error ?? current.error,
     status: preserveCurrentStatus ? current.status : incoming.status,

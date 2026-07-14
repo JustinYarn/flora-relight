@@ -23,6 +23,7 @@ import {
   enqueueRunExecution,
   repairCompletedRunExecution,
 } from "@/lib/server/run-execution-coordinator";
+import { isGradeableVideoGeneration } from "@/lib/server/run-execution-failure";
 import { runExecutionInputHash } from "@/lib/server/run-execution-input";
 import {
   BATCH_APPROVAL_LIFETIME_MS,
@@ -796,8 +797,7 @@ async function reconcileBatchMembers(
                   completedLampArtifacts({ batch: current, run, paid })
               )
             : Boolean(
-                generationOperation(run, 1)?.status === "completed" &&
-                  generationOperation(run, 1)?.result &&
+                isGradeableVideoGeneration(generationOperation(run, 1)) &&
                   generationOperation(run, 1)?.renderedPrompt ===
                     current.renderedPrompt
               );
@@ -914,6 +914,31 @@ function classifyMember(
     );
   }
   if (operation?.status === "completed" && operation.result) {
+    let actualMicros: number;
+    try {
+      actualMicros = usdToMicros(operation.result.costUsd);
+    } catch {
+      return withMemberError(
+        member,
+        "reconcile_required",
+        "Completed provider cost could not be represented safely."
+      );
+    }
+    if (actualMicros > member.maxReservedMicros) {
+      return withMemberError(
+        member,
+        "reconcile_required",
+        "Confirmed provider cost exceeded the immutable member reservation."
+      );
+    }
+    if (!operation.result.audioVerified) {
+      return withMemberError(
+        member,
+        "failed",
+        "The completed first cut failed original-audio integrity and cannot enter grading.",
+        actualMicros
+      );
+    }
     if (
       child?.status !== "awaiting_review" ||
       child.phase !== "complete" ||
@@ -937,28 +962,12 @@ function classifyMember(
         "The completed provider artifact has no gradeable child settlement."
       );
     }
-    try {
-      const actualMicros = usdToMicros(operation.result.costUsd);
-      if (actualMicros > member.maxReservedMicros) {
-        return withMemberError(
-          member,
-          "reconcile_required",
-          "Confirmed provider cost exceeded the immutable member reservation."
-        );
-      }
-      return withMemberError(
-        member,
-        "awaiting_review",
-        undefined,
-        actualMicros
-      );
-    } catch {
-      return withMemberError(
-        member,
-        "reconcile_required",
-        "Completed provider cost could not be represented safely."
-      );
-    }
+    return withMemberError(
+      member,
+      "awaiting_review",
+      undefined,
+      actualMicros
+    );
   }
 
   if (operation) {

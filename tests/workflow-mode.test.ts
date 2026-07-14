@@ -56,7 +56,7 @@ test("a later browser batch snapshot cannot change the batch method", () => {
     runIds: ["run_mode_lock"],
     concurrency: 2,
     status: "running",
-    budgetUsd: 2.04,
+    budgetUsd: 2.05,
   };
   const staleModeFlip: Batch = {
     ...current,

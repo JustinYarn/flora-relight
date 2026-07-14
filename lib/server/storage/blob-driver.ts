@@ -1032,7 +1032,13 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
                           AND ${operation.status} = 'in_progress'
                         )
                       THEN
-                        (item || ${serialized}::jsonb)
+                        (
+                          item || (
+                            ${serialized}::jsonb
+                            - 'maxAuthorizedCostMicros'
+                            - 'billingUsdPerOutputSecond'
+                          )
+                        )
                         || jsonb_build_object(
                           'status', item->'status',
                           'updatedAt', GREATEST(
@@ -1041,7 +1047,13 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
                           )
                         )
                       ELSE
-                        (item || ${serialized}::jsonb)
+                        (
+                          item || (
+                            ${serialized}::jsonb
+                            - 'maxAuthorizedCostMicros'
+                            - 'billingUsdPerOutputSecond'
+                          )
+                        )
                         || jsonb_build_object(
                           'updatedAt', GREATEST(
                             COALESCE((item->>'updatedAt')::bigint, 0),
