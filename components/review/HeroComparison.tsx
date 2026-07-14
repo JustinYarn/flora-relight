@@ -174,7 +174,7 @@ export function HeroComparison({
 
   const side = !wipe;
   const slotClass = side
-    ? "relative aspect-video overflow-hidden rounded-xl border border-edge bg-canvas"
+    ? "relative aspect-video overflow-hidden rounded-xl bg-canvas outline outline-1 -outline-offset-1 outline-white/10"
     : "absolute inset-0";
 
   return (
@@ -184,7 +184,7 @@ export function HeroComparison({
         className={
           side
             ? "grid grid-cols-2 gap-2"
-            : "relative aspect-video overflow-hidden rounded-xl border border-edge bg-canvas"
+            : "relative aspect-video overflow-hidden rounded-xl bg-canvas outline outline-1 -outline-offset-1 outline-white/10"
         }
       >
         {/* ORIGINAL — primary element; owns the clock and the audio. */}
@@ -286,7 +286,7 @@ export function HeroComparison({
         {/* Wipe divider handle */}
         {!side && (
           <div
-            className="absolute inset-y-0 z-20 flex w-6 -translate-x-1/2 cursor-ew-resize items-center justify-center"
+            className="absolute inset-y-0 z-20 flex w-10 -translate-x-1/2 cursor-ew-resize items-center justify-center"
             style={{ left: `${wipePos}%`, touchAction: "none" }}
             onPointerDown={(e) => {
               e.currentTarget.setPointerCapture(e.pointerId);
@@ -318,7 +318,7 @@ export function HeroComparison({
       <div className="mt-3 flex items-center gap-3">
         <button
           onClick={togglePlay}
-          className="w-16 rounded-lg border border-edge px-3 py-1 text-sm text-muted transition hover:border-faint hover:text-ink"
+          className="min-h-10 w-16 rounded-lg border border-edge px-3 py-1 text-sm text-muted transition-[transform,color,border-color] duration-150 ease-out hover:border-faint hover:text-ink active:scale-[0.96]"
         >
           {playing ? "Pause" : "Play"}
         </button>
@@ -332,14 +332,14 @@ export function HeroComparison({
           step={0.05}
           value={Math.min(time, duration || original.durationSec)}
           onChange={(e) => seek(Number(e.target.value))}
-          className="flex-1 accent-accent"
+          className="h-10 flex-1 accent-accent"
           aria-label="Scrub timeline"
         />
         <span className="w-10 text-2xs tabular-nums text-faint">{formatTime(duration)}</span>
         <button
           onClick={() => setWipe((w) => !w)}
           aria-pressed={wipe}
-          className={`rounded-lg border px-3 py-1 text-sm transition ${
+          className={`min-h-10 rounded-lg border px-3 py-1 text-sm transition-[transform,color,border-color] duration-150 ease-out active:scale-[0.96] ${
             wipe
               ? "border-faint text-ink"
               : "border-edge text-muted hover:border-faint hover:text-ink"

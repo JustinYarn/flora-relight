@@ -1,0 +1,224 @@
+import "server-only";
+
+import {
+  GEMINI_PRO_MODEL,
+  getGemini,
+  resolveSourceUrl,
+  uploadVideoCached,
+} from "@/lib/server/gemini";
+import { PRICE_TABLE } from "@/lib/cost";
+import {
+  LAMP_EVALUATOR_VERSION,
+  LAMP_VISUAL_EVAL_DEFS,
+  buildLampEvaluationArtifact,
+  isLampEvaluationArtifact,
+  lampEvaluationOperationId,
+  type LampEvaluationArtifact,
+} from "@/lib/lamp-evaluation";
+import {
+  beginPaidOperation,
+  completePaidOperation,
+  markPaidOperationReconcileRequired,
+  paidOperationBlockedMessage,
+} from "@/lib/server/paid-operation";
+import { getStorage } from "@/lib/server/storage";
+import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
+import type { EvalResult } from "@/lib/types";
+
+const VIOLATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "aspect",
+    "severity",
+    "description",
+    "correction",
+    "frameTimestampSec",
+  ],
+  properties: {
+    aspect: { type: "string" },
+    severity: { type: "string", enum: ["critical", "major", "minor"] },
+    description: { type: "string" },
+    correction: { type: "string" },
+    frameTimestampSec: { type: ["number", "null"] },
+  },
+} as const;
+
+const RESULT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "evalId",
+    "score",
+    "confidence",
+    "violations",
+    "reasoning",
+  ],
+  properties: {
+    evalId: {
+      type: "string",
+      enum: LAMP_VISUAL_EVAL_DEFS.map((definition) => definition.id),
+    },
+    score: { type: "number" },
+    confidence: { type: "number" },
+    violations: { type: "array", items: VIOLATION_SCHEMA },
+    reasoning: { type: "string" },
+  },
+} as const;
+
+const RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["results"],
+  properties: {
+    results: { type: "array", items: RESULT_SCHEMA },
+  },
+} as const;
+
+function evaluatorPrompt(): string {
+  const rubrics = LAMP_VISUAL_EVAL_DEFS.map((definition, index) => {
+    const rubric = definition.promptTemplate
+      // The canonical library is also used by the older sampled-frame loop.
+      // Lamp keeps its criteria and correction rules, but removes that loop's
+      // input claims and per-rubric output envelope before composing one
+      // truthful full-video request with one shared response schema.
+      .replace(/^Protocol:[^\n]*\n\n/m, "Protocol: compare both complete videos over their full timelines.\n\n")
+      .replace(
+        /INPUTS\n[\s\S]*?Inspect the event-picked frames hardest — failures concentrate where motion and expression peak\.\n\n/,
+        ""
+      )
+      .replace(/\nOUTPUT\n[\s\S]*$/, "")
+      .split("{{BEFORE_FRAMES}}")
+      .join("the complete ORIGINAL video attached first")
+      .split("{{AFTER_FRAMES}}")
+      .join("the complete CANDIDATE video attached second")
+      .split("index-locked pair")
+      .join("corresponding moment")
+      .split("frame-pair by frame-pair")
+      .join("across corresponding moments")
+      .split("event-picked frames")
+      .join("challenging motion and speech moments");
+    return [
+      `CHECK ${index + 1}: ${definition.id} — ${definition.name}`,
+      definition.description,
+      `Pass threshold: ${definition.passThreshold}; borderline threshold: ${definition.borderlineThreshold}.`,
+      rubric,
+    ].join("\n");
+  }).join("\n\n---\n\n");
+
+  return [
+    `You are the ${LAMP_EVALUATOR_VERSION} whole-video critic.`,
+    "Compare the complete original and candidate videos once, then return exactly one result for every listed check.",
+    "Judge source fidelity over the entire timeline, including the worst frame. Do not infer a Look Anchor; Lamp has none.",
+    "For every violation, write a concise imperative correction that can be inserted directly into the next video-generation prompt.",
+    "confidence is 0 to 1 and must describe how strongly the attached evidence supports this single-judge result. Do not treat it as multi-judge agreement.",
+    "Do not include audio-integrity; the server verifies audio separately. Do not include temporal-alignment; its local correlation metric is not yet available in Lamp.",
+    "Return one JSON object with a results array matching the supplied response schema. Do not emit a separate JSON object for each check.",
+    "",
+    rubrics,
+  ].join("\n");
+}
+
+export async function runLampHolisticEvaluation(input: {
+  runId: string;
+  iteration: 1 | 2;
+  previousResults?: EvalResult[];
+}): Promise<LampEvaluationArtifact> {
+  const storage = getStorage();
+  const run = await storage.getRun(input.runId);
+  if (!run) throw new Error("Run not found for Lamp evaluation.");
+  const generation = run.providerOperations?.find(
+    (operation) => operation.id === videoGenerationOperationId(input.iteration)
+  );
+  if (
+    generation?.status !== "completed" ||
+    !generation.result ||
+    !generation.renderedPrompt ||
+    !generation.result.audioVerified
+  ) {
+    throw new Error(
+      "Lamp evaluation requires a completed, prompt-bound generation with verified original audio."
+    );
+  }
+
+  const prompt = evaluatorPrompt();
+  const operationId = lampEvaluationOperationId(input.iteration);
+  const claim = await beginPaidOperation({
+    run,
+    id: operationId,
+    provider: "gemini",
+    kind: "judge",
+    iteration: input.iteration,
+    evalId: "lamp-holistic",
+    canonicalInput: {
+      version: LAMP_EVALUATOR_VERSION,
+      iteration: input.iteration,
+      sourceUrl: run.originalVideo.url,
+      candidateUrl: generation.result.videoUrl,
+      generationPrompt: generation.renderedPrompt,
+      audioVerified: generation.result.audioVerified,
+      prompt,
+    },
+  });
+  if (claim.state === "cached") {
+    if (!isLampEvaluationArtifact(claim.operation.result, input.iteration)) {
+      throw new Error("Cached Lamp evaluation has an invalid result shape.");
+    }
+    return claim.operation.result;
+  }
+  if (claim.state === "blocked") {
+    throw new Error(paidOperationBlockedMessage(claim));
+  }
+
+  try {
+    // Spend authorization and the durable exactly-once claim above must happen
+    // before either private clip is uploaded to a provider.
+    const [sourcePath, candidatePath] = await Promise.all([
+      resolveSourceUrl(run.originalVideo.url),
+      resolveSourceUrl(generation.result.videoUrl),
+    ]);
+    const [source, candidate] = await Promise.all([
+      uploadVideoCached(sourcePath),
+      uploadVideoCached(candidatePath),
+    ]);
+    const response = await getGemini().models.generateContent({
+      model: GEMINI_PRO_MODEL,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: prompt },
+            { text: "ORIGINAL video:" },
+            { fileData: { fileUri: source.uri, mimeType: "video/mp4" } },
+            { text: "CANDIDATE video:" },
+            { fileData: { fileUri: candidate.uri, mimeType: "video/mp4" } },
+          ],
+        },
+      ],
+      config: {
+        httpOptions: { retryOptions: { attempts: 1 } },
+        responseMimeType: "application/json",
+        responseJsonSchema: RESPONSE_SCHEMA,
+      },
+    });
+    if (!response.text) {
+      throw new Error("Lamp evaluator returned no content.");
+    }
+    const artifact = buildLampEvaluationArtifact({
+      raw: JSON.parse(response.text),
+      iteration: input.iteration,
+      audioVerified: generation.result.audioVerified,
+      previousResults: input.previousResults,
+      costUsd: PRICE_TABLE.geminiJudgePerCall.usd,
+    });
+    return completePaidOperation(claim.operation, artifact);
+  } catch (error) {
+    await markPaidOperationReconcileRequired(
+      claim.operation,
+      error instanceof Error
+        ? error.message
+        : "Lamp evaluation returned an ambiguous result."
+    );
+    throw error;
+  }
+}

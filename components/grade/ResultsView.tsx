@@ -3,13 +3,15 @@
 import { useMemo } from "react";
 import Link from "next/link";
 import type { Run } from "@/lib/types";
-import { getEvalDef } from "@/lib/prompts/eval-defs";
+import { EVAL_DEFS, getEvalDef } from "@/lib/prompts/eval-defs";
+import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
 import { SectionTitle, verdictColor } from "@/components/ui";
 import {
   aiPassRatePct,
   biggestDisagreements,
   biggestDivergence,
   collectComparisons,
+  finalLampIteration,
   humanVerdictWord,
   overallAgreementPct,
   perCheckStats,
@@ -18,9 +20,8 @@ import {
 
 /*
  * "Compare with AI" — the calibration read-out over every graded clip.
- * The AI side of every number is the SHIPPED attempt's evalResults (same
- * derive helper the blind grader used to pick the video), so human and AI
- * always judged the identical cut.
+ * The AI side of every number is the final v2 evaluation. Human answers stay
+ * blind until save, then this view reveals both sides video by video.
  */
 
 function Stat({
@@ -58,6 +59,126 @@ function fmtGap(gap: number): string {
   return rounded > 0 ? `+${rounded}` : `−${Math.abs(rounded)}`;
 }
 
+function isUnavailable(evalId: string): boolean {
+  return LAMP_UNAVAILABLE_EVAL_IDS.includes(
+    evalId as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
+  );
+}
+
+function unavailableLabel(evalId: string): string {
+  return evalId === "lighting-match-to-anchor" ? "Not applicable" : "Unavailable";
+}
+
+function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean }) {
+  const final = finalLampIteration(run);
+  const aiResults = final?.evalResults ?? [];
+  const applicableCount = EVAL_DEFS.length - LAMP_UNAVAILABLE_EVAL_IDS.length;
+  const availableCount = aiResults.filter((result) => !isUnavailable(result.evalId)).length;
+
+  return (
+    <details
+      open={defaultOpen}
+      className="group rounded-xl bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.16)]"
+    >
+      <summary className="flex min-h-14 cursor-pointer list-none flex-wrap items-center gap-x-4 gap-y-1 rounded-xl px-4 py-3 transition-[transform,background-color] duration-150 ease-out hover:bg-raised active:scale-[0.96] [&::-webkit-details-marker]:hidden">
+        <span
+          className="min-w-0 flex-1 truncate text-sm font-medium text-ink"
+          title={run.originalVideo.label}
+        >
+          {run.originalVideo.label}
+        </span>
+        <span className="text-2xs tabular-nums text-muted">
+          Final v{final?.index ?? 2} · {availableCount} of {applicableCount} applicable AI
+          results
+        </span>
+        <span
+          className="text-2xs font-medium"
+          style={{ color: run.humanGrade?.shipIt ? "var(--pass)" : "var(--fail)" }}
+        >
+          You: {run.humanGrade?.shipIt ? "ship" : "do not ship"}
+        </span>
+        <span className="text-faint transition-[transform] duration-150 ease-out group-open:rotate-180">
+          ⌄
+        </span>
+      </summary>
+
+      <div className="overflow-x-auto px-4 pb-4">
+        <div className="min-w-[720px]">
+          <div className="grid grid-cols-[minmax(160px,1fr)_minmax(145px,0.8fr)_minmax(170px,0.9fr)_64px] gap-x-4 border-b border-edge pb-2 text-2xs uppercase tracking-[0.14em] text-faint">
+          <span>check</span>
+          <span>your grade</span>
+          <span>final AI</span>
+          <span className="text-right">gap</span>
+        </div>
+          <div className="divide-y divide-edge">
+            {EVAL_DEFS.map((def) => {
+            const human = run.humanGrade?.scores[def.id];
+            const ai = aiResults.find((result) => result.evalId === def.id);
+            const gap =
+              human && ai && !isUnavailable(def.id)
+                ? human.score - ai.score
+                : undefined;
+            return (
+              <div
+                key={def.id}
+                className="grid min-h-12 grid-cols-[minmax(160px,1fr)_minmax(145px,0.8fr)_minmax(170px,0.9fr)_64px] items-center gap-x-4 py-2.5 text-xs"
+              >
+                <span className="min-w-0 text-pretty font-medium text-ink">
+                  {def.name}
+                </span>
+                <span className="tabular-nums">
+                  {human ? (
+                    <span style={{ color: verdictColor(human.verdict) }}>
+                      {human.score} · {humanVerdictWord(human.points)}
+                    </span>
+                  ) : (
+                    <span className="text-faint">Not graded</span>
+                  )}
+                </span>
+                <span className="tabular-nums">
+                  {isUnavailable(def.id) ? (
+                    <span
+                      className="text-faint"
+                      title={
+                        def.id === "temporal-alignment"
+                          ? "Lamp does not yet implement the documented local temporal-correlation metric."
+                          : "Lamp has no Look Anchor, so this rubric does not apply."
+                      }
+                    >
+                      {unavailableLabel(def.id)}
+                    </span>
+                  ) : ai ? (
+                    <span style={{ color: verdictColor(ai.verdict) }}>
+                      {Math.round(ai.score)} · {ai.verdict}{" "}
+                      <span className="text-faint">
+                        ({Math.round(ai.confidence * 100)}% confidence)
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="text-borderline">Not returned</span>
+                  )}
+                </span>
+                <span className="text-right tabular-nums text-muted">
+                  {gap === undefined ? "—" : fmtGap(gap)}
+                </span>
+              </div>
+            );
+            })}
+          </div>
+          <div className="flex justify-end border-t border-edge pt-3">
+            <Link
+              href={`/runs/${run.id}`}
+              className="inline-flex min-h-10 items-center text-xs text-accent transition-[transform,filter] duration-150 ease-out hover:brightness-110 active:scale-[0.96]"
+            >
+              Review final video →
+            </Link>
+          </div>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
   const comps = useMemo(() => collectComparisons(gradedRuns), [gradedRuns]);
   const stats = useMemo(() => perCheckStats(comps), [comps]);
@@ -86,18 +207,48 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         />
         <Stat
           value={pct(aiPassRate)}
-          label="automated pass rate"
-          title="among clips that actually ran automated gates, the share whose shipped attempt passed"
+          label="final AI pass rate"
+          title="among videos with all nine applicable final v2 results, the share that passed the complete automated gate"
         />
       </div>
 
       {!hasComparisons ? (
         <p className="border-b border-edge py-4 text-sm text-muted">
-          These production first cuts went directly to human grading. Your
-          responses are saved, but there are no automated verdicts to compare
-          with them.
+          Your human responses are saved, but these final videos have no
+          returned AI results to compare with them.
         </p>
       ) : null}
+
+      <section className="pt-6">
+        <SectionTitle
+          right={
+            <span className="text-2xs text-faint">
+              human grade vs final v2 AI evaluation
+            </span>
+          }
+        >
+          By video
+        </SectionTitle>
+        <p className="mb-4 max-w-3xl text-pretty text-xs leading-relaxed text-muted">
+          Open a video to compare every one of your saved grades with the AI
+          evaluation made after the final regeneration. Lamp has nine applicable
+          automated results; timing correlation remains unavailable and Look
+          Anchor matching does not apply.
+        </p>
+        <div className="space-y-2">
+          {gradedRuns.map((run, index) => (
+            <VideoComparison key={run.id} run={run} defaultOpen={index === 0} />
+          ))}
+        </div>
+      </section>
+
+      <div className="mt-10 border-t border-edge pt-6">
+        <SectionTitle>Aggregate calibration</SectionTitle>
+        <p className="text-pretty text-xs text-muted">
+          These summaries combine only human/AI pairs that actually exist.
+          Missing and inapplicable checks never count as agreement.
+        </p>
+      </div>
 
       {divergence ? (
         <p className="border-b border-edge py-4 text-sm text-ink">
@@ -140,7 +291,11 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
                     {def.name}
                   </span>
                   <span className="flex-1 text-2xs text-faint">
-                    no data yet — this automated check was not run on a graded clip
+                    {isUnavailable(s.evalId)
+                      ? s.evalId === "temporal-alignment"
+                        ? "unavailable in Lamp — temporal correlation is not implemented yet"
+                        : "not applicable in Lamp — there is no Look Anchor"
+                      : "no final AI result was returned for a graded video"}
                   </span>
                 </div>
               );
@@ -227,7 +382,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
                   </span>
                   <Link
                     href={`/runs/${d.run.id}`}
-                    className="text-xs text-accent transition hover:brightness-110"
+                    className="inline-flex min-h-10 items-center text-xs text-accent transition-[transform,filter] duration-150 ease-out hover:brightness-110 active:scale-[0.96]"
                   >
                     Review →
                   </Link>

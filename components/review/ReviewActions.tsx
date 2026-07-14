@@ -5,6 +5,7 @@ import Link from "next/link";
 import type { Run } from "@/lib/types";
 import { Badge, Button } from "@/components/ui";
 import { formatClock } from "@/lib/util";
+import { isLampBlindGradeLocked } from "@/components/grade/derive";
 
 /**
  * Bottom-right sticky cluster while the run awaits review; after the decision
@@ -33,11 +34,12 @@ export function ReviewActions({
     );
   }
 
-  if (run.serverExecution && run.status === "awaiting-review") {
+  if (isLampBlindGradeLocked(run)) {
     return (
       <div className="flex flex-wrap items-center justify-end gap-3 py-4">
-        <span className="text-2xs text-faint">
-          Automated quality checks were not run on this first cut.
+        <span className="text-pretty text-2xs text-faint">
+          The final video is ready. Grade it blind; available final AI results
+          stay hidden until your grade is saved.
         </span>
         <Link
           href="/grade"
@@ -78,7 +80,7 @@ export function ReviewActions({
         value={notes}
         onChange={(e) => setNotes(e.target.value)}
         placeholder="Notes for the record…"
-        className="min-w-0 flex-1 rounded-lg bg-raised px-3 py-1.5 text-sm text-ink placeholder:text-faint focus:outline-none"
+        className="min-h-10 min-w-0 flex-1 rounded-lg bg-raised px-3 py-1.5 text-sm text-ink placeholder:text-faint focus:outline-none"
       />
       <Button variant="success" onClick={() => onSubmit("approved", notes)}>
         Approve

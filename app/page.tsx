@@ -6,14 +6,13 @@ import { useRouter } from "next/navigation";
 import { useAppStore } from "@/lib/store";
 import { probeVideo } from "@/lib/frames";
 import {
-  estimateBatch,
   estimateFirstCut,
-  estimateRun,
-  FIRST_CUT_MAX_OUTPUT_SECONDS,
+  estimateLampRun,
   formatUsd,
 } from "@/lib/cost";
 import { formatClock, uid } from "@/lib/util";
 import { ConfirmSpend } from "@/components/shell/ConfirmSpend";
+import { WorkflowModeSelector } from "@/components/shell/WorkflowModeSelector";
 import {
   Badge,
   Button,
@@ -23,25 +22,78 @@ import {
   ScoreMeter,
   SectionTitle,
 } from "@/components/ui";
-import type { Run, RunStatus, Verdict, VideoAsset } from "@/lib/types";
+import type {
+  Run,
+  RunStatus,
+  Verdict,
+  VideoAsset,
+  WorkflowMode,
+} from "@/lib/types";
+import { workflowModeLabel } from "@/lib/workflow-mode";
 
-const LIVE_PIPELINE_STEPS = [
-  "Read clip",
-  "Prepare source",
-  "Generate first cut",
-  "Restore audio",
-  "Verify audio",
-  "Human grade",
+const FLORA_FLOW = [
+  {
+    title: "One-pass generation",
+    description: "Generate one review-ready relight for each source video.",
+  },
+  {
+    title: "Original audio",
+    description: "Restore and verify the source audio on the delivered cut.",
+  },
+  {
+    title: "Human review",
+    description: "Inspect the cut directly and decide whether it is ready to use.",
+  },
+  {
+    title: "Single or batch",
+    description: "Run one clip or send a group through the bounded batch queue.",
+  },
 ] as const;
 
-const DEMO_PIPELINE_STEPS = [
-  "Read clip",
-  "Simulate scene plan",
-  "Simulate Look Anchor",
-  "Simulate first cut",
-  "Simulate checks",
-  "Review demo",
+const LAMP_FLOW = [
+  {
+    title: "Initial video",
+    description: "Generate once from the complete mega prompt.",
+  },
+  {
+    title: "Whole-video critique",
+    description:
+      "Evaluate the full result together. Only checks that actually return are recorded.",
+  },
+  {
+    title: "Final video",
+    description: "Apply the critique in one final regeneration — no open-ended loop.",
+  },
+  {
+    title: "Your grade",
+    description:
+      "Grade the final blind, then compare your calls with the available final AI evaluation.",
+  },
 ] as const;
+
+const MODE_COPY: Record<
+  WorkflowMode,
+  { eyebrow: string; title: string; description: string }
+> = {
+  flora: {
+    eyebrow: "Legacy one-pass method",
+    title: "Fast first cuts, one video or a batch.",
+    description:
+      "Flora generates one review-ready relight per source clip, preserves the original audio, and sends the result to human review.",
+  },
+  lamp: {
+    eyebrow: "Exact two-pass method",
+    title: "One critique. One regeneration. One final.",
+    description:
+      "Lamp generates an Initial from the mega prompt, critiques the complete video, and regenerates once. You grade Final blind before comparing your calls with the AI evaluation.",
+  },
+};
+
+function estimateWorkflowRun(mode: WorkflowMode, durationSec: number) {
+  return mode === "lamp"
+    ? estimateLampRun(durationSec)
+    : estimateFirstCut(durationSec);
+}
 
 /** Shape of a successful ingest response (POST /api/ingest and /api/ingest/finalize). */
 interface IngestResponse {
@@ -322,11 +374,14 @@ function isResumableSingleRun(
 ): boolean {
   if (
     batchRunIds.has(run.id) ||
-    run.status !== "running" ||
-    run.iterations.length !== 0
+    run.status !== "running"
   ) {
     return false;
   }
+  if (run.serverExecution?.status === "user_action_required") {
+    return run.serverExecution.source === "single";
+  }
+  if (run.iterations.length !== 0) return false;
   if (!run.spendApproval && !run.serverExecution) return true;
   return (
     run.spendApproval?.source === "single" &&
@@ -335,9 +390,8 @@ function isResumableSingleRun(
   );
 }
 
-function RunRow({ run, maxIterations, passThreshold, inBatch, readyToStart }: {
+function RunRow({ run, passThreshold, inBatch, readyToStart }: {
   run: Run;
-  maxIterations: number;
   passThreshold: number;
   inBatch: boolean;
   readyToStart: boolean;
@@ -350,8 +404,11 @@ function RunRow({ run, maxIterations, passThreshold, inBatch, readyToStart }: {
     evals.length > 0
       ? evals.reduce((sum, r) => sum + r.confidence, 0) / evals.length
       : undefined;
+  const isLampRun = run.workflowMode === "lamp";
   const status = readyToStart
-    ? { color: "var(--running)", label: "ready to start" }
+    ? run.serverExecution?.status === "user_action_required"
+      ? { color: "var(--borderline)", label: "approval needed" }
+      : { color: "var(--running)", label: "ready to start" }
     : STATUS_META[run.status];
 
   return (
@@ -368,6 +425,9 @@ function RunRow({ run, maxIterations, passThreshold, inBatch, readyToStart }: {
           <div className="flex items-center gap-1.5">
             <span className="font-mono text-xs text-ink">{run.id.slice(0, 14)}</span>
             {inBatch ? <Badge>batch</Badge> : null}
+            <Badge color={run.workflowMode === "lamp" ? "var(--accent)" : "var(--muted)"}>
+              {workflowModeLabel(run.workflowMode ?? "flora")}
+            </Badge>
           </div>
           <div className="mt-0.5 max-w-[220px] truncate text-2xs text-faint">
             {run.originalVideo.label}
@@ -377,8 +437,22 @@ function RunRow({ run, maxIterations, passThreshold, inBatch, readyToStart }: {
       <td className="px-4 py-3">
         <Badge color={status.color}>{status.label}</Badge>
       </td>
-      <td className="px-4 py-3 text-sm tabular-nums text-muted">
-        {run.iterations.length}/{maxIterations}
+      <td className="px-4 py-3 text-sm text-muted">
+        {run.status === "failed"
+          ? isLampRun && run.iterations.length >= 2
+            ? "Stopped after final"
+            : run.iterations.length === 1
+              ? isLampRun
+                ? "Stopped after initial"
+                : "Stopped after first cut"
+              : "Not started"
+          : isLampRun && run.iterations.length >= 2
+            ? "Final ready"
+            : run.iterations.length === 1
+              ? isLampRun
+                ? "Initial ready"
+                : "First cut ready"
+              : "—"}
       </td>
       <td className="w-40 px-4 py-3">
         {composite ? (
@@ -414,6 +488,7 @@ export default function DashboardPage() {
   const startBatchFromDraft = useAppStore((s) => s.startBatchFromDraft);
   const batches = useAppStore((s) => s.batches);
   const mode = useAppStore((s) => s.mode);
+  const workflowMode = useAppStore((s) => s.workflowMode);
   const hydrated = useAppStore((s) => s.hydrated);
 
   /** Every run id that belongs to some batch — drives the "batch" row tag. */
@@ -436,6 +511,7 @@ export default function DashboardPage() {
   const [pendingLaunch, setPendingLaunch] = useState<{
     video: VideoAsset;
     trimNote: string | null;
+    workflowMode: WorkflowMode;
   } | null>(null);
   /** Server-discovered single uploads that have not become prepared Runs yet. */
   const [pendingSingleUploads, setPendingSingleUploads] = useState<
@@ -722,9 +798,9 @@ export default function DashboardPage() {
       ),
     [batches]
   );
-  /** Newest finalized single upload that has not received spend approval. */
-  const resumableSingle = useMemo(
-    () => runs.find((run) => isResumableSingleRun(run, batchRunIds)),
+  /** Every prepared or approval-paused single remains independently resumable. */
+  const resumableSingles = useMemo(
+    () => runs.filter((run) => isResumableSingleRun(run, batchRunIds)),
     [batchRunIds, runs]
   );
   const interruptedSingle = pendingSingleUploads[0];
@@ -796,11 +872,11 @@ export default function DashboardPage() {
       if (mode === "live") {
         // Real spend ahead — route the auto-start through ConfirmSpend.
         setLaunchError(null);
-        setPendingLaunch({ video, trimNote });
+        setPendingLaunch({ video, trimNote, workflowMode });
         return;
       }
       try {
-        const id = await startRun(video);
+        const id = await startRun(video, { workflowMode });
         router.push(`/runs/${id}`);
       } catch (error) {
         appendError(
@@ -808,7 +884,7 @@ export default function DashboardPage() {
         );
       }
     },
-    [appendError, mode, pendingSingleUploads, router, startRun]
+    [appendError, mode, pendingSingleUploads, router, startRun, workflowMode]
   );
 
   const handleMany = useCallback(
@@ -819,7 +895,8 @@ export default function DashboardPage() {
       }));
       const batchId = createBatchDraft(
         reservations,
-        `Upload batch ${new Date().toLocaleDateString()}`
+        `${workflowModeLabel(workflowMode)} batch ${new Date().toLocaleDateString()}`,
+        workflowMode
       );
       try {
         await persistBatchSnapshot();
@@ -889,7 +966,7 @@ export default function DashboardPage() {
       setLaunchError(null);
       setPendingBatchId(batchId);
     },
-    [appendError, createBatchDraft, updateBatchUpload]
+    [appendError, createBatchDraft, updateBatchUpload, workflowMode]
   );
 
   const handleFiles = useCallback(
@@ -944,37 +1021,62 @@ export default function DashboardPage() {
     const n = Number(budgetInput);
     return Number.isFinite(n) && n > 0 ? n : undefined;
   }, [budgetInput]);
-  const pipelineSteps =
-    mode === "live" ? LIVE_PIPELINE_STEPS : DEMO_PIPELINE_STEPS;
-
+  const workflowCopy = MODE_COPY[workflowMode];
+  const workflowFlow = workflowMode === "lamp" ? LAMP_FLOW : FLORA_FLOW;
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-5 px-6 py-8">
-      <div className="grid gap-5 lg:grid-cols-5">
-        {/* Hero */}
-        <Card className="p-5 lg:col-span-3">
-          <SectionTitle>What this tool does</SectionTitle>
-          <p className="text-sm leading-relaxed text-muted">
-            {mode === "live"
-              ? "Drop in a dim webcam clip — get a durable professionally relit first cut with the original audio restored and verified, then grade it yourself across 11 quality checks."
-              : "Explore the relight workflow with scripted stand-ins. Generation and quality checks are simulated, no paid provider automation runs, and the result is for demo review."}
+      <div className="grid items-end gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
+        <header className="max-w-3xl">
+          <span className="text-2xs font-semibold uppercase tracking-[0.16em] text-accent">
+            {workflowCopy.eyebrow}
+          </span>
+          <h1 className="mt-2 text-balance text-3xl font-semibold tracking-[-0.025em] text-ink sm:text-4xl">
+            {workflowCopy.title}
+          </h1>
+          <p className="mt-3 max-w-2xl text-pretty text-sm leading-relaxed text-muted">
+            {workflowCopy.description}
           </p>
-          <div className="mt-4 flex flex-wrap items-center gap-1.5">
-            {pipelineSteps.map((step, i) => (
-              <span key={step} className="flex items-center gap-1.5">
-                <span className="rounded-md border border-edge bg-raised px-2 py-1 text-2xs font-medium text-muted">
-                  {step}
-                </span>
-                {i < pipelineSteps.length - 1 ? (
-                  <span className="text-2xs text-faint">→</span>
-                ) : null}
+        </header>
+        <WorkflowModeSelector />
+      </div>
+
+      <div className="grid gap-5 lg:grid-cols-5">
+        {/* Selected product flow */}
+        <Card className="p-5 lg:col-span-3">
+          <SectionTitle
+            right={
+              <span className="text-2xs text-faint">
+                {mode === "live" ? "real provider run" : "simulated demo"}
               </span>
+            }
+          >
+            The {workflowModeLabel(workflowMode)} flow
+          </SectionTitle>
+          <ol className="grid gap-2 sm:grid-cols-2">
+            {workflowFlow.map((step, index) => (
+              <li
+                key={step.title}
+                className="rounded-xl bg-raised p-3 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-accent-soft text-2xs font-semibold tabular-nums text-accent">
+                    {index + 1}
+                  </span>
+                  <h2 className="text-balance text-sm font-medium text-ink">
+                    {step.title}
+                  </h2>
+                </div>
+                <p className="mt-2 text-pretty text-xs leading-relaxed text-muted">
+                  {step.description}
+                </p>
+              </li>
             ))}
-          </div>
+          </ol>
         </Card>
 
-        {/* New run */}
+        {/* New single run or batch */}
         <Card className="p-5 lg:col-span-2">
-          <SectionTitle>New run</SectionTitle>
+          <SectionTitle>Choose videos</SectionTitle>
           <div
             role="button"
             tabIndex={0}
@@ -1005,7 +1107,7 @@ export default function DashboardPage() {
               if (!hydrated || readiness.phase !== "ready") return;
               void handleFiles(Array.from(e.dataTransfer.files));
             }}
-            className={`flex flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed px-4 py-8 text-center transition-colors ${
+            className={`flex min-h-48 flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed px-4 py-8 text-center transition-[border-color,background-color,transform] duration-150 ease-out active:scale-[0.96] ${
               !hydrated || readiness.phase !== "ready"
                 ? "cursor-not-allowed border-edge opacity-65"
                 : dragging
@@ -1022,11 +1124,12 @@ export default function DashboardPage() {
                   ? "Checking production readiness…"
                   : readiness.phase === "blocked"
                     ? "Uploads paused"
-                    : "Drop webcam clips, or click to browse"}
+                    : "Drop one or more clips, or click to browse"}
             </p>
-            <p className="text-2xs text-faint">
-              video/* · drop one clip for a single run, or several to launch a
-              batch — each starts with a cost confirmation
+            <p className="max-w-xs text-pretty text-2xs text-faint">
+              {mode === "live"
+                ? `video/* · one clip starts a ${workflowModeLabel(workflowMode)} run · multiple clips start a live ${workflowModeLabel(workflowMode)} batch after cost review`
+                : `video/* · one clip starts a demo run · multiple clips start a ${workflowModeLabel(workflowMode)} demo batch`}
             </p>
           </div>
           {ingestError ? (
@@ -1052,7 +1155,7 @@ export default function DashboardPage() {
               e.target.value = "";
             }}
           />
-          <p className="mt-2 text-2xs leading-relaxed text-faint">
+          <p className="mt-2 text-pretty text-2xs leading-relaxed text-faint">
             ~10s webcam clips work best · longer clips are auto-trimmed to the
             10s model cap · local media stays in data/; hosted media must use
             durable cloud storage
@@ -1076,48 +1179,71 @@ export default function DashboardPage() {
         </Card>
       ) : null}
 
-      {resumableSingle && pendingLaunch?.video.runId !== resumableSingle.id ? (
-        <Card className="flex flex-wrap items-center gap-3 p-4">
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium text-ink">
-              Uploaded clip ready to generate
-            </p>
-            <p className="mt-0.5 truncate text-2xs text-faint">
-              {resumableSingle.originalVideo.label} is safely prepared. You can
-              resume the spend confirmation without uploading it again.
-            </p>
-          </div>
-          <Button
-            disabled={launching === "run"}
-            onClick={async () => {
-              setLaunchError(null);
-              if (mode === "mock") {
-                if (launching) return;
-                setLaunching("run");
-                try {
-                  const id = await startRun(resumableSingle.originalVideo);
-                  router.push(`/runs/${id}`);
-                } catch (error) {
-                  appendError(
-                    error instanceof Error
-                      ? error.message
-                      : "The saved run could not be resumed."
-                  );
-                } finally {
-                  setLaunching(null);
-                }
-                return;
-              }
-              setPendingLaunch({
-                video: resumableSingle.originalVideo,
-                trimNote: null,
-              });
-            }}
-          >
-            {mode === "live" ? "Review and generate" : "Resume run"}
-          </Button>
-        </Card>
-      ) : null}
+      {!pendingLaunch
+        ? resumableSingles.map((resumableSingle) => (
+            <Card
+              key={`resume-${resumableSingle.id}`}
+              className="flex flex-wrap items-center gap-3 p-4"
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-ink">
+                  {resumableSingle.serverExecution?.status ===
+                  "user_action_required"
+                    ? `${workflowModeLabel(resumableSingle.workflowMode ?? "lamp")} is paused for approval`
+                    : "Uploaded clip ready to generate"}
+                </p>
+                <p className="mt-0.5 truncate text-2xs text-faint">
+                  {resumableSingle.serverExecution?.status ===
+                  "user_action_required"
+                    ? `${resumableSingle.originalVideo.label} is safely checkpointed. Renew the same exact two-pass approval to resume it without repeating completed provider work.`
+                    : `${resumableSingle.originalVideo.label} is safely prepared. You can resume the spend confirmation without uploading it again.`}
+                </p>
+              </div>
+              <Button
+                disabled={launching === "run"}
+                onClick={async () => {
+                  setLaunchError(null);
+                  const approvalResume =
+                    resumableSingle.serverExecution?.status ===
+                    "user_action_required";
+                  if (mode === "mock" && !approvalResume) {
+                    if (launching) return;
+                    setLaunching("run");
+                    try {
+                      const id = await startRun(resumableSingle.originalVideo, {
+                        workflowMode:
+                          resumableSingle.workflowMode ?? workflowMode,
+                      });
+                      router.push(`/runs/${id}`);
+                    } catch (error) {
+                      appendError(
+                        error instanceof Error
+                          ? error.message
+                          : "The saved run could not be resumed."
+                      );
+                    } finally {
+                      setLaunching(null);
+                    }
+                    return;
+                  }
+                  setPendingLaunch({
+                    video: resumableSingle.originalVideo,
+                    trimNote: null,
+                    workflowMode:
+                      resumableSingle.workflowMode ?? workflowMode,
+                  });
+                }}
+              >
+                {resumableSingle.serverExecution?.status ===
+                "user_action_required"
+                  ? "Review and resume"
+                  : mode === "live"
+                    ? "Review and generate"
+                    : "Resume run"}
+              </Button>
+            </Card>
+          ))
+        : null}
 
       {resumableBatch && pendingBatchId !== resumableBatch.id ? (
         <Card className="flex flex-wrap items-center gap-3 p-4">
@@ -1129,7 +1255,7 @@ export default function DashboardPage() {
             </p>
             <p className="mt-0.5 text-2xs text-faint">
               {(resumableBatch.uploads ?? []).filter((item) => item.status === "ready").length}{" "}
-              clips are safely prepared
+              clips are safely prepared for {workflowModeLabel(resumableBatch.workflowMode ?? "flora")}
               {resumableBatch.status === "uploading"
                 ? "; unfinished selections need to be chosen again later. You can start the ready clips now."
                 : ". You can resume the spend confirmation without uploading them again."}
@@ -1162,7 +1288,7 @@ export default function DashboardPage() {
         {runs.length === 0 ? (
           <EmptyState
             title="No runs yet"
-            hint="Drop a clip above to start your first run — or drop several at once to launch a batch."
+            hint={`Choose one clip above to start a ${workflowModeLabel(workflowMode)} run, or choose several for a batch.`}
           />
         ) : (
           <div className="overflow-x-auto">
@@ -1171,7 +1297,7 @@ export default function DashboardPage() {
                 <tr className="text-2xs uppercase tracking-[0.14em] text-faint">
                   <th className="px-4 pb-2 font-medium">Run</th>
                   <th className="px-4 pb-2 font-medium">Status</th>
-                  <th className="px-4 pb-2 font-medium">Attempts</th>
+                  <th className="px-4 pb-2 font-medium">Workflow stage</th>
                   <th
                     className="px-4 pb-2 font-medium"
                     title="Overall score (weighted composite of all checks)"
@@ -1187,7 +1313,6 @@ export default function DashboardPage() {
                   <RunRow
                     key={run.id}
                     run={run}
-                    maxIterations={workflow.config.maxIterations}
                     passThreshold={workflow.config.compositePassThreshold}
                     inBatch={batchRunIds.has(run.id)}
                     readyToStart={
@@ -1204,16 +1329,30 @@ export default function DashboardPage() {
       {/* Live mode only: uploads confirm their spend before the run starts. */}
       {pendingLaunch ? (
         <ConfirmSpend
-          title="Generate a durable first cut?"
-          lines={[
-            `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
-            `Estimated provider cost: ${formatUsd(estimateFirstCut(pendingLaunch.video.durationSec).totalUsd)}`,
-            `Hard authorization: one video attempt only (up to ${formatUsd(estimateFirstCut(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd)} if the provider returns the full 10-second window).`,
-            "Generation, original-audio remux, and verification continue on the server if this tab closes.",
-            "Automated quality checks and correction attempts are not run in this mode; the resulting cut goes straight to your grading queue.",
-            ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
-          ]}
-          confirmLabel="Generate first cut"
+          title={`Run ${workflowModeLabel(pendingLaunch.workflowMode)} for this video?`}
+          lines={
+            pendingLaunch.workflowMode === "lamp"
+              ? [
+                  `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
+                  `Estimated provider cost: ${formatUsd(estimateLampRun(pendingLaunch.video.durationSec).totalUsd)}`,
+                  `Hard authorization: exactly two video generations and two holistic evaluation calls, up to ${formatUsd(estimateLampRun(10).totalUsd)} at the 10-second model cap. There is no open-ended retry loop.`,
+                  "For both Initial and Final, Lamp restores and verifies source audio before the whole-video evaluation. The fixed two-pass run continues on the server if this tab closes.",
+                  "Final enters blind human grading. The AI evaluation is revealed only after your grade is saved.",
+                  ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
+                ]
+              : [
+                  `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
+                  `Estimated provider cost: ${formatUsd(estimateFirstCut(pendingLaunch.video.durationSec).totalUsd)}`,
+                  `Hard authorization: one video generation, up to ${formatUsd(estimateFirstCut(10).totalUsd)} at the 10-second model cap.`,
+                  "Flora restores and verifies the original audio, then sends the one-pass cut to human review.",
+                  ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
+                ]
+          }
+          confirmLabel={
+            pendingLaunch.workflowMode === "lamp"
+              ? "Generate Initial + Final"
+              : "Generate Flora cut"
+          }
           busy={launching === "run"}
           error={launchError}
           onConfirm={async () => {
@@ -1223,6 +1362,7 @@ export default function DashboardPage() {
             try {
               const id = await startRun(pendingLaunch.video, {
                 approveLiveSpend: true,
+                workflowMode: pendingLaunch.workflowMode,
               });
               setPendingLaunch(null);
               router.push(`/runs/${id}`);
@@ -1243,55 +1383,34 @@ export default function DashboardPage() {
         />
       ) : null}
 
-      {/* Multi-drop: one spend confirmation for the whole upload batch. */}
+      {/* Both methods support provider-owned live batches and zero-spend demos. */}
       {pendingBatch && pendingBatchAssets.length > 0 ? (
         <ConfirmSpend
-          title={
-            mode === "live"
-              ? `Generate ${pendingBatchAssets.length} durable first cuts?`
-              : `Start batch of ${pendingBatchAssets.length} clips?`
-          }
-          lines={
-            mode === "live"
-              ? [
-                  `Estimated provider cost: ${formatUsd(
-                    pendingBatchAssets.reduce(
-                      (sum, asset) => sum + estimateFirstCut(asset.durationSec).totalUsd,
-                      0
-                    )
-                  )}`,
-                  `Hard authorization: one video attempt per admitted clip, reserving up to ${formatUsd(
-                    pendingBatchAssets.length *
-                      estimateFirstCut(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd
-                  )} if every provider output uses the full 10-second window.`,
-                  "The optional cap is enforced before dispatch. Each admitted clip reserves its full worst-case amount; later clips are skipped without a provider call when the next reservation would exceed the cap.",
-                  `At most ${pendingBatch.concurrency} clips run at once. Progress and generated videos stay on the server if this tab closes.`,
-                  "Automated quality checks and correction attempts are not run in this mode; each completed cut goes straight to your grading queue.",
-                  ...pendingBatchAssets.map(
-                    (asset) =>
-                      `${asset.label} — ${asset.durationSec.toFixed(1)}s · first-cut est. ${formatUsd(estimateFirstCut(asset.durationSec).totalUsd)}`
-                  ),
-                ]
-              : [
-                  `Total estimated live cost: ${formatUsd(estimateBatch(pendingBatchAssets).totalUsd)}`,
-                  `Maximum estimated live cost if every clip uses all ${workflow.config.maxIterations} attempts: ${formatUsd(
-                    pendingBatchAssets.reduce(
-                      (sum, asset) =>
-                        sum +
-                        estimateRun(
-                          asset.durationSec,
-                          workflow.config.maxIterations
-                        ).totalUsd,
-                      0
-                    )
-                  )}`,
-                  ...pendingBatchAssets.map(
-                    (asset) =>
-                      `${asset.label} — ${asset.durationSec.toFixed(1)}s · est. ${formatUsd(estimateRun(asset.durationSec).totalUsd)}`
-                  ),
-                ]
-          }
-          confirmLabel={mode === "live" ? "Generate first cuts" : "Start batch"}
+          title={`Start ${workflowModeLabel(pendingBatch.workflowMode ?? "flora")} batch of ${pendingBatchAssets.length} clips?`}
+          lines={[
+            `Total estimated provider cost: ${formatUsd(
+              pendingBatchAssets.reduce(
+                (sum, asset) =>
+                  sum +
+                  estimateWorkflowRun(
+                    pendingBatch.workflowMode ?? "flora",
+                    asset.durationSec
+                  ).totalUsd,
+                0
+              )
+            )}`,
+            pendingBatch.workflowMode === "lamp"
+              ? "Every Lamp clip uses exactly two generations and two holistic evaluations, then waits for a blind human grade."
+              : "Every Flora clip uses one generation and lands in the established human review queue.",
+            mode === "mock"
+              ? "This is a demo batch; actual mock spend is $0.00."
+              : "The server owns the bounded live queue and preserves progress if this tab closes.",
+            ...pendingBatchAssets.map(
+              (asset) =>
+                `${asset.label} — ${asset.durationSec.toFixed(1)}s · est. ${formatUsd(estimateWorkflowRun(pendingBatch.workflowMode ?? "flora", asset.durationSec).totalUsd)}`
+            ),
+          ]}
+          confirmLabel={mode === "live" ? "Start live batch" : "Start demo batch"}
           busy={launching === "batch"}
           error={launchError}
           onConfirm={async () => {
@@ -1303,6 +1422,7 @@ export default function DashboardPage() {
                 budgetUsd: parsedBudgetUsd,
                 approveLiveSpend: mode === "live",
                 allowIncompleteUploads: pendingBatch.status === "uploading",
+                workflowMode: pendingBatch.workflowMode ?? "flora",
               });
               if (id) {
                 setPendingBatchId(null);
@@ -1334,7 +1454,7 @@ export default function DashboardPage() {
               placeholder="no cap"
               value={budgetInput}
               onChange={(e) => setBudgetInput(e.target.value)}
-              className="rounded-lg border border-edge bg-raised px-2.5 py-1.5 text-sm text-ink focus:outline-none"
+              className="min-h-10 rounded-lg border border-edge bg-raised px-2.5 py-1.5 text-sm text-ink focus:border-accent focus:outline-none"
             />
           </label>
         </ConfirmSpend>

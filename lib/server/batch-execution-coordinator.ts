@@ -3,21 +3,37 @@ import "server-only";
 import { start } from "workflow/api";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import {
+  batchApprovalStartedAt,
+  batchApprovalScope,
+  batchExecutionId,
+  batchExecutionMode,
+  batchMemberExecutionId,
+  batchMaximumIterations,
+  normalizedWorkflowMode,
+} from "@/lib/server/batch-contract";
+import {
   DURABLE_BATCH_CONCURRENCY,
   firstCutMaximumMicros,
+  planBatchBudget,
   planFirstCutBudget,
   usdToMicros,
-  type FirstCutBudgetPlan,
+  type BatchBudgetPlan,
 } from "@/lib/server/batch-budget";
 import { assertRunId } from "@/lib/server/runstore";
 import { runExecutionInputHash } from "@/lib/server/run-execution-input";
 import {
   BATCH_APPROVAL_LIFETIME_MS,
   assertVideoGenerationAuthorized,
+  lampMaximumMicros,
 } from "@/lib/server/spend-approval";
 import { getStorage } from "@/lib/server/storage";
 import { durableRelightBatch } from "@/workflows/durable-relight-batch";
-import type { Batch, BatchExecution, Run } from "@/lib/types";
+import type {
+  Batch,
+  BatchExecution,
+  Run,
+  WorkflowMode,
+} from "@/lib/types";
 
 export interface EnqueueBatchExecutionResult {
   execution: BatchExecution;
@@ -27,14 +43,18 @@ export interface EnqueueBatchExecutionResult {
 }
 
 export function firstCutsBatchExecutionId(batchId: string): string {
-  return `first-cuts:${assertRunId(batchId)}`;
+  return batchExecutionId(batchId, "flora");
 }
 
 export function firstCutMemberExecutionId(
   batchId: string,
   runId: string
 ): string {
-  return `batch:${assertRunId(batchId)}:${assertRunId(runId)}`;
+  return batchMemberExecutionId(batchId, runId, "flora");
+}
+
+export function lampBatchExecutionId(batchId: string): string {
+  return batchExecutionId(batchId, "lamp");
 }
 
 function assertCanonicalBatch(batch: Batch): void {
@@ -54,23 +74,27 @@ function assertSelectedRunApproval(
   execution: BatchExecution,
   maxReservedMicros: number
 ): void {
+  const mode = batchExecutionMode(execution);
+  const expectedScope = batchApprovalScope(mode);
+  const expectedIterations = batchMaximumIterations(mode);
+  const approvalStartedAt = batchApprovalStartedAt(execution);
   const approval = run.spendApproval;
   if (
     !approval ||
     approval.source !== "batch" ||
-    approval.scope !== "first_cut" ||
+    approval.scope !== expectedScope ||
     approval.batchId !== execution.batchId ||
     approval.runId !== run.id ||
     run.originalVideo.runId !== run.id ||
     approval.sourceUrl !== run.originalVideo.url ||
     Math.abs(approval.durationSec - run.originalVideo.durationSec) > 0.001 ||
-    approval.maxIterations !== 1 ||
-    approval.approvedAt !== execution.startedAt ||
+    approval.maxIterations !== expectedIterations ||
+    approval.approvedAt !== approvalStartedAt ||
     approval.expiresAt !==
-      execution.startedAt + BATCH_APPROVAL_LIFETIME_MS
+      approvalStartedAt + BATCH_APPROVAL_LIFETIME_MS
   ) {
     throw new Error(
-      `Run ${run.id} does not carry the admission-bound first-cut approval for batch ${execution.batchId}.`
+      `Run ${run.id} does not carry the admission-bound ${mode} approval for batch ${execution.batchId}.`
     );
   }
   assertVideoGenerationAuthorized(run, 1);
@@ -81,17 +105,20 @@ function assertSelectedRunApproval(
 
 function buildExecution(
   batch: Batch,
-  plan: FirstCutBudgetPlan,
+  plan: BatchBudgetPlan,
+  workflowMode: WorkflowMode,
   now: number
 ): BatchExecution {
   const selected = new Map(
     plan.selected.map((member) => [member.runId, member.reservedMicros])
   );
-  const maximum = firstCutMaximumMicros();
-  const renderedPrompt = initialMegaPrompt().rendered;
+  const maximum =
+    workflowMode === "lamp" ? lampMaximumMicros() : firstCutMaximumMicros();
+  const renderedPrompt = initialMegaPrompt(workflowMode).rendered;
   return {
     batchId: batch.id,
-    executionId: firstCutsBatchExecutionId(batch.id),
+    executionId: batchExecutionId(batch.id, workflowMode),
+    workflowMode,
     renderedPrompt,
     inputHash: runExecutionInputHash(renderedPrompt),
     status: "queued",
@@ -107,17 +134,20 @@ function buildExecution(
       maxReservedMicros: selected.get(runId) ?? maximum,
     })),
     startedAt: now,
+    approvalStartedAt: now,
     updatedAt: now,
   };
 }
 
 function assertExecutionMatchesBatch(
   execution: BatchExecution,
-  batch: Batch
+  batch: Batch,
+  workflowMode: WorkflowMode
 ): void {
   if (
     execution.batchId !== batch.id ||
-    execution.executionId !== firstCutsBatchExecutionId(batch.id) ||
+    execution.executionId !== batchExecutionId(batch.id, workflowMode) ||
+    batchExecutionMode(execution) !== workflowMode ||
     execution.concurrency !== DURABLE_BATCH_CONCURRENCY ||
     execution.members.length !== batch.runIds.length
   ) {
@@ -172,10 +202,14 @@ function canonicalReadyUploadIds(batch: Batch): ReadonlySet<string> {
  */
 export async function prepareBatchExecution(batch: Batch): Promise<BatchExecution> {
   const id = assertRunId(batch.id);
+  const workflowMode = normalizedWorkflowMode(batch.workflowMode);
   const storage = getStorage();
   const existing = await storage.getBatchExecution(id);
   if (existing) {
-    if (existing.executionId !== firstCutsBatchExecutionId(id)) {
+    if (
+      existing.executionId !== batchExecutionId(id, workflowMode) ||
+      batchExecutionMode(existing) !== workflowMode
+    ) {
       throw new Error("A different durable execution already owns this batch.");
     }
     if (existing.concurrency !== DURABLE_BATCH_CONCURRENCY) {
@@ -189,6 +223,9 @@ export async function prepareBatchExecution(batch: Batch): Promise<BatchExecutio
   const canonical = (await storage.getBatches()).find((item) => item.id === id);
   if (!canonical) throw new Error("Batch not found.");
   assertCanonicalBatch(canonical);
+  if (normalizedWorkflowMode(canonical.workflowMode) !== workflowMode) {
+    throw new Error("The batch workflow mode changed before admission.");
+  }
   if (canonical.status !== "ready") {
     throw new Error("The batch execution plan must be prepared while ready.");
   }
@@ -209,9 +246,18 @@ export async function prepareBatchExecution(batch: Batch): Promise<BatchExecutio
     runIds: [...batch.runIds],
     budgetUsd: batch.budgetUsd,
   };
-  const plan = planFirstCutBudget(plannedBatch.runIds, plannedBatch.budgetUsd);
+  const reservation =
+    workflowMode === "lamp" ? lampMaximumMicros() : firstCutMaximumMicros();
+  const plan =
+    workflowMode === "flora"
+      ? planFirstCutBudget(plannedBatch.runIds, plannedBatch.budgetUsd)
+      : planBatchBudget(
+          plannedBatch.runIds,
+          reservation,
+          plannedBatch.budgetUsd
+        );
   const created = await storage.createBatchExecution(
-    buildExecution(plannedBatch, plan, Date.now())
+    buildExecution(plannedBatch, plan, workflowMode, Date.now())
   );
   if (!created.execution) {
     throw new Error("Batch changed before its execution plan was created.");
@@ -221,14 +267,15 @@ export async function prepareBatchExecution(batch: Batch): Promise<BatchExecutio
   // never compare it to or overwrite it with this contender's current prices.
   if (!created.created) {
     if (
-      created.execution.executionId !== firstCutsBatchExecutionId(id) ||
+      created.execution.executionId !== batchExecutionId(id, workflowMode) ||
+      batchExecutionMode(created.execution) !== workflowMode ||
       created.execution.concurrency !== DURABLE_BATCH_CONCURRENCY
     ) {
       throw new Error("A different durable execution already owns this batch.");
     }
     return created.execution;
   }
-  assertExecutionMatchesBatch(created.execution, plannedBatch);
+  assertExecutionMatchesBatch(created.execution, plannedBatch, workflowMode);
   return created.execution;
 }
 
@@ -251,7 +298,9 @@ export async function enqueueBatchExecution(
   }
   if (
     execution.batchId !== id ||
-    execution.executionId !== firstCutsBatchExecutionId(id) ||
+    execution.executionId !==
+      batchExecutionId(id, normalizedWorkflowMode(batch.workflowMode)) ||
+    batchExecutionMode(execution) !== normalizedWorkflowMode(batch.workflowMode) ||
     execution.concurrency !== DURABLE_BATCH_CONCURRENCY
   ) {
     throw new Error("A different durable execution already owns this batch.");
@@ -298,7 +347,7 @@ export async function enqueueBatchExecution(
   const contender = await start(durableRelightBatch, [
     {
       batchId: id,
-      executionId: firstCutsBatchExecutionId(id),
+      executionId: execution.executionId,
     },
   ]);
   return {

@@ -8,8 +8,12 @@ import type {
   BatchExecutionMemberState,
   BatchExecutionStatus,
 } from "@/lib/types";
-import { assertRunId } from "@/lib/server/runstore";
+import { assertRunId } from "../runstore.ts";
 import { createHash } from "node:crypto";
+import {
+  isLampBatchApprovalReplayTransition,
+  LAMP_BATCH_USER_ACTION_REQUIRED_PREFIX,
+} from "../batch-execution-resume.ts";
 
 const EXECUTION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
 const MAX_OPTIONAL_ID_LENGTH = 256;
@@ -22,7 +26,12 @@ const STATUS_TRANSITIONS: Record<
   ReadonlySet<BatchExecutionStatus>
 > = {
   queued: new Set(["queued", "running"]),
-  running: new Set(["running", "done", "failed"]),
+  running: new Set(["running", "user_action_required", "done", "failed"]),
+  user_action_required: new Set([
+    "user_action_required",
+    "queued",
+    "failed",
+  ]),
   done: new Set(["done"]),
   failed: new Set(["failed"]),
 };
@@ -40,6 +49,7 @@ const MEMBER_TRANSITIONS: Record<
   ]),
   running: new Set([
     "running",
+    "user_action_required",
     "awaiting_review",
     "failed",
     "reconcile_required",
@@ -49,6 +59,13 @@ const MEMBER_TRANSITIONS: Record<
     "awaiting_review",
     "failed",
   ]),
+  user_action_required: new Set([
+    "user_action_required",
+    "queued",
+    "awaiting_review",
+    "failed",
+    "reconcile_required",
+  ]),
   awaiting_review: new Set(["awaiting_review"]),
   failed: new Set(["failed"]),
   skipped_budget: new Set(["skipped_budget"]),
@@ -57,6 +74,7 @@ const MEMBER_TRANSITIONS: Record<
 const RESERVED_MEMBER_STATES = new Set<BatchExecutionMemberState>([
   "queued",
   "running",
+  "user_action_required",
   "reconcile_required",
 ]);
 
@@ -108,6 +126,13 @@ export function assertBatchExecution(execution: unknown): BatchExecution {
   const candidate = execution as BatchExecution;
   assertRunId(candidate.batchId);
   if (
+    candidate.workflowMode !== undefined &&
+    candidate.workflowMode !== "flora" &&
+    candidate.workflowMode !== "lamp"
+  ) {
+    throw new Error("Invalid batch execution workflowMode");
+  }
+  if (
     typeof candidate.executionId !== "string" ||
     !EXECUTION_ID_RE.test(candidate.executionId)
   ) {
@@ -147,6 +172,15 @@ export function assertBatchExecution(execution: unknown): BatchExecution {
   assertSafeNonnegativeInteger(candidate.reservedMicros, "reservedMicros");
   assertSafeNonnegativeInteger(candidate.settledMicros, "settledMicros");
   assertSafeNonnegativeInteger(candidate.startedAt, "startedAt");
+  if (candidate.approvalStartedAt !== undefined) {
+    assertSafeNonnegativeInteger(
+      candidate.approvalStartedAt,
+      "approvalStartedAt"
+    );
+    if (candidate.approvalStartedAt < candidate.startedAt) {
+      throw new Error("Batch approvalStartedAt cannot precede startedAt");
+    }
+  }
   assertSafeNonnegativeInteger(candidate.updatedAt, "updatedAt");
   if (candidate.updatedAt < candidate.startedAt) {
     throw new Error("Batch execution updatedAt cannot precede startedAt");
@@ -237,10 +271,31 @@ export function assertBatchExecution(execution: unknown): BatchExecution {
   if (
     candidate.status === "queued" &&
     candidate.members.some(
-      (member) => member.state !== "queued" && member.state !== "skipped_budget"
+      (member) =>
+        member.state === "running" ||
+        member.state === "user_action_required" ||
+        member.state === "reconcile_required"
     )
   ) {
     throw new Error("A queued batch execution cannot contain dispatched members");
+  }
+  if (
+    candidate.status === "user_action_required" &&
+    (candidate.members.some(
+      (member) =>
+        member.state === "queued" ||
+        member.state === "running" ||
+        member.state === "reconcile_required"
+    ) ||
+      !candidate.members.some(
+        (member) => member.state === "user_action_required"
+      ) ||
+      !candidate.workflowRunId ||
+      !candidate.error?.startsWith(LAMP_BATCH_USER_ACTION_REQUIRED_PREFIX))
+  ) {
+    throw new Error(
+      "An approval-paused Lamp batch must retain its owner, paused members, and reason"
+    );
   }
   if (
     candidate.status === "done" &&
@@ -278,9 +333,14 @@ export function assertBatchExecutionTransition(
   if (candidate.revision !== expectedRevision + 1) {
     throw new Error("Batch execution candidate must be the next revision");
   }
+  const approvalReplay = isLampBatchApprovalReplayTransition(
+    current,
+    candidate
+  );
   if (
     candidate.batchId !== current.batchId ||
     candidate.executionId !== current.executionId ||
+    candidate.workflowMode !== current.workflowMode ||
     candidate.renderedPrompt !== current.renderedPrompt ||
     candidate.inputHash !== current.inputHash ||
     candidate.startedAt !== current.startedAt ||
@@ -291,6 +351,13 @@ export function assertBatchExecutionTransition(
     throw new Error("Batch execution identity and dispatch limits are immutable");
   }
   if (
+    !approvalReplay &&
+    candidate.approvalStartedAt !== current.approvalStartedAt
+  ) {
+    throw new Error("Batch approvalStartedAt is immutable outside approval replay");
+  }
+  if (
+    !approvalReplay &&
     current.workflowRunId !== undefined &&
     candidate.workflowRunId !== current.workflowRunId
   ) {
@@ -318,6 +385,15 @@ export function assertBatchExecutionTransition(
     if (!MEMBER_TRANSITIONS[before.state].has(after.state)) {
       throw new Error(
         `Batch member ${before.runId} cannot move from ${before.state} to ${after.state}`
+      );
+    }
+    if (
+      before.state === "user_action_required" &&
+      after.state === "queued" &&
+      !approvalReplay
+    ) {
+      throw new Error(
+        "An approval-paused batch member can requeue only with a fresh grant"
       );
     }
     if (

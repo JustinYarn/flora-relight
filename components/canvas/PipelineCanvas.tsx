@@ -70,7 +70,7 @@ function buildNodes(workflow: WorkflowDefinition): CanvasNode[] {
 }
 
 const EDGE_LABEL_OVERRIDES: Record<string, string> = {
-  "e-gate-compile": "fixes ↺",
+  "e-ledger-compile": "one correction ↺",
 };
 
 function buildEdges(
@@ -92,8 +92,8 @@ function buildEdges(
     };
 
     if (e.isFeedbackLoop) {
-      /* gate → compile animates only while a loop-back is actually happening;
-         gate → fallback lights up only when the loop is exhausted. */
+      /* Lamp's only feedback edge animates between the Initial critique and
+         the one Final generation. There is no conditional fallback route. */
       const isCorrections = e.target === "compile";
       const active = isCorrections ? loopingBack : fallbackActive;
       const color = isCorrections ? "var(--accent)" : "var(--borderline)";

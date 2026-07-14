@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { hasDeletionBlockingBatchWork } from "../lib/server/storage/run-deletion.ts";
+import {
+  hasDeletionBlockingBatchWork,
+  hasDeletionBlockingRunWork,
+} from "../lib/server/storage/run-deletion.ts";
 import type {
   BatchExecution,
   BatchExecutionMemberState,
@@ -84,5 +87,12 @@ test("settled terminal Batch members and unrelated runs are deletable", () => {
       execution("failed", "failed", "run_other"),
     ]),
     false
+  );
+});
+
+test("a Lamp paused for approval remains protected from deletion", () => {
+  assert.equal(
+    hasDeletionBlockingRunWork(null, { status: "user_action_required" }),
+    true
   );
 });

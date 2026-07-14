@@ -15,8 +15,16 @@ import type {
   BatchUploadItem,
   Run,
   VideoAsset,
+  WorkflowMode,
 } from "@/lib/types";
-import { buildQueuedRun } from "@/lib/run-factory";
+import { buildQueuedRun, freshNodeStates } from "@/lib/run-factory";
+import {
+  batchApprovalStartedAt,
+  batchApprovalScope,
+  batchExecutionMode,
+  normalizedWorkflowMode,
+} from "@/lib/server/batch-contract";
+import { requeueLampBatchExecutionAfterApproval } from "@/lib/server/batch-execution-resume";
 import {
   DURABLE_BATCH_CONCURRENCY,
   microsToUsd,
@@ -33,8 +41,10 @@ import {
   BATCH_APPROVAL_LIFETIME_MS,
   createSpendApproval,
   hasReusableFirstCutApproval,
+  hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
 import { getStorage, type StorageDriver } from "@/lib/server/storage";
+import { workflowForMode } from "@/lib/workflow-def";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,6 +54,7 @@ interface StartBody {
   budgetUsd?: unknown;
   approveLiveSpend?: unknown;
   allowIncompleteUploads?: unknown;
+  workflowMode?: unknown;
 }
 
 function readyVideo(
@@ -74,12 +85,20 @@ function validateBody(body: StartBody): string | null {
   ) {
     return "allowIncompleteUploads must be a boolean.";
   }
+  if (
+    body.workflowMode !== undefined &&
+    body.workflowMode !== "flora" &&
+    body.workflowMode !== "lamp"
+  ) {
+    return 'workflowMode must be either "flora" or "lamp".';
+  }
   return null;
 }
 
 async function canonicalizeReadyRuns(
   storage: StorageDriver,
-  batch: Batch
+  batch: Batch,
+  workflowMode: WorkflowMode
 ): Promise<Run[]> {
   const allowedRunIds = new Set(batch.runIds);
   const uploads = (batch.uploads ?? []).filter(
@@ -119,9 +138,17 @@ async function canonicalizeReadyRuns(
       if (!updated) {
         throw new Error(`Run ${upload.runId} changed while the batch was starting.`);
       }
-      runs.push(updated);
+      const workflow = workflowForMode(workflowMode);
+      const canonicalRun: Run = {
+        ...updated,
+        workflowId: workflow.id,
+        workflowMode,
+        nodeStates: freshNodeStates(workflowMode),
+      };
+      await storage.putRun(canonicalRun);
+      runs.push(canonicalRun);
     } else {
-      const run = buildQueuedRun(canonicalVideo);
+      const run = buildQueuedRun(canonicalVideo, Date.now(), workflowMode);
       await storage.putRun(run);
       runs.push(run);
     }
@@ -150,7 +177,7 @@ async function ensureQueuedMemberApprovals(
     throw new Error("The durable batch does not use the server-owned concurrency limit.");
   }
   const approvalExpiresAt =
-    execution.startedAt + BATCH_APPROVAL_LIFETIME_MS;
+    batchApprovalStartedAt(execution) + BATCH_APPROVAL_LIFETIME_MS;
   if (approvalExpiresAt <= Date.now()) {
     throw new Error(
       "The original batch admission window expired before provider dispatch."
@@ -160,9 +187,13 @@ async function ensureQueuedMemberApprovals(
     if (member.state !== "queued") continue;
     const run = await storage.getRun(member.runId);
     if (!run) throw new Error(`Run ${member.runId} was not found.`);
+    const lamp = batchExecutionMode(execution) === "lamp";
+    const reusable = lamp
+      ? hasReusableLampApproval(run, "batch", execution.batchId)
+      : hasReusableFirstCutApproval(run, "batch", execution.batchId);
     if (
-      hasReusableFirstCutApproval(run, "batch", execution.batchId) &&
-      run.spendApproval?.approvedAt === execution.startedAt &&
+      reusable &&
+      run.spendApproval?.approvedAt === batchApprovalStartedAt(execution) &&
       run.spendApproval.expiresAt === approvalExpiresAt
     ) {
       continue;
@@ -174,14 +205,36 @@ async function ensureQueuedMemberApprovals(
         run.originalVideo,
         "batch",
         execution.batchId,
-        execution.startedAt,
-        "first_cut"
+        batchApprovalStartedAt(execution),
+        batchApprovalScope(batchExecutionMode(execution))
       )
     );
     if (!updated) {
       throw new Error(`Run ${run.id} disappeared while spend approval was saved.`);
     }
   }
+}
+
+async function rearmPausedLampBatch(
+  storage: StorageDriver,
+  execution: BatchExecution
+): Promise<BatchExecution> {
+  const candidate = requeueLampBatchExecutionAfterApproval(execution);
+  const advanced = await storage.advanceBatchExecution(
+    candidate,
+    execution.revision
+  );
+  if (advanced.advanced && advanced.execution) return advanced.execution;
+  const current = advanced.execution;
+  if (
+    current?.executionId === execution.executionId &&
+    (current.status === "queued" || current.status === "running")
+  ) {
+    return current;
+  }
+  throw new Error(
+    "The Lamp batch approval changed concurrently; retry the same confirmation."
+  );
 }
 
 async function advanceReadyBatch(
@@ -269,21 +322,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 503 }
     );
   }
-  if (liveConfigured && body.approveLiveSpend !== true) {
-    return NextResponse.json(
-      {
-        error:
-          "This live batch requires the explicit first-cut spend confirmation. Browser fallback is disabled when the provider is configured.",
-      },
-      { status: 403 }
-    );
-  }
-
   const storage = getStorage();
   const batches = await storage.getBatches();
   const existing = batches.find((batch) => batch.id === body.batchId);
   if (!existing) {
     return NextResponse.json({ error: "Batch not found." }, { status: 404 });
+  }
+  const requestedMode = normalizedWorkflowMode(
+    body.workflowMode as WorkflowMode | undefined
+  );
+  const persistedMode = normalizedWorkflowMode(existing.workflowMode);
+  if (requestedMode !== persistedMode) {
+    return NextResponse.json(
+      {
+        error:
+          "The requested workflow mode does not match this durable batch. Reload before starting it.",
+      },
+      { status: 409 }
+    );
   }
   if (existing.status === "failed") {
     return NextResponse.json(
@@ -302,13 +358,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    const existingExecution = await storage.getBatchExecution(existing.id);
+    let existingExecution = await storage.getBatchExecution(existing.id);
+
+    if (liveConfigured && body.approveLiveSpend !== true) {
+      return NextResponse.json(
+        {
+          error:
+            "Starting or recovering this live batch requires explicit confirmation. Browser fallback is disabled when the provider is configured.",
+        },
+        { status: 403 }
+      );
+    }
 
     // Lost-response recovery after the trusted start transition. A queued
     // server execution is repaired and re-enqueued; running/terminal records
     // are simply returned and never restart paid work.
     if (existing.status === "running" || existing.status === "done") {
       if (existingExecution) {
+        if (existingExecution.status === "user_action_required") {
+          existingExecution = await rearmPausedLampBatch(
+            storage,
+            existingExecution
+          );
+        }
         if (existingExecution.status === "queued") {
           await ensureQueuedMemberApprovals(storage, existingExecution);
         }
@@ -346,7 +418,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     let startableBatch = existing;
-    let preparedRuns = await canonicalizeReadyRuns(storage, startableBatch);
+    let preparedRuns = await canonicalizeReadyRuns(
+      storage,
+      startableBatch,
+      persistedMode
+    );
     if (startableBatch.status === "uploading") {
       // An interrupted browser upload may leave a durable mix of ready and
       // unfinished members. The explicit caller flag freezes the ready subset
@@ -371,11 +447,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (!transition.advanced) {
         // A concurrent explicit start may have frozen the same batch first.
         // Rebuild from that winning ordered subset before creating approvals.
-        preparedRuns = await canonicalizeReadyRuns(storage, startableBatch);
+        preparedRuns = await canonicalizeReadyRuns(
+          storage,
+          startableBatch,
+          persistedMode
+        );
       }
     }
     const preparedBatch: Batch = {
       ...startableBatch,
+      workflowMode: persistedMode,
       runIds: preparedRuns.map((run) => run.id),
       concurrency: DURABLE_BATCH_CONCURRENCY,
       budgetUsd:

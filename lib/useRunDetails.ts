@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { useAppStore } from "@/lib/store";
+import { markServerRunObserved } from "@/lib/persist";
 import type { Run } from "@/lib/types";
 
 /**
@@ -65,6 +66,10 @@ export function useRunDetails(runId: string): Run | undefined {
         const payload = (await response.json()) as { run?: Run };
         const fullRun = payload.run;
         if (!fullRun || controller.signal.aborted) return;
+        // This is a server-owned read model, not a local mutation. Mark the
+        // exact object before inserting it so persistence never echoes the
+        // projection back through the browser-writable whole-run endpoint.
+        markServerRunObserved(fullRun);
         useAppStore.setState((state) => {
           const current = state.runs.find((item) => item.id === runId);
           // Only the legacy browser engine owns a running record locally.

@@ -9,6 +9,7 @@ import { useAppStore } from "@/lib/store";
 import { CheckList } from "@/components/library/CheckList";
 import { PairPlayer } from "@/components/library/PairPlayer";
 import { DownloadSideBySide } from "@/components/review/DownloadSideBySide";
+import { isLampBlindGradeLocked } from "@/components/grade/derive";
 import {
   STATUS_META,
   activeFixes,
@@ -81,15 +82,17 @@ function Thumb({
   );
 }
 
-/** Quiet chips a1 a2 a3… with pass/fail dots; switching drives the check rows. */
+/** Initial/Final for Lamp; legacy attempt chips remain readable for older runs. */
 function AttemptChips({
   iterations,
   bestIndex,
+  fixedTwoPass,
   selected,
   onSelect,
 }: {
   iterations: Iteration[];
   bestIndex?: number;
+  fixedTwoPass: boolean;
   selected: number | undefined;
   onSelect: (index: number) => void;
 }) {
@@ -104,13 +107,13 @@ function AttemptChips({
   return (
     <div className="flex flex-wrap items-center gap-1">
       <span className="mr-1 text-2xs uppercase tracking-[0.14em] text-faint">
-        Attempts
+        {fixedTwoPass ? "Videos" : "Attempts"}
       </span>
       {iterations.map((it) => (
         <button
           key={it.index}
           onClick={() => onSelect(it.index)}
-          className={`flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs transition ${
+          className={`flex min-h-10 items-center gap-1.5 rounded-md px-2 text-xs transition-[transform,color,background-color] duration-150 ease-out active:scale-[0.96] ${
             selected === it.index ? "bg-raised text-ink" : "text-muted hover:text-ink"
           }`}
         >
@@ -118,8 +121,14 @@ function AttemptChips({
             className={`h-1.5 w-1.5 rounded-full ${it.status === "running" ? "status-pulse" : ""}`}
             style={{ background: dotColor(it.status) }}
           />
-          a{it.index}
-          {bestIndex === it.index ? (
+          {fixedTwoPass
+            ? it.index === 1
+              ? "Initial"
+              : it.index === 2
+                ? "Final"
+                : `v${it.index}`
+            : `a${it.index}`}
+          {!fixedTwoPass && bestIndex === it.index ? (
             <span className="text-2xs text-accent" title="shipped attempt">
               ★
             </span>
@@ -142,6 +151,8 @@ function RowBody({ run }: { run: Run }) {
     ordered.find((it) => it.index === selectedIndex) ?? shipped;
   const fixes = activeFixes(run);
   const relit = shippedVideo(run);
+  const fixedTwoPass = run.workflowId === "lamp-v1";
+  const blindGradeLocked = isLampBlindGradeLocked(run);
 
   return (
     <div className="space-y-5 pb-6 pl-1 pr-1">
@@ -149,15 +160,30 @@ function RowBody({ run }: { run: Run }) {
         original={run.originalVideo}
         relit={relit}
         relitLabel={
-          run.finalVideo ? "RELIT · FINAL" : shipped ? `RELIT v${shipped.index}` : "RELIT"
+          run.workflowId === "lamp-v1" && shipped?.index === 2
+            ? "RELIT · FINAL"
+            : run.finalVideo
+              ? "RELIT · FINAL"
+              : shipped
+                ? `RELIT v${shipped.index}`
+                : "RELIT"
         }
       />
 
-      {ordered.length > 0 ? (
+      {blindGradeLocked ? (
+        <div className="rounded-xl bg-raised px-4 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+          <p className="text-sm font-medium text-ink">Final AI evaluation is sealed</p>
+          <p className="mt-1 text-pretty text-2xs leading-relaxed text-muted">
+            Grade Final first. Initial findings, Final scores, and correction details
+            unlock together after your human grade is saved.
+          </p>
+        </div>
+      ) : ordered.length > 0 ? (
         <div className="space-y-2">
           <AttemptChips
             iterations={ordered}
             bestIndex={run.bestIterationIndex}
+            fixedTwoPass={fixedTwoPass}
             selected={selected?.index}
             onSelect={setSelectedIndex}
           />
@@ -167,10 +193,10 @@ function RowBody({ run }: { run: Run }) {
         <CheckList iteration={undefined} runActive={run.status === "running"} />
       )}
 
-      {fixes.length > 0 ? (
+      {!blindGradeLocked && fixes.length > 0 ? (
         <div>
           <p className="mb-1.5 text-2xs uppercase tracking-[0.14em] text-faint">
-            Fixes that drove the final attempt
+            {fixedTwoPass ? "Corrections applied to Final" : "Fixes that drove the final attempt"}
           </p>
           <ul className="space-y-1.5">
             {fixes.map((f) => (
@@ -190,14 +216,23 @@ function RowBody({ run }: { run: Run }) {
         >
           Open review →
         </Link>
-        <Link
-          href={`/runs/${run.id}/journey`}
-          className="text-sm text-muted transition hover:text-ink"
-        >
-          Open journey →
-        </Link>
+        {!blindGradeLocked ? (
+          <Link
+            href={`/runs/${run.id}/journey`}
+            className="text-sm text-muted transition hover:text-ink"
+          >
+            Open journey →
+          </Link>
+        ) : null}
         <span className="ml-auto flex items-center gap-2">
-          {run.status === "awaiting-review" ? (
+          {blindGradeLocked ? (
+            <Link
+              href="/grade"
+              className="inline-flex min-h-10 items-center rounded-lg bg-pass px-3.5 py-1.5 text-sm font-medium text-canvas transition-transform active:scale-[0.96]"
+            >
+              Grade Final
+            </Link>
+          ) : run.status === "awaiting-review" ? (
             <>
               <Button
                 variant="success"
@@ -244,6 +279,7 @@ export function LibraryRow({
   const verdict = composite ? compositeVerdict(composite, passThreshold) : undefined;
   const relit = shippedVideo(run);
   const attempts = run.iterations.length;
+  const fixedTwoPass = run.workflowId === "lamp-v1";
   const actualUsd = run.cost?.actualUsd ?? 0;
 
   // Delete flow: ✕ → inline confirm → removeRun (optimistic; store restores
@@ -268,6 +304,7 @@ export function LibraryRow({
     protectedByBatch ||
     run.serverExecution?.status === "queued" ||
     run.serverExecution?.status === "running" ||
+    run.serverExecution?.status === "user_action_required" ||
     run.serverExecution?.status === "reconcile_required";
 
   const confirmDelete = async () => {
@@ -329,7 +366,10 @@ export function LibraryRow({
           <Badge color={status.color}>{status.label}</Badge>
         </span>
 
-        <span className="w-20 shrink-0" title="Overall score of the shipped cut">
+        <span
+          className="w-20 shrink-0"
+          title={fixedTwoPass ? "Overall score of Final" : "Overall score of the shipped cut"}
+        >
           {composite && verdict ? (
             <>
               <span
@@ -354,7 +394,7 @@ export function LibraryRow({
         </span>
 
         <span className="w-16 shrink-0 text-sm tabular-nums text-muted">
-          {attempts} att.
+          {fixedTwoPass ? `${attempts}/2 vids` : `${attempts} att.`}
         </span>
 
         <span

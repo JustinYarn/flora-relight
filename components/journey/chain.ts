@@ -155,6 +155,9 @@ export function buildJourneySteps(run: Run): JourneyStep[] {
 
   const ordered = [...run.iterations].sort((a, b) => a.index - b.index);
   for (const it of ordered) {
+    const lampAudioVerified = it.evalResults.some(
+      (result) => result.evalId === "audio-integrity" && result.verdict === "pass"
+    );
     const prev = ordered.find((p) => p.index === it.index - 1);
     if (prev) {
       const { added, resolved } = correctionsDiff(prev, it);
@@ -179,13 +182,26 @@ export function buildJourneySteps(run: Run): JourneyStep[] {
     steps.push({
       kind: "attempt",
       id: `attempt-${it.index}`,
-      label: `Attempt v${it.index}`,
+      label:
+        run.workflowId === "lamp-v1"
+          ? it.index === 1
+            ? "Initial"
+            : it.index === 2
+              ? "Final"
+              : `Video v${it.index}`
+          : `Attempt v${it.index}`,
       sub:
-        it.composite
-          ? `score ${it.composite.score}`
-          : it.status === "ungraded"
-            ? "awaiting your grade"
-            : "generating…",
+        run.workflowId === "lamp-v1"
+          ? it.composite
+            ? `${lampAudioVerified ? "audio verified · " : ""}${it.index === 1 ? "critique" : "final AI"} ${it.composite.score}`
+            : it.generatedVideo
+              ? "waiting for whole-video evaluation"
+              : "generating…"
+          : it.composite
+            ? `score ${it.composite.score}`
+            : it.status === "ungraded"
+              ? "awaiting your grade"
+              : "generating…",
       tone:
         it.status === "running"
           ? "running"
@@ -211,12 +227,18 @@ export function buildJourneySteps(run: Run): JourneyStep[] {
     });
   }
 
-  if (started("remux")) {
+  // Each Lamp Initial/Final tile represents its complete fixed pass:
+  // generation -> source-audio finalization -> holistic evaluation. A single
+  // trailing remux tile would falsely imply audio happens only after Final.
+  if (started("remux") && run.workflowId !== "lamp-v1") {
     steps.push({
       kind: "remux",
       id: "remux",
       label: "Audio restored",
-      sub: "original track verified",
+      sub:
+        run.workflowId === "lamp-v1"
+          ? "verified before each evaluation"
+          : "original track verified",
       tone: nodeTone(status("remux")),
       glyph: "∿",
     });

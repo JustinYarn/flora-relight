@@ -3,16 +3,14 @@
 /**
  * GenerationTheater — the relit slot of the hero while a run is mid-flight.
  * Instead of a flat "generating…" placeholder it narrates the machine: one
- * big plain-English stage line derived from nodeStates, the Look Anchor as a
- * backdrop the moment it exists, live check-chips as eval results land, an
- * elapsed clock during video generation, and a quiet monospace ticker of the
- * last few engine notes. Mission control, not a loading gif.
+ * big plain-English stage line derived from nodeStates, live whole-video check
+ * chips as results land, an elapsed clock during generation, and a quiet
+ * monospace ticker of the latest engine notes.
  */
 
 import { useEffect, useMemo, useState } from "react";
 import type { EvalResult, Run } from "@/lib/types";
-import { useAppStore } from "@/lib/store";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import { LAMP_VISUAL_EVAL_DEFS } from "@/lib/lamp-evaluation";
 import { verdictColor } from "@/components/ui";
 import { formatUsd } from "@/lib/cost";
 
@@ -22,38 +20,27 @@ import { formatUsd } from "@/lib/cost";
 
 type StageId =
   | "reading"
-  | "anchor"
   | "brief"
   | "videogen"
   | "checks"
   | "decide"
-  | "fallback"
   | "remux";
 
 /** Pipeline nodes in execution order, mapped to plain-English phases. */
 const NODE_STAGES: Array<{ id: string; stage: StageId }> = [
   { id: "src", stage: "reading" },
   { id: "ingest", stage: "reading" },
-  { id: "manifest", stage: "reading" },
-  { id: "anchor", stage: "anchor" },
-  { id: "anchor-gate", stage: "anchor" },
   { id: "compile", stage: "brief" },
   { id: "videogen", stage: "videogen" },
-  { id: "conform", stage: "checks" },
-  { id: "eval-align", stage: "checks" },
-  { id: "sample", stage: "checks" },
   { id: "eval-identity", stage: "checks" },
   { id: "eval-skin", stage: "checks" },
   { id: "eval-appearance", stage: "checks" },
   { id: "eval-background", stage: "checks" },
   { id: "eval-lighting-delta", stage: "checks" },
-  { id: "eval-lighting-anchor", stage: "checks" },
   { id: "eval-motion", stage: "checks" },
   { id: "eval-temporal", stage: "checks" },
   { id: "eval-halluc", stage: "checks" },
   { id: "ledger", stage: "decide" },
-  { id: "gate", stage: "decide" },
-  { id: "fallback", stage: "fallback" },
   { id: "remux", stage: "remux" },
   { id: "eval-audio", stage: "remux" },
 ];
@@ -80,7 +67,7 @@ export function currentStage(run: Run): StageId {
 export function evalPhaseReached(run: Run): boolean {
   const stage = currentStage(run);
   return (
-    stage === "checks" || stage === "decide" || stage === "fallback" || stage === "remux"
+    stage === "checks" || stage === "decide" || stage === "remux"
   );
 }
 
@@ -96,15 +83,20 @@ function fmtElapsed(ms: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-/** Checks judged at gate time: everything except the post-remux audio check. */
-const GATE_CHECK_DEFS = EVAL_DEFS.filter((d) => d.id !== "audio-integrity");
+/** The eight visual checks Lamp can truthfully return from one holistic call. */
+const WHOLE_VIDEO_CHECK_DEFS = LAMP_VISUAL_EVAL_DEFS;
 
 function CheckChips({ results }: { results: EvalResult[] }) {
-  const landed = GATE_CHECK_DEFS.map((def) => ({
+  const landed = WHOLE_VIDEO_CHECK_DEFS.map((def) => ({
     def,
     result: results.find((r) => r.evalId === def.id),
-  })).filter((x): x is { def: (typeof GATE_CHECK_DEFS)[number]; result: EvalResult } =>
-    Boolean(x.result)
+  })).filter(
+    (
+      x
+    ): x is {
+      def: (typeof WHOLE_VIDEO_CHECK_DEFS)[number];
+      result: EvalResult;
+    } => Boolean(x.result)
   );
   if (landed.length === 0) return null;
   return (
@@ -137,12 +129,11 @@ function CheckChips({ results }: { results: EvalResult[] }) {
 // ---------------------------------------------------------------------------
 
 export function GenerationTheater({ run }: { run: Run }) {
-  const maxIterations = useAppStore((s) => s.workflow.config.maxIterations);
-
   const stage = currentStage(run);
+  const pausedForApproval =
+    run.serverExecution?.status === "user_action_required";
   const latest = run.iterations[run.iterations.length - 1];
   const attempt = latest?.index ?? 1;
-  const anchorUrl = latest?.relitKeyframeDataUrl;
 
   // Videogen elapsed clock, ticking from the stage's own log entry.
   const videogenStartAt = useMemo(() => {
@@ -163,10 +154,10 @@ export function GenerationTheater({ run }: { run: Run }) {
     stage === "brief" && attempt >= 2
       ? run.iterations.find((it) => it.index === attempt - 1)
       : undefined;
-  const prevFailedChecks = previous?.composite?.passed === false
+  const prevFailedChecks = previous
     ? Math.max(
         previous.evalResults.filter((r) => r.verdict === "fail").length,
-        previous.composite.hardGateFailures.length
+        previous.composite?.hardGateFailures.length ?? 0
       )
     : 0;
 
@@ -174,49 +165,53 @@ export function GenerationTheater({ run }: { run: Run }) {
   let subline: string | null = null;
   switch (stage) {
     case "reading":
-      headline = "Reading the scene…";
-      subline = "taking the inventory every check will judge against";
-      break;
-    case "anchor":
-      headline = "Designing the light on one photo…";
-      subline = anchorUrl
-        ? "this still is the look the whole video must match"
-        : "one cheap still before any video spend";
+      headline = "Preparing the source video…";
+      subline = "the original remains the reference for both generations";
       break;
     case "brief":
-      if (previous && previous.composite && !previous.composite.passed) {
-        headline = `Attempt ${previous.index} failed ${prevFailedChecks} check${
+      if (previous) {
+        headline = `The initial critique found ${prevFailedChecks} failed check${
           prevFailedChecks === 1 ? "" : "s"
-        } — compiling fixes into brief v${attempt}…`;
-        subline = "what went wrong becomes explicit instructions, nothing else changes";
+        } — compiling the final prompt…`;
+        subline = "the whole-video feedback gets one correction pass";
       } else {
-        headline = "Compiling the generation brief…";
-        subline = "what must change, what must not — one exact set of instructions";
+        headline = "Compiling the mega prompt…";
+        subline = "what may change and what must remain source-faithful";
       }
       break;
     case "videogen":
-      headline = "Omni Flash is repainting every frame under the approved light…";
+      headline =
+        attempt >= 2
+          ? "Regenerating the final video from the original…"
+          : "Generating the initial video from the mega prompt…";
       subline = null; // rendered below with the elapsed clock
       break;
     case "checks":
-      headline = "The 10 checks are watching both videos…";
+      headline =
+        attempt >= 2
+          ? "Evaluating the final video as one complete result…"
+          : "Critiquing the initial video as one complete result…";
       subline = null; // rendered below with the live count
       break;
     case "decide":
-      headline = "Deciding: ship it or fix and retry…";
-      subline = "every must-pass check has to be green";
-      break;
-    case "fallback":
-      headline = "Applying the safe fallback — your original pixels, new lighting…";
-      subline = "generation couldn't pass every check, so nothing is regenerated";
+      headline =
+        attempt >= 2
+          ? "Saving the final AI evaluation…"
+          : "Turning the critique into one final revision…";
+      subline = "Lamp stops after the fixed second generation";
       break;
     case "remux":
-      headline = "Restoring your original audio…";
-      subline = "stream-copied back and verified bit-for-bit";
+      headline = "Restoring and verifying the original audio…";
+      subline = "provider sound is discarded; the canonical source track is verified";
       break;
   }
+  if (pausedForApproval) {
+    headline = "Lamp is safely paused for approval";
+    subline =
+      "return to Create to renew the exact plan; completed provider work will be reused";
+  }
 
-  const landedCount = GATE_CHECK_DEFS.filter((def) =>
+  const landedCount = WHOLE_VIDEO_CHECK_DEFS.filter((def) =>
     latest?.evalResults.some((r) => r.evalId === def.id)
   ).length;
 
@@ -224,30 +219,9 @@ export function GenerationTheater({ run }: { run: Run }) {
 
   return (
     <div className="relative flex h-full w-full flex-col overflow-hidden bg-surface">
-      {/* Look Anchor teaser — the backdrop the moment it exists. */}
-      {anchorUrl ? (
-        <>
-          {/* eslint-disable-next-line @next/next/no-img-element -- pipeline artifact, not an optimizable asset */}
-          <img
-            src={anchorUrl}
-            alt="approved look anchor"
-            className={`absolute inset-0 h-full w-full object-cover ${
-              stage === "anchor" ? "opacity-60" : "opacity-30"
-            }`}
-          />
-          <div
-            className="absolute inset-0"
-            style={{
-              background:
-                "linear-gradient(to top, var(--canvas) 8%, color-mix(in srgb, var(--canvas) 55%, transparent) 55%, color-mix(in srgb, var(--canvas) 35%, transparent))",
-            }}
-          />
-        </>
-      ) : null}
-
-      {/* Attempt + live spend, top-right (the RELIT tag owns top-left). */}
+      {/* Lamp pass + live spend, top-right. */}
       <div className="absolute right-2 top-2 z-10 text-right text-2xs tabular-nums text-faint">
-        attempt {attempt} of {maxIterations}
+        {attempt >= 2 ? "final" : "initial"} video · v{attempt}
         {run.cost ? (
           <span>
             {" · "}
@@ -264,7 +238,7 @@ export function GenerationTheater({ run }: { run: Run }) {
           {headline}
         </p>
 
-        {stage === "videogen" ? (
+        {stage === "videogen" && !pausedForApproval ? (
           <>
             <p className="text-2xs tabular-nums text-muted">
               typically 1–7 minutes
@@ -284,10 +258,11 @@ export function GenerationTheater({ run }: { run: Run }) {
           </>
         ) : null}
 
-        {stage === "checks" ? (
+        {stage === "checks" && !pausedForApproval ? (
           <>
             <p className="text-2xs tabular-nums text-muted">
-              {landedCount} of {GATE_CHECK_DEFS.length} verdicts in
+              {landedCount} of {WHOLE_VIDEO_CHECK_DEFS.length} applicable visual
+              results returned
             </p>
             {latest ? <CheckChips results={latest.evalResults} /> : null}
           </>

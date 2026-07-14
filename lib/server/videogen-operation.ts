@@ -12,7 +12,12 @@ import {
   demuxAudio,
   probe,
   remuxAudio,
+  stripAudio,
 } from "@/lib/server/ffmpeg";
+import {
+  audioIntegrityDurationsAgree,
+  audioPresenceMatchesSource,
+} from "@/lib/server/audio-integrity";
 import { getStorage, scratchMediaPath, type StorageDriver } from "@/lib/server/storage";
 import { PRICE_TABLE } from "@/lib/cost";
 import {
@@ -52,6 +57,7 @@ function authorizedRawOutputCostUsd(rawDurationSec: number): number {
 interface PreparedSource {
   storage: StorageDriver;
   src: string;
+  sourceDurationSec: number;
   hasAudio: boolean;
   audioPath: string | null;
 }
@@ -165,14 +171,19 @@ async function prepareSource(runId: string, sourceUrl: string): Promise<Prepared
       await storage.putMediaFromFile(runId, "source-audio.m4a", audioPath);
     }
   }
-  return { storage, src, hasAudio, audioPath };
+  return {
+    storage,
+    src,
+    sourceDurationSec: srcProbe.durationSec,
+    hasAudio,
+    audioPath,
+  };
 }
 
 export interface StartVideoGenerationInput {
   runId: string;
   iteration: number;
   prompt: string;
-  previousInteractionId?: string;
   /** Prepared before the billed operation claim, so media failures are retryable. */
   preparedUploadUri?: string;
 }
@@ -227,15 +238,15 @@ export async function startVideoGeneration(
   }
   assertVideoGenerationAuthorized(run, input.iteration);
 
-  const previousInteractionId =
-    input.previousInteractionId ??
-    run.iterations.find((item) => item.index === input.iteration - 1)?.interactionId ??
-    run.providerOperations?.find(
-      (item) =>
-        item.kind === "video_generation" &&
-        item.iteration === input.iteration - 1 &&
-        item.status === "completed"
-    )?.providerInteractionId;
+  // Iteration presentation state is browser-writable. Chaining may use only
+  // the canonical completed provider journal for the preceding generation.
+  const previousInteractionId = run.providerOperations?.find(
+    (item) =>
+      item.kind === "video_generation" &&
+      item.iteration === input.iteration - 1 &&
+      item.status === "completed" &&
+      item.result
+  )?.providerInteractionId;
   const uploadUri =
     input.preparedUploadUri ?? (await prepareVideoGenerationStart(input.runId));
   const startedAt = existing?.startedAt ?? Date.now();
@@ -444,24 +455,53 @@ export async function pollVideoGeneration(
       if (prepared.hasAudio && prepared.audioPath) {
         await remuxAudio(genPath, prepared.audioPath, relitPath);
       } else {
-        await fsp.copyFile(genPath, relitPath);
+        // A silent source must stay silent even if the provider invents an
+        // audio stream. Finalization strips it deterministically, then the
+        // probe below verifies that no soundtrack survived.
+        await stripAudio(genPath, relitPath);
       }
       await prepared.storage.putMediaFromFile(input.runId, relitName, relitPath);
     }
 
     const finalProbe = await probe(relitPath);
-    let audioVerified = !prepared.hasAudio;
-    if (prepared.hasAudio && prepared.audioPath) {
+    const baseDurations = {
+      sourceVideoDurationSec: prepared.sourceDurationSec,
+      rawVideoDurationSec: rawProbe.durationSec,
+      finalVideoDurationSec: finalProbe.durationSec,
+    };
+    let audioVerified =
+      !prepared.hasAudio &&
+      audioPresenceMatchesSource(prepared.hasAudio, finalProbe.hasAudio) &&
+      audioIntegrityDurationsAgree(baseDurations);
+    if (
+      prepared.hasAudio &&
+      prepared.audioPath &&
+      audioPresenceMatchesSource(prepared.hasAudio, finalProbe.hasAudio)
+    ) {
       const audioProbe = await probe(prepared.audioPath);
-      const minDuration = Math.min(finalProbe.durationSec, audioProbe.durationSec);
-      try {
-        const [sourceHash, relitHash] = await Promise.all([
-          audioStreamMd5(prepared.audioPath, minDuration),
-          audioStreamMd5(relitPath, minDuration),
-        ]);
-        audioVerified = sourceHash.length > 0 && sourceHash === relitHash;
-      } catch {
-        audioVerified = false;
+      const durationsAgree = audioIntegrityDurationsAgree({
+        ...baseDurations,
+        sourceAudioDurationSec: audioProbe.durationSec,
+      });
+      if (durationsAgree) {
+        // Compare the shared packet range only after proving all three complete
+        // timelines agree within the mux/probe tolerance. This keeps harmless
+        // container rounding from changing the digest without letting a hash
+        // of a shorter prefix conceal timeline loss or extension.
+        const sharedDuration = Math.min(
+          rawProbe.durationSec,
+          finalProbe.durationSec,
+          audioProbe.durationSec
+        );
+        try {
+          const [sourceHash, relitHash] = await Promise.all([
+            audioStreamMd5(prepared.audioPath, sharedDuration),
+            audioStreamMd5(relitPath, sharedDuration),
+          ]);
+          audioVerified = sourceHash.length > 0 && sourceHash === relitHash;
+        } catch {
+          audioVerified = false;
+        }
       }
     }
 

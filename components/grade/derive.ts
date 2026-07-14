@@ -4,23 +4,23 @@
  * here is a plain function over persisted Runs so both modes of the Grade
  * page (and any future export) compute identical numbers.
  *
- * The AI side of every comparison is the SHIPPED attempt's evalResults —
- * resolved with the same shippedIteration() helper the grading queue uses to
- * pick the video, so a human always grades exactly the cut the AI scored.
+ * The AI side of every Lamp comparison is v2's evalResults. The blind grader
+ * shows the delivered final video, so the human and AI compare the same cut.
  */
 
 import type {
   EvalResult,
   HumanCheckGrade,
+  Iteration,
   Run,
   Verdict,
+  VideoAsset,
 } from "@/lib/types";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import { EVAL_DEFS } from "../../lib/prompts/eval-defs.ts";
 import {
-  shippedComposite,
-  shippedIteration,
-  shippedVideo,
-} from "@/components/library/derive";
+  lampCompositeForResults,
+  LAMP_UNAVAILABLE_EVAL_IDS,
+} from "../../lib/lamp-evaluation.ts";
 
 // ---------------------------------------------------------------------------
 // The 5-point scale
@@ -63,14 +63,36 @@ export function humanVerdictWord(points: HumanCheckGrade["points"]): string {
  * shipped video that exists and is not a mock/simulated CSS-filter stand-in.
  */
 export function isGradeable(run: Run): boolean {
-  const v = shippedVideo(run);
+  const v = finalLampVideo(run);
   const serverVerifiedArtifact =
-    shippedIteration(run)?.recoveredFromProviderOperation === true;
+    finalLampIteration(run)?.recoveredFromProviderOperation === true;
   return (
     (!run.serverExecution || run.serverExecution.status === "awaiting_review") &&
     serverVerifiedArtifact &&
     v !== undefined &&
     !v.simulatedFilter
+  );
+}
+
+/** Lamp's human grade and comparison target is always v2 when it exists. */
+export function finalLampIteration(run: Run): Iteration | undefined {
+  return (
+    run.iterations.find((iteration) => iteration.index === 2) ??
+    run.iterations.at(-1)
+  );
+}
+
+/** The delivered remux when present, otherwise Lamp's generated v2 artifact. */
+export function finalLampVideo(run: Run): VideoAsset | undefined {
+  return run.finalVideo ?? finalLampIteration(run)?.generatedVideo;
+}
+
+/** Canonical blind lock: presentation status is browser-writable; execution is not. */
+export function isLampBlindGradeLocked(run: Run): boolean {
+  return (
+    run.serverExecution?.executionId.startsWith("lamp:") === true &&
+    run.serverExecution.status === "awaiting_review" &&
+    run.humanGrade === undefined
   );
 }
 
@@ -88,14 +110,21 @@ export interface CheckComparison {
 
 /**
  * Every check of every graded run where BOTH sides exist: the human graded it
- * and the shipped attempt carries an AI result for it. Runs that crashed
+ * and the final v2 carries an AI result for it. Runs that crashed
  * mid-judging simply contribute fewer pairs.
  */
 export function collectComparisons(gradedRuns: Run[]): CheckComparison[] {
   const out: CheckComparison[] = [];
   for (const run of gradedRuns) {
-    const aiResults = shippedIteration(run)?.evalResults ?? [];
+    const aiResults = finalLampIteration(run)?.evalResults ?? [];
     for (const def of EVAL_DEFS) {
+      if (
+        LAMP_UNAVAILABLE_EVAL_IDS.includes(
+          def.id as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
+        )
+      ) {
+        continue;
+      }
       const human = run.humanGrade?.scores[def.id];
       const ai = aiResults.find((r) => r.evalId === def.id);
       if (human && ai) out.push({ run, evalId: def.id, human, ai });
@@ -237,13 +266,14 @@ export function shipRatePct(gradedRuns: Run[]): number | undefined {
   return (yes / gradedRuns.length) * 100;
 }
 
-/** % of graded runs whose shipped attempt passed the AI gates (composite). */
+/** % of graded runs whose complete final v2 evaluation passed every applicable gate. */
 export function aiPassRatePct(gradedRuns: Run[]): number | undefined {
   const scored = gradedRuns
-    .map((run) => shippedComposite(run))
-    .filter((composite): composite is { score: number; passed: boolean } =>
-      composite !== undefined
-    );
+    .map((run) => {
+      const final = finalLampIteration(run);
+      return lampCompositeForResults(final?.evalResults ?? []);
+    })
+    .filter((composite) => composite !== undefined);
   if (scored.length === 0) return undefined;
   const passed = scored.filter((composite) => composite.passed).length;
   return (passed / scored.length) * 100;

@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { LibraryView } from "@/components/library/LibraryView";
 
 export const metadata: Metadata = {
-  title: "Library — Flora Relight",
-  description: "Browse every past generation with progressive disclosure",
+  title: "Runs — Lamp",
+  description: "Browse saved Lamp generations and their review records",
 };
 
 /**

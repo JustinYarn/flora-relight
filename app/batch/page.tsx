@@ -16,6 +16,7 @@ import { formatClock } from "@/lib/util";
 import { BatchRunCard } from "@/components/batch/BatchRunCard";
 import { BatchSummary } from "@/components/batch/BatchSummary";
 import {
+  Badge,
   Button,
   Card,
   EmptyState,
@@ -23,6 +24,7 @@ import {
   StatusDot,
 } from "@/components/ui";
 import type { Run } from "@/lib/types";
+import { workflowModeLabel } from "@/lib/workflow-mode";
 
 export default function BatchPage() {
   const batches = useAppStore((s) => s.batches);
@@ -70,9 +72,9 @@ export default function BatchPage() {
         <div>
           <h1 className="text-lg font-semibold text-ink">Batch runs</h1>
           <p className="mt-1 max-w-xl text-2xs leading-relaxed text-faint">
-            Send many clips through a bounded queue. Live first cuts continue
-            on the server, keep their progress across refreshes, and land here
-            for your grading.
+            Send many clips through a bounded server queue. Flora delivers one
+            review-ready cut per source; Lamp completes its exact two-pass method
+            before each Final enters blind grading.
           </p>
         </div>
       </header>
@@ -80,10 +82,10 @@ export default function BatchPage() {
       {!batch ? (
         <EmptyState
           title="No batches yet"
-          hint="Upload clips in Studio — drop several at once to launch a batch. Runs drain through the worker queue two at a time, then park here for you to review."
+          hint="Choose multiple videos on Create, select Flora or Lamp, then review the batch cost before launch."
           action={
             <Link href="/">
-              <Button>Go to Studio</Button>
+              <Button>Go to Create</Button>
             </Link>
           }
         />
@@ -98,7 +100,7 @@ export default function BatchPage() {
                   <button
                     key={b.id}
                     onClick={() => setSelectedId(b.id)}
-                    className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs transition ${
+                    className={`flex min-h-10 items-center gap-2 rounded-lg border px-3 py-1.5 text-xs transition-[transform,color,background-color,border-color] duration-150 ease-out active:scale-[0.96] ${
                       active
                         ? "border-accent bg-accent-soft text-ink"
                         : "border-edge bg-surface text-muted hover:border-faint hover:text-ink"
@@ -117,6 +119,9 @@ export default function BatchPage() {
                       }
                     />
                     <span>{b.name}</span>
+                    <Badge color={b.workflowMode === "lamp" ? "var(--accent)" : "var(--muted)"}>
+                      {workflowModeLabel(b.workflowMode ?? "flora")}
+                    </Badge>
                     <span className="tabular-nums text-faint">
                       {formatClock(b.createdAt)}
                     </span>
@@ -133,7 +138,9 @@ export default function BatchPage() {
             <Card className="flex flex-wrap items-center justify-between gap-4 p-4">
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-medium text-ink">
-                  {serverOwned && recovery.queued > 0
+                  {execution?.status === "user_action_required"
+                    ? "Lamp batch paused for renewed approval"
+                    : serverOwned && recovery.queued > 0
                     ? execution?.status === "failed"
                       ? "Batch stopped with an item needing attention"
                       : execution?.status === "queued"
@@ -144,7 +151,9 @@ export default function BatchPage() {
                     : "Already-started clips are protected"}
                 </p>
                 <p className="mt-1 max-w-3xl text-2xs leading-relaxed text-faint">
-                  {recovery.queued > 0
+                  {execution?.status === "user_action_required"
+                    ? "The original approval window expired before every Final was complete. Confirm again to continue only the paused clips from their existing provider journals; completed work will not be billed twice."
+                    : recovery.queued > 0
                     ? serverOwned
                       ? `${recovery.queued} ${recovery.queued === 1 ? "clip is" : "clips are"} saved in the durable queue. The server dispatches at most ${batch.concurrency} at a time, and this tab can close without pausing or replaying paid work.`
                       : `${recovery.queued} untouched ${recovery.queued === 1 ? "clip is" : "clips are"} still saved and waiting. Resume starts only those mock queue entries.`
@@ -156,7 +165,7 @@ export default function BatchPage() {
                     ? ` ${recovery.missing} referenced ${recovery.missing === 1 ? "run is" : "runs are"} missing and cannot be resumed.`
                     : ""}
                   {serverOwned && execution?.status === "queued"
-                    ? " Retrying uses the same confirmed one-attempt plan; it does not authorize an extra generation attempt."
+                    ? " Retrying uses the same confirmed immutable plan; it does not widen the approved Lamp or Flora method."
                     : ""}
                 </p>
                 {resumeNotice?.batchId === batch.id ? (
@@ -167,7 +176,43 @@ export default function BatchPage() {
                   </p>
                 ) : null}
               </div>
-              {serverOwned && execution?.status === "queued" ? (
+              {serverOwned && execution?.status === "user_action_required" ? (
+                <Button
+                  disabled={resumingId === batch.id}
+                  onClick={() => {
+                    setResumingId(batch.id);
+                    setResumeNotice(null);
+                    void startBatchFromDraft(batch.id, {
+                      // A fresh, explicit approval epoch is required before a
+                      // paused Lamp child may start its remaining paid step.
+                      approveLiveSpend: true,
+                    })
+                      .then(() => {
+                        setResumeNotice({
+                          batchId: batch.id,
+                          error: false,
+                          message:
+                            "Lamp was re-approved. Paused clips will continue from their existing durable journals without replaying completed paid work.",
+                        });
+                      })
+                      .catch((error: unknown) => {
+                        setResumeNotice({
+                          batchId: batch.id,
+                          error: true,
+                          message:
+                            error instanceof Error
+                              ? error.message
+                              : "The Lamp batch approval could not be renewed.",
+                        });
+                      })
+                      .finally(() => setResumingId(null));
+                  }}
+                >
+                  {resumingId === batch.id
+                    ? "Renewing approval…"
+                    : "Renew Lamp approval"}
+                </Button>
+              ) : serverOwned && execution?.status === "queued" ? (
                 <Button
                   disabled={resumingId === batch.id}
                   onClick={() => {
@@ -270,15 +315,15 @@ export default function BatchPage() {
                 }
                 hint={
                   batch.status === "ready"
-                    ? "Return to Studio to review the spend estimate and start this prepared batch without uploading again."
+                    ? "Return to Create to review this prepared mock batch without uploading again."
                     : batch.status === "uploading"
-                      ? "If the upload tab was interrupted, return to Studio to inspect or restart the unfinished selection."
-                      : "Its runs may have been deleted. Upload clips in Studio — drop several at once — to launch a fresh batch."
+                      ? "If the upload tab was interrupted, return to Create to inspect or restart the unfinished selection."
+                      : "Its runs may have been deleted. Return to Create to prepare another mock batch."
                 }
                 action={
                   batch.status === "ready" || batch.status === "uploading" ? (
                     <Link href="/">
-                      <Button>Return to Studio</Button>
+                      <Button>Return to Create</Button>
                     </Link>
                   ) : undefined
                 }

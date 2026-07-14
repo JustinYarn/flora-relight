@@ -101,7 +101,7 @@ function SourceDetail({ run }: { run: Run }) {
   return (
     <DetailShell
       title={v.label}
-      hint="the untouched source — every attempt starts again from these pixels"
+      hint="the untouched source — Initial and Final both start again from these pixels"
     >
       <div className="flex flex-wrap items-center gap-3 text-sm text-muted">
         <span className="tabular-nums">{v.durationSec.toFixed(1)}s</span>
@@ -192,9 +192,11 @@ function AnchorDetail({ run }: { run: Run }) {
 function AttemptDetail({
   iteration,
   threshold,
+  lamp,
 }: {
   iteration: Iteration;
   threshold: number;
+  lamp: boolean;
 }) {
   const mp = iteration.megaPrompt;
   const active = mp.corrections.filter((c) => !c.resolved);
@@ -206,8 +208,15 @@ function AttemptDetail({
   const after = iteration.afterFrames.find((f) => f.dataUrl);
   const failures = composite?.hardGateFailures ?? [];
 
-  const hint =
-    iteration.status === "passed"
+  const hint = lamp
+    ? results.length > 0
+      ? iteration.index === 1
+        ? "whole-video critique complete — every actionable finding feeds Final"
+        : "final AI evaluation saved — ready for your blind human grade"
+      : iteration.generatedVideo
+        ? "video finalized — waiting for its whole-video evaluation"
+        : "generating and finalizing…"
+    : iteration.status === "passed"
       ? "passed every check that matters"
       : iteration.status === "failed"
         ? "didn't pass — the problems found were written into the next brief"
@@ -216,7 +225,18 @@ function AttemptDetail({
           : "generating and checking…";
 
   return (
-    <DetailShell title={`Attempt v${iteration.index}`} hint={hint}>
+    <DetailShell
+      title={
+        lamp
+          ? iteration.index === 1
+            ? "Initial"
+            : iteration.index === 2
+              ? "Final"
+              : `Video v${iteration.index}`
+          : `Attempt v${iteration.index}`
+      }
+      hint={hint}
+    >
       <div className="grid grid-cols-1 gap-x-14 gap-y-10 lg:grid-cols-2">
         {/* WHAT WENT IN */}
         <div>
@@ -285,9 +305,17 @@ function AttemptDetail({
               </span>
               <span
                 className="text-2xs text-faint"
-                title="Overall score (weighted composite) vs the pass threshold"
+                title={
+                  lamp
+                    ? "Weighted summary of every applicable automated result"
+                    : "Overall score (weighted composite) vs the pass threshold"
+                }
               >
-                Overall score · needs {threshold} to pass
+                {lamp
+                  ? iteration.index === 1
+                    ? "AI summary · Final is generated once regardless of score"
+                    : "final AI summary · no best-of selection"
+                  : `Overall score · needs ${threshold} to pass`}
               </span>
             </div>
           ) : (
@@ -303,7 +331,7 @@ function AttemptDetail({
                 ))
               ) : (
                 <span className="text-2xs text-faint">
-                  all must-pass checks green
+                  no applicable hard-gate failures
                 </span>
               )}
             </div>
@@ -311,7 +339,7 @@ function AttemptDetail({
           {results.length > 0 ? (
             <div className="mt-6">
               <p className="text-2xs text-faint">
-                score per check{hasDeltas ? " · change vs previous attempt" : ""}
+                score per check{hasDeltas ? " · change vs Initial" : ""}
               </p>
               <div className="mt-1 grid grid-cols-1 gap-x-10 sm:grid-cols-2">
                 {results.map((r) => (
@@ -360,13 +388,15 @@ function AttemptDetail({
 
 function CorrectionsDetail({
   step,
+  lamp,
 }: {
   step: Extract<JourneyStep, { kind: "corrections" }>;
+  lamp: boolean;
 }) {
   const { prev, next, added, resolved } = step;
   return (
     <DetailShell
-      title={`Fix list — v${prev.index} → v${next.index}`}
+      title={lamp ? "Corrections — Initial → Final" : `Fix list — v${prev.index} → v${next.index}`}
       hint="what changed on the fix list going into the next brief (technical: constraint ledger)"
     >
       {added.length === 0 && resolved.length === 0 ? (
@@ -411,12 +441,14 @@ function RemuxDetail({ run }: { run: Run }) {
       ?.message;
   return (
     <DetailShell
-      title="Original audio restored"
-      hint="the AI never touches the sound (technical: audio remux)"
+      title="Source audio finalized and verified"
+      hint="provider sound is discarded before evaluation (technical: audio remux)"
     >
       <p className="max-w-3xl text-sm text-muted">
-        The original audio is copied byte-for-byte onto the winning video — no AI
-        model ever hears or touches it.
+        After each Lamp generation, provider sound is discarded. The canonical
+        source track is stream-copied onto Initial and Final, or all sound is
+        stripped when the source is silent. Presence, full-timeline duration,
+        and the restored audio fingerprint must verify before visual evaluation.
       </p>
       {hashLine ? (
         <p className="mt-3 max-w-3xl font-mono text-2xs text-faint">{hashLine}</p>
@@ -510,9 +542,15 @@ export function StepDetail({
     case "anchor":
       return <AnchorDetail run={run} />;
     case "attempt":
-      return <AttemptDetail iteration={step.iteration} threshold={threshold} />;
+      return (
+        <AttemptDetail
+          iteration={step.iteration}
+          threshold={threshold}
+          lamp={run.workflowId === "lamp-v1"}
+        />
+      );
     case "corrections":
-      return <CorrectionsDetail step={step} />;
+      return <CorrectionsDetail step={step} lamp={run.workflowId === "lamp-v1"} />;
     case "fallback":
       return <FallbackDetail run={run} />;
     case "remux":

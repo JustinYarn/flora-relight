@@ -5,8 +5,9 @@ import type {
   RelightBasePrompt,
   Violation,
   ViolationSeverity,
+  WorkflowMode,
 } from "@/lib/types";
-import { RELIGHT_BASE_PROMPT } from "./base-prompt";
+import { RELIGHT_BASE_PROMPT } from "./base-prompt.ts";
 
 /**
  * The Mega Prompt COMPILER.
@@ -38,6 +39,19 @@ import { RELIGHT_BASE_PROMPT } from "./base-prompt";
 
 const MAX_ACTIVE_CORRECTIONS = 12;
 
+const FLORA_PROMPT_PREFIX = "=== FLORA RELIGHT MEGA PROMPT";
+const LAMP_PROMPT_PREFIX = "=== LAMP RELIGHT MEGA PROMPT";
+
+/** Preserve the method already serialized into a prompt when recompiling it. */
+function serializedWorkflowMode(
+  rendered: string,
+  fallback: WorkflowMode = "lamp"
+): WorkflowMode {
+  if (rendered.startsWith(FLORA_PROMPT_PREFIX)) return "flora";
+  if (rendered.startsWith(LAMP_PROMPT_PREFIX)) return "lamp";
+  return fallback;
+}
+
 const SEVERITY_RANK: Record<ViolationSeverity, number> = {
   critical: 0,
   major: 1,
@@ -64,7 +78,9 @@ function lightingDirectiveFrom(base: RelightBasePrompt): string {
 }
 
 /** Iteration 1: base + lighting, empty ledger. */
-export function initialMegaPrompt(): MegaPrompt {
+export function initialMegaPrompt(
+  workflowMode: WorkflowMode = "lamp"
+): MegaPrompt {
   const mp: MegaPrompt = {
     version: 1,
     base: RELIGHT_BASE_PROMPT,
@@ -72,7 +88,7 @@ export function initialMegaPrompt(): MegaPrompt {
     corrections: [],
     rendered: "",
   };
-  mp.rendered = renderMegaPrompt(mp);
+  mp.rendered = renderMegaPrompt(mp, workflowMode);
   return mp;
 }
 
@@ -81,7 +97,11 @@ export function initialMegaPrompt(): MegaPrompt {
  * prompt. Pure with respect to its inputs: neither `prev` nor `results` is
  * mutated.
  */
-export function nextMegaPrompt(prev: MegaPrompt, results: EvalResult[]): MegaPrompt {
+export function nextMegaPrompt(
+  prev: MegaPrompt,
+  results: EvalResult[],
+  workflowMode: WorkflowMode = serializedWorkflowMode(prev.rendered)
+): MegaPrompt {
   const version = prev.version + 1;
 
   // 1. Index the latest violations by ledger key, keeping the most severe
@@ -154,7 +174,7 @@ export function nextMegaPrompt(prev: MegaPrompt, results: EvalResult[]): MegaPro
     corrections: [...active, ...resolved],
     rendered: "",
   };
-  mp.rendered = renderMegaPrompt(mp);
+  mp.rendered = renderMegaPrompt(mp, workflowMode);
   return mp;
 }
 
@@ -162,7 +182,10 @@ export function nextMegaPrompt(prev: MegaPrompt, results: EvalResult[]): MegaPro
  * Deterministic serialization. Renders ONLY unresolved corrections — resolved
  * clauses drop out so the prompt never accretes stale instructions.
  */
-export function renderMegaPrompt(mp: MegaPrompt): string {
+export function renderMegaPrompt(
+  mp: MegaPrompt,
+  workflowMode: WorkflowMode = serializedWorkflowMode(mp.rendered)
+): string {
   const { base } = mp;
 
   const locks = [
@@ -185,7 +208,7 @@ export function renderMegaPrompt(mp: MegaPrompt): string {
   const negatives = base.negative.map((n) => `- ${n}`).join("\n");
 
   return [
-    `=== FLORA RELIGHT MEGA PROMPT v${mp.version} ===`,
+    `=== ${workflowMode === "flora" ? "FLORA" : "LAMP"} RELIGHT MEGA PROMPT v${mp.version} ===`,
     "",
     "[TASK]",
     base.task,

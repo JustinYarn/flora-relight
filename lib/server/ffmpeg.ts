@@ -603,6 +603,26 @@ export async function remuxAudio(
 }
 
 /**
+ * Preserve a silent source by discarding any soundtrack invented by the video
+ * model. The video stream is copied bit-for-bit; only audio streams are
+ * omitted from the finalized artifact.
+ */
+export async function stripAudio(
+  videoPath: string,
+  outPath: string
+): Promise<void> {
+  const tools = await getTools();
+  await runOrThrow(tools.ffmpeg, [
+    "-y",
+    "-i", videoPath,
+    "-map", "0:v:0",
+    "-c:v", "copy",
+    "-an",
+    outPath,
+  ]);
+}
+
+/**
  * MD5 of the raw audio bitstream (stream copy, no re-encode), optionally
  * limited to the first `maxSec` seconds of output. Because remuxAudio()
  * stream-copies packets, an output whose audio survived intact produces the

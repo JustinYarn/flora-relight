@@ -15,11 +15,12 @@ import type {
   Run,
   RunExecution,
   VideoAsset,
+  WorkflowMode,
   WorkflowDefinition,
 } from "@/lib/types";
 import { uid } from "@/lib/util";
 import { estimateRun, formatUsd } from "@/lib/cost";
-import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
+import { workflowForMode } from "@/lib/workflow-def";
 import { runWorkflow } from "@/lib/engine";
 import { buildQueuedRun } from "@/lib/run-factory";
 import {
@@ -28,6 +29,11 @@ import {
   summarizeBatchRecovery,
   type BatchRecoverySummary,
 } from "@/lib/batch-recovery";
+import {
+  DEFAULT_WORKFLOW_MODE,
+  parseWorkflowMode,
+  WORKFLOW_MODE_STORAGE_KEY,
+} from "@/lib/workflow-mode";
 
 /**
  * Batch worker pool size: at most this many runWorkflow() executions in
@@ -74,12 +80,15 @@ interface AppStore {
    * the server response must explicitly claim live run/batch ownership.
    */
   mode: "mock" | "live";
+  /** User-selected product workflow. Stored locally; provider mode is separate. */
+  workflowMode: WorkflowMode;
   /**
    * True once hydrate() has finished pulling persisted state (or confirmed
    * the persistence API is absent).
    */
   hydrated: boolean;
   setMode(mode: "mock" | "live"): void;
+  setWorkflowMode(mode: WorkflowMode): void;
   /**
    * One-time boot sync (called by lib/persist.ts startPersistence):
    *   1. GET /api/live/health → flips mode to "live" when the server says
@@ -94,7 +103,7 @@ interface AppStore {
   /** Persists the run, then kicks off the async engine. */
   startRun(
     video: VideoAsset,
-    opts?: { approveLiveSpend?: boolean }
+    opts?: { approveLiveSpend?: boolean; workflowMode?: WorkflowMode }
   ): Promise<string>;
   /**
    * Mock-only convenience: creates one Run per video plus a Batch pointing at
@@ -107,12 +116,13 @@ interface AppStore {
   startBatch(
     videos: VideoAsset[],
     name?: string,
-    opts?: { budgetUsd?: number }
+    opts?: { budgetUsd?: number; workflowMode?: WorkflowMode }
   ): string;
   /** Persist a multi-file selection before the first upload starts. */
   createBatchDraft(
     items: Array<{ runId: string; label: string }>,
-    name?: string
+    name?: string,
+    workflowMode?: WorkflowMode
   ): string;
   /** Persist one upload transition so ready files survive refresh. */
   updateBatchUpload(
@@ -126,6 +136,7 @@ interface AppStore {
     opts?: {
       budgetUsd?: number;
       approveLiveSpend?: boolean;
+      workflowMode?: WorkflowMode;
       /** Explicitly freeze/start only the ready members of an interrupted upload. */
       allowIncompleteUploads?: boolean;
     }
@@ -326,6 +337,7 @@ function needsSingleExecutionAdoption(run: Run): boolean {
     execution.source === "single" &&
     (execution.status === "queued" ||
       execution.status === "running" ||
+      execution.status === "user_action_required" ||
       execution.status === "reconcile_required")
   );
 }
@@ -370,16 +382,41 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   runs: [],
   batches: [],
   batchExecutions: {},
-  workflow: RELIGHT_WORKFLOW,
+  workflow: workflowForMode(DEFAULT_WORKFLOW_MODE),
   mode: "mock",
+  workflowMode: DEFAULT_WORKFLOW_MODE,
   hydrated: false,
 
   setMode: (mode) => set({ mode }),
+  setWorkflowMode: (workflowMode) => {
+    set({ workflowMode, workflow: workflowForMode(workflowMode) });
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(WORKFLOW_MODE_STORAGE_KEY, workflowMode);
+      } catch {
+        // Storage can be unavailable in private/locked-down browser contexts.
+        // The selection still remains active for this tab.
+      }
+    }
+  },
 
   hydrate: () => {
     if (typeof window === "undefined") return Promise.resolve(false); // client-only
     if (hydratePromise) return hydratePromise;
     const hydration = (async (): Promise<boolean> => {
+      try {
+        const savedWorkflowMode = parseWorkflowMode(
+          window.localStorage.getItem(WORKFLOW_MODE_STORAGE_KEY)
+        );
+        if (savedWorkflowMode) {
+          set({
+            workflowMode: savedWorkflowMode,
+            workflow: workflowForMode(savedWorkflowMode),
+          });
+        }
+      } catch {
+        // Keep the explicit Lamp default when browser storage is unavailable.
+      }
       // 1. Live-mode health check. A missing route means a mock-only static
       // environment; a transient/network/server failure must be retried so a
       // live deployment never silently boots with persistence disabled.
@@ -504,11 +541,19 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     return hydratePromise;
   },
 
-  startRun: async (video: VideoAsset, opts?: { approveLiveSpend?: boolean }) => {
+  startRun: async (
+    video: VideoAsset,
+    opts?: { approveLiveSpend?: boolean; workflowMode?: WorkflowMode }
+  ) => {
+    const workflowMode = opts?.workflowMode ?? get().workflowMode;
     const response = await fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ video, approveLiveSpend: opts?.approveLiveSpend }),
+      body: JSON.stringify({
+        video,
+        approveLiveSpend: opts?.approveLiveSpend,
+        workflowMode,
+      }),
     });
     const payload = (await response.json().catch(() => null)) as
       | { run?: Run; serverOwned?: boolean; error?: string }
@@ -532,7 +577,11 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     return run.id;
   },
 
-  createBatchDraft: (items, name = "Upload batch") => {
+  createBatchDraft: (
+    items,
+    name = "Upload batch",
+    workflowMode = get().workflowMode
+  ) => {
     const now = Date.now();
     const batch: Batch = {
       id: uid("batch"),
@@ -542,6 +591,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       runIds: items.map((item) => item.runId),
       concurrency: BATCH_CONCURRENCY,
       status: items.length === 0 ? "failed" : "uploading",
+      workflowMode,
       uploads: items.map((item) => ({
         ...item,
         status: "pending" as const,
@@ -587,6 +637,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         budgetUsd: opts?.budgetUsd,
         approveLiveSpend: opts?.approveLiveSpend,
         allowIncompleteUploads: opts?.allowIncompleteUploads,
+        workflowMode:
+          opts?.workflowMode ?? existing.workflowMode ?? "flora",
       }),
     });
     const payload = (await response.json().catch(() => null)) as
@@ -718,8 +770,11 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         "Direct browser batches are mock-only. Use the durable upload batch flow in live mode."
       );
     }
-    const batchRuns = videos.map(buildQueuedRun);
     const now = Date.now();
+    const workflowMode = opts?.workflowMode ?? get().workflowMode;
+    const batchRuns = videos.map((video) =>
+      buildQueuedRun(video, now, workflowMode)
+    );
     const batch: Batch = {
       id: uid("batch"),
       name,
@@ -729,6 +784,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       concurrency: BATCH_CONCURRENCY,
       status: batchRuns.length === 0 ? "done" : "running",
       budgetUsd: opts?.budgetUsd,
+      workflowMode,
     };
     set((state) => ({
       runs: [...batchRuns, ...state.runs],

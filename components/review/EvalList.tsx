@@ -15,7 +15,23 @@ import {
   verdictColor,
 } from "@/components/ui";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
 import { formatTime, LOW_CONFIDENCE } from "@/lib/util";
+
+const UNAVAILABLE_REASON: Record<(typeof LAMP_UNAVAILABLE_EVAL_IDS)[number], string> = {
+  "temporal-alignment":
+    "unavailable in Lamp — the documented local temporal-correlation metric is not implemented yet",
+  "lighting-match-to-anchor":
+    "not applicable in Lamp — this method does not create or approve a Look Anchor",
+};
+
+function unavailableReason(evalId: string): string | undefined {
+  return LAMP_UNAVAILABLE_EVAL_IDS.includes(
+    evalId as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
+  )
+    ? UNAVAILABLE_REASON[evalId as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]]
+    : undefined;
+}
 
 function severityColor(s: ViolationSeverity): string {
   return s === "critical"
@@ -108,7 +124,9 @@ function EvalRowDetail({ def, result }: { def: EvalDefinition; result: EvalResul
             {fmtDelta(delta)} vs previous attempt ·{" "}
           </span>
         ) : null}
-        {def.method}
+        {result.verdicts.length === 1 && result.verdicts[0]?.judge === "gemini"
+          ? "Lamp holistic Gemini whole-video evaluation"
+          : def.method}
         {def.hardGate ? " · must pass (hard gate)" : ""} · weight {def.weight.toFixed(2)}{" "}
         · pass ≥ {def.passThreshold}
       </p>
@@ -151,7 +169,7 @@ function EvalRow({
       </span>
       {lowConfidence ? (
         <span className="mt-0.5 block text-2xs text-borderline">
-          judges disagree — needs human eye
+          low-confidence result — needs human eye
         </span>
       ) : null}
     </span>
@@ -162,10 +180,15 @@ function EvalRow({
   // has actually started — earlier stages (a 5-minute videogen) show a flat
   // dash instead of ten pulsing rows.
   if (!result) {
+    const unavailable = unavailableReason(def.id);
     return (
       <div className="-ml-3 flex flex-wrap items-center gap-x-5 gap-y-2 border-l-2 border-transparent py-4 pl-3">
         {nameCell}
-        {running && def.id !== "audio-integrity" ? (
+        {unavailable ? (
+          <span className="flex-1 text-pretty text-2xs text-faint">
+            {unavailable}
+          </span>
+        ) : running && def.id !== "audio-integrity" ? (
           evalsUnderway ? (
             <span className="flex flex-1 items-center gap-3">
               <span className="h-1.5 w-40 animate-pulse rounded-full bg-raised" />
@@ -177,7 +200,7 @@ function EvalRow({
         ) : (
           <span className="flex-1 text-2xs text-faint">
             {def.id === "audio-integrity"
-              ? "not run yet — this check runs on the winning cut, after the original audio is restored"
+              ? "not run yet — Lamp restores and verifies source audio before each holistic visual evaluation"
               : "not run this attempt"}
           </span>
         )}
@@ -197,7 +220,7 @@ function EvalRow({
       <button
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full flex-wrap items-center gap-x-5 gap-y-2 py-4 text-left transition hover:bg-[color-mix(in_srgb,var(--raised)_40%,transparent)]"
+        className="flex min-h-10 w-full flex-wrap items-center gap-x-5 gap-y-2 py-4 text-left transition-[transform,background-color] duration-150 ease-out hover:bg-[color-mix(in_srgb,var(--raised)_40%,transparent)] active:scale-[0.96]"
       >
         {nameCell}
         <span className="min-w-[160px] flex-1">
@@ -224,6 +247,7 @@ function EvalRow({
 export function EvalList({
   iteration,
   evalsUnderway = true,
+  hiddenUntilHumanGrade = false,
 }: {
   iteration?: Iteration;
   /**
@@ -232,22 +256,67 @@ export function EvalList({
    * runs behave exactly as before.
    */
   evalsUnderway?: boolean;
+  /** Preserve blind grading: final evidence is revealed only after save. */
+  hiddenUntilHumanGrade?: boolean;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
+  const applicableCount = EVAL_DEFS.length - LAMP_UNAVAILABLE_EVAL_IDS.length;
+  const availableCount =
+    iteration?.evalResults.filter((result) => !unavailableReason(result.evalId)).length ?? 0;
+  const sectionLabel =
+    iteration?.index === 1
+      ? "Initial whole-video critique"
+      : iteration?.index === 2
+        ? "Final AI evaluation"
+        : "AI evaluation";
+
+  if (hiddenUntilHumanGrade) {
+    return (
+      <section className="border-y border-edge py-6">
+        <h2 className="text-balance text-sm font-medium text-ink">
+          Final AI evaluation is sealed
+        </h2>
+        <p className="mt-1 max-w-2xl text-pretty text-xs leading-relaxed text-muted">
+          Grade Final from the Grade workspace first. Lamp reveals its final AI
+          scores, verdicts, confidence, and findings only after your human grade
+          is durably saved.
+        </p>
+      </section>
+    );
+  }
 
   return (
-    <section className="divide-y divide-edge border-b border-edge">
-      {EVAL_DEFS.map((def) => (
-        <EvalRow
-          key={def.id}
-          def={def}
-          result={iteration?.evalResults.find((r) => r.evalId === def.id)}
-          running={iteration?.status === "running"}
-          evalsUnderway={evalsUnderway}
-          open={openId === def.id}
-          onToggle={() => setOpenId((cur) => (cur === def.id ? null : def.id))}
-        />
-      ))}
+    <section>
+      <header className="flex flex-wrap items-end justify-between gap-2 border-b border-edge pb-3 pt-2">
+        <div>
+          <h2 className="text-balance text-sm font-medium text-ink">{sectionLabel}</h2>
+          <p className="mt-1 text-pretty text-2xs text-faint">
+            {LAMP_UNAVAILABLE_EVAL_IDS.length} of {EVAL_DEFS.length} rubric rows
+            stay explicitly unscored: timing correlation is unavailable and
+            anchor matching is not applicable.
+          </p>
+        </div>
+        <span className="text-2xs tabular-nums text-muted">
+          {availableCount} of {applicableCount} applicable results available
+        </span>
+      </header>
+      <div className="divide-y divide-edge border-b border-edge">
+        {EVAL_DEFS.map((def) => (
+          <EvalRow
+            key={def.id}
+            def={def}
+            result={
+              unavailableReason(def.id)
+                ? undefined
+                : iteration?.evalResults.find((r) => r.evalId === def.id)
+            }
+            running={iteration?.status === "running"}
+            evalsUnderway={evalsUnderway}
+            open={openId === def.id}
+            onToggle={() => setOpenId((cur) => (cur === def.id ? null : def.id))}
+          />
+        ))}
+      </div>
     </section>
   );
 }

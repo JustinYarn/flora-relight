@@ -7,8 +7,10 @@ import { RELIGHT_BASE_PROMPT } from "@/lib/prompts/base-prompt";
 import { MANIFEST_PROMPT } from "@/lib/prompts/manifest";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
+import { useAppStore } from "@/lib/store";
 import type { EvalDefinition, EvalMethod } from "@/lib/types";
 import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
+import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
 
 type CheckFilter = "all" | "rubric" | "code";
 
@@ -54,10 +56,10 @@ function Pre({ children }: { children: string }) {
 
 function codeCheckCaveat(evalId: string): string {
   if (evalId === "audio-integrity") {
-    return "Target specification, not an exact executable snapshot. The current durable first-cut verifier compares audio-stream MD5 values over the shared minimum duration; Engine node status is the selected-run truth.";
+    return "Lamp verifies the restored original audio after each generation. This broader specification remains reference material; the selected run's node status is the operational truth.";
   }
   if (evalId === "temporal-alignment") {
-    return "Planned code-check specification. The current durable live first-cut path skips the visual eval loop, including this check; Engine node status is the selected-run truth.";
+    return "Planned code-check specification. Lamp does not yet implement this local temporal-correlation metric, so the result is explicitly unavailable rather than guessed.";
   }
   return "Code-check specification. Open the Engine node to see whether it actually ran on the selected run.";
 }
@@ -165,7 +167,7 @@ function checkKind(def: EvalDefinition): {
   }
   if (def.method === "hybrid") {
     return {
-      label: "rubric + planned code",
+      label: "holistic rubric",
       color: "var(--running)",
       codeOnly: false,
     };
@@ -186,6 +188,9 @@ function CheckRow({
 }) {
   const kind = checkKind(def);
   const nodeId = EVAL_NODE_IDS.get(def.id);
+  const unavailable = LAMP_UNAVAILABLE_EVAL_IDS.includes(
+    def.id as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
+  );
 
   return (
     <article
@@ -209,11 +214,20 @@ function CheckRow({
             <span className="flex flex-wrap items-center gap-2">
               <span className="text-sm font-semibold text-ink">{def.name}</span>
               <Badge color={kind.color}>{kind.label}</Badge>
-              {def.hardGate ? (
-                <Badge color="var(--fail)">must pass</Badge>
-              ) : (
-                <Badge color="var(--faint)">advisory</Badge>
-              )}
+              {!unavailable ? (
+                def.hardGate ? (
+                  <Badge color="var(--fail)">must pass</Badge>
+                ) : (
+                  <Badge color="var(--faint)">advisory</Badge>
+                )
+              ) : null}
+              {unavailable ? (
+                <Badge color="var(--faint)">
+                  {def.id === "lighting-match-to-anchor"
+                    ? "not applicable in Lamp"
+                    : "unavailable in Lamp"}
+                </Badge>
+              ) : null}
             </span>
             <span className="mt-1 block text-pretty text-xs leading-relaxed text-muted">
               {def.description}
@@ -288,8 +302,10 @@ function CheckRow({
                     Current canonical rubric
                   </SectionTitle>
                   <p className="mb-3 text-pretty text-xs leading-relaxed text-faint">
-                    This is the rubric in the current source definition. It is not a
-                    snapshot of a past run or a provider-specific request.
+                    This is the canonical criterion library. Lamp removes the older
+                    frame-grid input/output boilerplate and composes the applicable
+                    criteria into one full-video Gemini request. It is not a snapshot
+                    of a past run.
                   </p>
                   <Pre>{def.promptTemplate}</Pre>
                   {def.deterministicNote ? (
@@ -319,14 +335,16 @@ function CheckRow({
 }
 
 export default function PromptsPage() {
-  const mega = useMemo(() => initialMegaPrompt(), []);
+  const workflowMode = useAppStore((state) => state.workflowMode);
+  const mega = useMemo(
+    () => initialMegaPrompt(workflowMode),
+    [workflowMode]
+  );
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<CheckFilter>("all");
   const [openId, setOpenId] = useState<string | null>(null);
 
   const base = RELIGHT_BASE_PROMPT;
-  const rubricCount = EVAL_DEFS.filter((def) => Boolean(def.promptTemplate)).length;
-  const codeCount = EVAL_DEFS.length - rubricCount;
 
   const filteredDefs = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -360,14 +378,14 @@ export default function PromptsPage() {
           <Badge color="var(--accent)">current definition</Badge>
         </div>
         <p className="mt-2 max-w-3xl text-pretty text-sm leading-relaxed text-muted">
-          See which instructions shape generation, which checks evaluate an
-          attempt, and where each check lives in the Engine. Long source text stays
-          folded away until you need it.
+          See the mega prompt and evaluation criteria behind Lamp&apos;s fixed
+          Initial → critique → Final method. Long source text stays folded away
+          until you need it.
         </p>
         <p className="mt-2 max-w-3xl text-pretty text-2xs leading-relaxed text-faint">
-          This page maps the full-loop definition. In Engine, the selected run&apos;s
-          node status shows which stages actually ran; durable live first cuts
-          currently skip the anchor and visual-eval loop.
+          Each generated video gets one whole-video evaluation covering eight
+          visual rubrics plus deterministic audio. Temporal correlation is
+          unavailable; Look Anchor matching does not apply because Lamp has no anchor.
         </p>
       </header>
 
@@ -379,7 +397,7 @@ export default function PromptsPage() {
             </span>
           }
         >
-          <span id="workflow-map-title">How instructions move through the loop</span>
+          <span id="workflow-map-title">How instructions move through Lamp</span>
         </SectionTitle>
         <div className="overflow-x-auto pb-2">
           <div className="flex min-w-max items-center gap-2">
@@ -403,8 +421,8 @@ export default function PromptsPage() {
             </span>
             <FlowNode
               index={3}
-              title="Run the checks"
-              detail="10 attempt checks; audio gate after delivery."
+              title="Critique the whole video"
+              detail="Eight visual results return together; audio is appended deterministically."
               nodeId="eval-identity"
             />
             <span className="text-faint" aria-hidden="true">
@@ -412,8 +430,8 @@ export default function PromptsPage() {
             </span>
             <FlowNode
               index={4}
-              title="Collect fixes"
-              detail="Turn reported violations into a deduplicated fix list."
+              title="Collect every fix"
+              detail="Turn all actionable findings into one correction set."
               nodeId="ledger"
             />
             <span className="text-accent" aria-hidden="true">
@@ -421,16 +439,17 @@ export default function PromptsPage() {
             </span>
             <FlowNode
               index={5}
-              title="Compile again"
-              detail="Feed active fixes into the next generation brief."
+              title="Generate Final"
+              detail="Compile once, regenerate once, then evaluate the final."
               nodeId="compile"
             />
           </div>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-2xs text-faint">
-          <span>Side inputs in the full-loop definition:</span>
-          <EngineLink nodeId="manifest">scene inventory → eval context</EngineLink>
-          <EngineLink nodeId="anchor">Look Anchor → generation</EngineLink>
+          <span>
+            Lamp evaluates the complete source and candidate directly; it does not
+            create a scene manifest or Look Anchor.
+          </span>
         </div>
       </section>
 
@@ -440,18 +459,20 @@ export default function PromptsPage() {
         </SectionTitle>
         <div className="grid gap-3">
           <SourceDisclosure
-            title="Scene inventory prompt"
-            description="Current extraction instructions for describing the person, room, camera, and starting light before evaluation."
-            badge="prompt"
-            badgeColor="var(--running)"
+            title="Scene inventory reference"
+            description="Legacy full-loop extraction instructions retained for reference; Lamp does not run this stage."
+            badge="not used by Lamp"
+            badgeColor="var(--faint)"
           >
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
-                This inventory is intended as evaluation context and is kept out
-                of the generation brief so descriptive guesses do not become edit
-                instructions. Current live judge requests do not attach it yet.
+                Lamp compares the complete source and candidate videos directly.
+                This older inventory definition remains readable for historical
+                runs but is not sent to generation or evaluation in Lamp.
               </p>
-              <EngineLink nodeId="manifest" />
+              <span className="inline-flex min-h-10 items-center text-2xs text-faint">
+                Legacy reference only
+              </span>
             </div>
             <Pre>{MANIFEST_PROMPT}</Pre>
           </SourceDisclosure>
@@ -544,7 +565,7 @@ export default function PromptsPage() {
             </p>
           </div>
           <Badge>
-            {EVAL_DEFS.length} total · {rubricCount} rubric-driven · {codeCount} code
+            9 applicable · 2 explicitly excluded · 8 active visual rubrics · 1 active code check
           </Badge>
         </div>
 
@@ -600,7 +621,7 @@ export default function PromptsPage() {
             Showing {filteredDefs.length} of {EVAL_DEFS.length} checks
             {query || filter !== "all"
               ? ""
-              : " · full demo loop: 10 per generation attempt; audio runs after delivery · durable live first cuts currently skip the visual eval loop"}
+              : " · Lamp returns 8 visual results together and appends deterministic audio · timing is unavailable · anchor match is inapplicable"}
           </p>
         </Card>
 

@@ -2,8 +2,8 @@
 
 /**
  * Horizontal strip above the canvas that mirrors live run state in plain
- * words — one chip per stage lane, e.g.
- * "Ingest ✓ → Anchor ✓ → Generate ● v2 → Evals ● 7/10 → Gate ✗ → looping → Deliver —".
+ * words — one chip per Lamp lane, e.g.
+ * "Source ✓ → Generate ● Final → Whole-video evaluation ● 8/8 → Verify & grade —".
  */
 
 import { Fragment } from "react";

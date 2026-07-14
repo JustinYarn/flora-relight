@@ -3,22 +3,24 @@
 import { useMemo, useState } from "react";
 import type { GradeClipDraft, HumanCheckGrade, HumanGrade, Run } from "@/lib/types";
 import { useAppStore } from "@/lib/store";
+import { markServerRunObserved } from "@/lib/persist";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { Button, verdictColor } from "@/components/ui";
 import { PairPlayer } from "@/components/library/PairPlayer";
+import { formatRunDate } from "@/components/library/derive";
 import {
-  formatRunDate,
-  shippedIteration,
-  shippedVideo,
-} from "@/components/library/derive";
-import { SCALE, scalePoint } from "@/components/grade/derive";
+  finalLampIteration,
+  finalLampVideo,
+  SCALE,
+  scalePoint,
+} from "@/components/grade/derive";
 import type { GradeDraftSaveState } from "@/components/grade/useGradeDraft";
 
 /*
  * Blind grading of ONE clip. Deliberately shows NOTHING from the AI judges —
  * no scores, no verdicts, no violations — so the human read is un-anchored.
- * The same shippedVideo/shippedIteration helpers used by the results view pick
- * the delivered cut; automated comparisons appear only when they actually ran.
+ * The same v2/final helpers used by the results view pick the delivered cut;
+ * automated comparisons appear only after this blind grade is saved.
  */
 
 /** Rows where the check is about sound or timing get a how-to-look hint. */
@@ -53,7 +55,7 @@ function ScaleRow({
               onClick={() => onPick(p.points)}
               aria-pressed={selected}
               title={`${p.points} of 5`}
-              className={`rounded-md border px-2 py-1 text-2xs transition ${
+              className={`min-h-10 rounded-md border px-2 py-1 text-2xs transition-[transform,color,background-color,border-color] duration-150 ease-out active:scale-[0.96] ${
                 selected ? "font-semibold" : "text-muted hover:text-ink"
               }`}
               style={
@@ -84,7 +86,7 @@ function ScaleRow({
           placeholder="note — what did you see? (optional)"
           aria-label="Optional note for this check"
           maxLength={4000}
-          className="mt-2 w-full max-w-md rounded-md bg-raised px-2.5 py-1 text-xs text-ink placeholder:text-faint focus:outline-none"
+          className="mt-2 min-h-10 w-full max-w-md rounded-md bg-raised px-2.5 py-1 text-xs text-ink placeholder:text-faint focus:outline-none"
         />
       ) : null}
     </div>
@@ -117,8 +119,8 @@ export function ClipGrader({
   const [submitting, setSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
 
-  const shipped = shippedIteration(run);
-  const relit = shippedVideo(run);
+  const shipped = finalLampIteration(run);
+  const relit = finalLampVideo(run);
   const answeredCount = useMemo(
     () => EVAL_DEFS.filter((d) => answers[d.id]).length,
     [answers]
@@ -162,6 +164,7 @@ export function ClipGrader({
         | null;
       if (!response.ok || !payload?.run) {
         if (response.status === 409 && payload?.current) {
+          markServerRunObserved(payload.current);
           useAppStore.setState((state) => ({
             runs: state.runs.map((item) =>
               item.id === run.id ? payload.current! : item
@@ -173,6 +176,7 @@ export function ClipGrader({
 
       // PATCH returns the server's canonical compact record. The full judged
       // frame evidence remains archived server-side and cannot be erased here.
+      markServerRunObserved(payload.run);
       useAppStore.setState((state) => ({
         runs: state.runs.map((item) => (item.id === run.id ? payload.run! : item)),
       }));
@@ -197,7 +201,7 @@ export function ClipGrader({
           onDraftChange((current) => ({ ...current, shipIt: value }))
         }
         aria-pressed={selected}
-        className={`rounded-md border px-2.5 py-1 text-xs transition ${
+        className={`min-h-10 rounded-md border px-2.5 py-1 text-xs transition-[transform,color,background-color,border-color] duration-150 ease-out active:scale-[0.96] ${
           selected ? "font-semibold" : "text-muted hover:text-ink"
         }`}
         style={
@@ -224,7 +228,7 @@ export function ClipGrader({
         </h2>
         <span className="text-2xs text-faint">
           {formatRunDate(run.createdAt)}
-          {shipped ? ` · attempt v${shipped.index}` : ""} · {remaining}{" "}
+          {shipped ? ` · final v${shipped.index}` : ""} · {remaining}{" "}
           {remaining === 1 ? "clip" : "clips"} in the queue
         </span>
       </div>
@@ -237,10 +241,10 @@ export function ClipGrader({
           audible="relit"
           relitLabel={
             run.finalVideo
-              ? "RELIT · FINAL"
+              ? `FINAL VIDEO${shipped ? ` · v${shipped.index}` : ""}`
               : shipped
-                ? `RELIT v${shipped.index}`
-                : "RELIT"
+                ? `FINAL VIDEO · v${shipped.index}`
+                : "FINAL VIDEO"
           }
         />
       </div>
@@ -322,7 +326,7 @@ export function ClipGrader({
             placeholder="overall note (optional)"
             aria-label="Optional overall note for this clip"
             maxLength={8000}
-            className="min-w-40 flex-1 rounded-md bg-raised px-2.5 py-1.5 text-xs text-ink placeholder:text-faint focus:outline-none"
+            className="min-h-10 min-w-40 flex-1 rounded-md bg-raised px-2.5 py-1.5 text-xs text-ink placeholder:text-faint focus:outline-none"
           />
           <span
             role="status"

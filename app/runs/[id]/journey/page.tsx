@@ -18,6 +18,7 @@ import { ShareButton } from "@/components/share/ShareButton";
 import { buildJourneySteps } from "@/components/journey/chain";
 import { JourneyChain } from "@/components/journey/JourneyChain";
 import { StepDetail } from "@/components/journey/StepDetail";
+import { isLampBlindGradeLocked } from "@/components/grade/derive";
 
 const STATUS_COLOR: Record<RunStatus, string> = {
   running: "var(--running)",
@@ -54,6 +55,25 @@ export default function RunJourneyPage() {
               className="mt-1 rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition hover:border-faint"
             >
               Back to studio
+            </Link>
+          }
+        />
+      </main>
+    );
+  }
+
+  if (isLampBlindGradeLocked(run)) {
+    return (
+      <main className="mx-auto max-w-5xl px-6 py-10">
+        <EmptyState
+          title="Journey unlocks after your blind grade"
+          hint="Lamp has sealed the final AI evaluation and its prompt-to-result trace. Save your human grade first, then return here to inspect the complete run story."
+          action={
+            <Link
+              href="/grade"
+              className="mt-1 inline-flex min-h-10 items-center rounded-lg bg-pass px-3.5 py-1.5 text-sm font-medium text-canvas transition-transform active:scale-[0.96]"
+            >
+              Grade Final
             </Link>
           }
         />

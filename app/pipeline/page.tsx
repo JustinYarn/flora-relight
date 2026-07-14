@@ -114,10 +114,10 @@ export default function PipelinePage() {
         {latestIteration ? (
           <span
             className="hidden text-2xs tabular-nums text-muted md:inline"
-            title={`attempt (iteration) ${latestIteration.index} · generation brief (mega prompt) v${latestIteration.megaPrompt.version}`}
+            title={`${latestIteration.index === 1 ? "Initial" : "Final"} video · mega prompt v${latestIteration.megaPrompt.version}`}
           >
-            attempt {latestIteration.index} of {workflow.config.maxIterations}{" "}
-            · generation brief v{latestIteration.megaPrompt.version}
+            {latestIteration.index === 1 ? "Initial" : "Final"} · mega prompt v
+            {latestIteration.megaPrompt.version}
           </span>
         ) : null}
         {parentBatch ? (
@@ -175,8 +175,8 @@ export default function PipelinePage() {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge bg-canvas px-4 py-2">
         <Badge color="var(--accent)">prompt map</Badge>
         <p className="text-pretty text-xs text-muted">
-          Open a labeled node to trace the generation brief, the rubric or code
-          check, its result, and the fix that feeds the next attempt.
+          Open a labeled node to trace the mega prompt, each whole-video rubric,
+          its result, and the one correction set that creates Final.
         </p>
         <Link
           href="/prompts"
@@ -206,10 +206,10 @@ export default function PipelinePage() {
               >
                 <EmptyState
                   title="The pipeline is idle"
-                  hint="Upload a clip in Studio to start a run, then pick it here to watch every node light up as it moves through the pipeline."
+                  hint="Upload a clip in Create to start a run, then pick it here to watch every node light up as it moves through the pipeline."
                   action={
                     <Link href="/">
-                      <Button variant="primary">Go to Studio</Button>
+                      <Button variant="primary">Go to Create</Button>
                     </Link>
                   }
                 />

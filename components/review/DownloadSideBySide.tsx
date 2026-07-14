@@ -97,7 +97,7 @@ export function DownloadSideBySide({
             ? "no generated video to download — simulated attempts have no file"
             : (error ?? "Download side-by-side video")
         }
-        className={`rounded-md border border-edge px-2 py-1 text-xs transition hover:border-faint disabled:cursor-not-allowed disabled:opacity-40 ${
+        className={`min-h-10 min-w-10 rounded-md border border-edge px-2 py-1 text-xs transition-[transform,color,border-color] duration-150 ease-out hover:border-faint active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100 ${
           error ? "text-fail" : "text-muted hover:text-ink"
         }`}
       >

@@ -12,10 +12,6 @@ import type {
 import { EVAL_DEFS, getEvalDef } from "@/lib/prompts/eval-defs";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { MANIFEST_PROMPT } from "@/lib/prompts/manifest";
-import {
-  canonicalLiveAnchorPrompt,
-  DEMO_ANCHOR_PROMPT,
-} from "@/lib/prompts/anchor";
 import { formatTime } from "@/lib/util";
 import {
   Badge,
@@ -48,7 +44,7 @@ function DeltaChip({ delta }: { delta: number }) {
     <span
       className="text-2xs font-semibold tabular-nums"
       style={{ color: positive ? "var(--pass)" : "var(--fail)" }}
-      title="Score change from the previous attempt"
+      title="Score change from the previous video"
     >
       {positive ? "+" : ""}
       {delta.toFixed(1)}
@@ -227,7 +223,7 @@ function AttemptPicker({
         <span className="text-2xs font-semibold uppercase tracking-[0.12em] text-faint">
           Result in view
         </span>
-        <span className="text-2xs text-faint">Select an attempt to trace it</span>
+        <span className="text-2xs text-faint">Select Initial or Final to trace it</span>
       </div>
       <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
         {attempts.map(({ iteration, result }) => (
@@ -240,7 +236,11 @@ function AttemptPicker({
           >
             <div>
               <span className="block text-2xs font-semibold uppercase tracking-[0.1em] text-faint">
-                Attempt {iteration.index}
+                {iteration.index === 1
+                  ? "Initial"
+                  : iteration.index === 2
+                    ? "Final"
+                    : `v${iteration.index}`}
               </span>
               <span className="mt-0.5 block text-sm font-semibold tabular-nums text-ink">
                 {Math.round(result.score)}
@@ -264,15 +264,15 @@ function correctionId(evalId: string, aspect: string): string {
 }
 
 function runPromptSource(iteration: number): string {
-  return `run.iterations · attempt ${iteration} · megaPrompt.rendered`;
+  return `run.iterations · ${iteration === 1 ? "Initial" : iteration === 2 ? "Final" : `v${iteration}`} · megaPrompt.rendered`;
 }
 
 function codeCheckSpecificationNote(evalId: string): string {
   if (evalId === "audio-integrity") {
-    return "No model prompt. This is the broader target specification, not an exact executable snapshot. The current durable first-cut verifier compares audio-stream MD5 values over the shared minimum duration; the selected node status is the run truth.";
+    return "No model prompt. Lamp verifies audio presence, complete source/generated/remuxed timeline agreement, and the restored source-audio fingerprint. Any mismatch fails closed before visual evaluation.";
   }
   if (evalId === "temporal-alignment") {
-    return "No model prompt. This is the planned code-check specification. The current durable live first-cut path skips the visual eval loop, including this check; the selected node status is the run truth.";
+    return "No model prompt. This planned local correlation check is not implemented in Lamp, so it remains explicitly unavailable rather than receiving a manufactured score.";
   }
   return "No model prompt. This describes the code-check specification; the selected run status and result show whether that procedure actually executed.";
 }
@@ -287,6 +287,8 @@ function promptViewFor(
   consumed: boolean;
   source: string;
 } {
+  const workflowMode =
+    run?.workflowMode ?? (run?.workflowId === "lamp-v1" ? "lamp" : "flora");
   const attempt = iteration?.index ?? Math.max(1, run?.serverExecution?.iteration ?? 1);
   const operation = run?.providerOperations?.find(
     (item) => item.kind === "video_generation" && item.iteration === attempt
@@ -299,7 +301,7 @@ function promptViewFor(
   if (authoritativeLivePrompt) {
     const prompt = iteration
       ? { ...iteration.megaPrompt, corrections: [...iteration.megaPrompt.corrections] }
-      : initialMegaPrompt();
+      : initialMegaPrompt(workflowMode);
     prompt.version = attempt;
     prompt.rendered = authoritativeLivePrompt;
     const operationCompleted =
@@ -312,7 +314,7 @@ function promptViewFor(
       runBound: true,
       consumed: operationCompleted,
       source: operation?.renderedPrompt
-        ? `run.providerOperations · attempt ${attempt} · renderedPrompt`
+        ? `run.providerOperations · video ${attempt} · renderedPrompt`
         : "run.serverExecution.renderedPrompt",
     };
   }
@@ -325,7 +327,7 @@ function promptViewFor(
       source: runPromptSource(iteration.index),
     };
   }
-  const prompt = initialMegaPrompt();
+  const prompt = initialMegaPrompt(workflowMode);
   const execution = run?.serverExecution;
   if (execution?.renderedPrompt) {
     prompt.version = Math.max(1, execution.iteration);
@@ -356,11 +358,11 @@ function generationBriefNote(
     return "This is the current baseline render before a run adds any eval-driven fixes. It is an example, not a historical request.";
   }
   if (!consumed) {
-    return "These exact bytes are bound to the selected attempt. Provider consumption is not confirmed yet, so this is not labeled as a prompt the model already consumed.";
+    return "These exact bytes are bound to the selected video. Provider consumption is not confirmed yet, so this is not labeled as a prompt the model already consumed.";
   }
   return mode === "live"
-    ? "This rendered text is stored with the selected attempt and bound to its video-generation request."
-    : "This is the exact compiled brief attached to the demo attempt. Demo output is scripted, so the mock provider does not semantically interpret these words.";
+    ? "This rendered text is stored with the selected video and bound to its video-generation request."
+    : "This is the exact compiled brief attached to the demo video. Demo output is scripted, so the mock provider does not semantically interpret these words.";
 }
 
 function EvalSection({
@@ -431,6 +433,8 @@ function EvalSection({
     isAudio &&
     (liveAudioStatus === "succeeded" || liveAudioStatus === "failed");
   const checkExecuted = Boolean(focusResult) || operationalAudioResult;
+  const focusVideoLabel =
+    (focusResult?.iteration ?? promptView.attempt) === 1 ? "Initial" : "Final";
   const transitionParts = [
     nextActiveCorrections.length > 0
       ? `${nextActiveCorrections.length} added or carried`
@@ -443,14 +447,14 @@ function EvalSection({
     definition.method === "deterministic"
       ? "Code-check specification"
       : definition.method === "hybrid"
-        ? "Rubric + planned code tier"
-        : "Two-judge rubric";
+        ? "Holistic rubric · local tier not run"
+        : "Holistic Gemini rubric";
   const feedForward = isAudio
     ? !run
       ? "No run selected"
       : audioSkipped
         ? "Skipped · no post-remux check"
-        : "Post-remux gate · never edits a generation brief"
+        : `${focusVideoLabel} audio verified before visual evaluation · never edits a generation brief`
     : liveVisualSkipped
       ? "Skipped · no automated correction"
       : !focusResult
@@ -467,11 +471,11 @@ function EvalSection({
 
   const decisionValue: ReactNode = focusResult ? (
     <span className="inline-flex items-center gap-2">
-      Attempt {focusResult.iteration} · {Math.round(focusResult.score)}
+      {focusResult.iteration === 1 ? "Initial" : "Final"} · {Math.round(focusResult.score)}
       <VerdictBadge verdict={focusResult.verdict} />
     </span>
   ) : liveVisualSkipped ? (
-    "Skipped on this live first cut"
+    "Skipped on this selected run"
   ) : isAudio && !run ? (
     "No run selected"
   ) : audioSkipped ? (
@@ -520,7 +524,7 @@ function EvalSection({
               value: isAudio
                 ? "Original audio remux"
                 : promptView.runBound
-                  ? `Generation brief v${brief.version} · attempt ${promptView.attempt}`
+                  ? `Generation brief v${brief.version} · ${promptView.attempt === 1 ? "Initial" : "Final"}`
                   : "Current baseline generation brief",
               color: "var(--accent)",
             },
@@ -565,15 +569,14 @@ function EvalSection({
         />
         {liveVisualSkipped ? (
           <p className="mt-2 rounded-lg bg-raised px-3 py-2 text-pretty text-2xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-            This panel shows the current definition for review. The selected live
-            first cut skipped the automated eval loop, so this definition did not
-            cause a score or correction on that cut.
+            This panel shows the current definition for review. The selected run
+            skipped this check, so it did not produce a score or correction.
           </p>
         ) : liveAudioStatus && attempts.length === 0 ? (
           <p className="mt-2 rounded-lg bg-raised px-3 py-2 text-pretty text-2xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-            Live first cuts store this verification in the node status rather than
-            as an eval-score record. This is an operational audio result, not a
-            missing visual-eval result.
+            This run stores audio verification in the node status rather than as a
+            scored visual result. It is an operational integrity result, not a
+            missing visual evaluation.
           </p>
         ) : mode === "mock" && focusResult ? (
           <p className="mt-2 text-pretty text-2xs leading-relaxed text-faint">
@@ -619,10 +622,10 @@ function EvalSection({
         title={
           isAudio
             ? run
-              ? `Video brief v${brief.version} before the audio remux`
+              ? `Video brief v${brief.version} before source-audio finalization`
               : `Baseline video brief v${brief.version} · no audio run selected`
             : promptView.runBound
-              ? `Generation brief v${brief.version} for attempt ${promptView.attempt}`
+              ? `Generation brief v${brief.version} for ${promptView.attempt === 1 ? "Initial" : "Final"}`
               : `Baseline generation brief v${brief.version}`
         }
         text={brief.rendered}
@@ -649,7 +652,7 @@ function EvalSection({
         }
         note={
           isRubric
-            ? "This is today's code-owned template. Runtime replaces evidence placeholders differently for Claude frames and Gemini video. Historical rubric text is not archived per run, so this is not labeled as an older run's exact prompt."
+            ? "This is today's code-owned rubric. Lamp adapts all eight visual rubrics into one Gemini request over the complete source and candidate videos. Historical rubric text is not archived per run."
             : codeCheckSpecificationNote(evalId)
         }
         source="lib/prompts/eval-defs.ts"
@@ -668,7 +671,7 @@ function EvalSection({
         </SectionTitle>
         {liveVisualSkipped ? (
           <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-            Skipped on this live first cut. No automated finding or generation-prompt
+            Skipped on this selected run. No automated finding or mega-prompt
             correction was produced.
           </p>
         ) : isAudio && !run ? (
@@ -678,14 +681,13 @@ function EvalSection({
           </p>
         ) : audioSkipped ? (
           <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-            Audio Integrity was skipped on this run, such as when a fallback path
-            ended before a remuxed delivery was available. No generation prompt
-            change was produced.
+            Audio Integrity was skipped because no verified Final delivery was
+            available. No mega-prompt change was produced.
           </p>
         ) : isAudio && !focusResult ? (
           <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
             {liveAudioStatus === "succeeded"
-              ? "The digest matched and delivery can continue to human review."
+            ? `${focusVideoLabel} passed audio integrity and can continue to its holistic visual evaluation.`
               : liveAudioStatus === "failed"
                 ? "The digest did not verify and delivery needs review."
                 : "Audio verification has not finished yet."}{" "}
@@ -694,12 +696,12 @@ function EvalSection({
         ) : !focusResult ? (
           <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
             No result means no correction from this check. Open a completed demo
-            attempt to see findings turn into the next generation brief.
+            video to see Initial findings turn into the Final generation brief.
           </p>
         ) : isAudio && focusResult.violations.length === 0 ? (
           <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-            The digest matched and delivery continued. Audio Integrity does not
-            alter the video generation prompt.
+            The complete audio timeline and fingerprint matched, so visual
+            evaluation continued. Audio Integrity does not alter the video generation prompt.
           </p>
         ) : isAudio ? (
           <ul className="space-y-2">
@@ -957,12 +959,10 @@ function GenerateSection({
   mode: Mode;
   onSelectNode: (nodeId: string) => void;
 }) {
-  const isVideoGeneration = node.id === "videogen";
   const iteration = run?.iterations[run.iterations.length - 1];
   const promptView = promptViewFor(run, iteration);
   const megaPrompt = promptView.prompt;
-  const anchorStatus = run?.nodeStates.anchor?.status;
-  const anchorWasSkipped = anchorStatus === "skipped";
+  const videoLabel = promptView.attempt === 1 ? "Initial" : "Final";
 
   return (
     <>
@@ -993,94 +993,55 @@ function GenerateSection({
         </div>
       </section>
 
-      {isVideoGeneration ? (
-        <>
-          <section>
-            <SectionTitle>What the model receives</SectionTitle>
-            <PromptTrace
-              items={[
-                { label: "Structure", value: "Original source video", color: "var(--faint)" },
-                {
-                  label: "Target look",
-                  value: anchorWasSkipped
-                    ? "No Look Anchor · skipped on selected run"
-                    : anchorStatus === "succeeded"
-                      ? "Run-bound Look Anchor"
-                      : "Look Anchor · intended full-loop input",
-                  color: anchorWasSkipped ? "var(--faint)" : "var(--running)",
-                },
-                { label: "Instructions", value: `Generation brief v${megaPrompt.version}`, color: "var(--accent)" },
-                { label: "Output", value: "Candidate relit video", color: "var(--pass)" },
-              ]}
-            />
-          </section>
-          <PromptDisclosure
-            eyebrow={promptView.runBound ? "RUN-BOUND GENERATION PROMPT" : "CURRENT BASELINE"}
-            title={
-              promptView.runBound
-                ? `${promptView.consumed ? "Brief consumed" : "Brief bound"} for attempt ${promptView.attempt}`
-                : "Brief the first attempt would consume"
-            }
-            text={megaPrompt.rendered}
-            note={generationBriefNote(mode, promptView.runBound, promptView.consumed)}
-            source={promptView.source}
-            testId="video-generation-prompt-disclosure"
-          />
-          <button
-            type="button"
-            onClick={() => onSelectNode("compile")}
-            className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
-          >
-            Open the brief compiler →
-          </button>
-        </>
-      ) : (
-        <>
-          <section>
-            <SectionTitle>Prompt-to-anchor trace</SectionTitle>
-            <PromptTrace
-              items={[
-                { label: "Receives", value: "One canonical source-video frame", color: "var(--faint)" },
-                {
-                  label: "Instruction path",
-                  value: mode === "live" ? "Full-loop live anchor definition" : "Scripted demo anchor definition",
-                  color: "var(--accent)",
-                },
-                {
-                  label: "Selected run",
-                  value: !run
-                    ? "No run selected"
-                    : anchorWasSkipped
-                      ? "Stage skipped · no prompt sent"
-                      : anchorStatus ?? "No recorded status",
-                  color: anchorWasSkipped ? "var(--faint)" : "var(--pass)",
-                },
-                { label: "Intended output", value: "Still-image lighting reference for video", color: "var(--running)" },
-              ]}
-            />
-            {anchorWasSkipped ? (
-              <p className="mt-2 rounded-lg bg-raised px-3 py-2 text-pretty text-2xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-                The selected durable live first cut omitted the anchor stage, so no
-                anchor prompt was sent and video generation had no anchor input.
-              </p>
-            ) : null}
-          </section>
-          <PromptDisclosure
-            eyebrow={mode === "live" ? "CURRENT FULL-LOOP LIVE DEFINITION" : "DEMO REQUEST TEXT"}
-            title={mode === "live" ? "Canonical still-image relight instruction" : "Scripted demo anchor instruction"}
-            text={mode === "live" ? canonicalLiveAnchorPrompt() : DEMO_ANCHOR_PROMPT}
-            note={
-              anchorWasSkipped
-                ? "Available for review, but not sent on this selected run."
-                : mode === "live"
-                  ? "Today's canonical full-loop instruction. Historical anchor text is not snapshotted per run, so this is not labeled as an older run's exact prompt."
-                  : "This is the exact request text in the demo path. The mock image output is scripted and does not semantically respond to edits."
-            }
-            source="lib/prompts/anchor.ts"
-            testId="anchor-prompt-disclosure"
-          />
-        </>
-      )}
+      <section>
+        <SectionTitle>What the model receives</SectionTitle>
+        <PromptTrace
+          items={[
+            {
+              label: "Source",
+              value: "The immutable original video",
+              color: "var(--faint)",
+            },
+            {
+              label: "Instructions",
+              value: `Mega prompt v${megaPrompt.version}`,
+              color: "var(--accent)",
+            },
+            {
+              label: "Correction context",
+              value:
+                promptView.attempt === 1
+                  ? "None · this is the Initial generation"
+                  : "Every actionable finding from the Initial critique",
+              color: "var(--running)",
+            },
+            {
+              label: "Output",
+              value: `${videoLabel} relit video`,
+              color: "var(--pass)",
+            },
+          ]}
+        />
+      </section>
+      <PromptDisclosure
+        eyebrow={promptView.runBound ? "RUN-BOUND GENERATION PROMPT" : "CURRENT BASELINE"}
+        title={
+          promptView.runBound
+            ? `${promptView.consumed ? "Prompt consumed" : "Prompt bound"} for ${videoLabel}`
+            : "Mega prompt for Initial"
+        }
+        text={megaPrompt.rendered}
+        note={generationBriefNote(mode, promptView.runBound, promptView.consumed)}
+        source={promptView.source}
+        testId="video-generation-prompt-disclosure"
+      />
+      <button
+        type="button"
+        onClick={() => onSelectNode("compile")}
+        className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
+      >
+        Open the mega-prompt compiler →
+      </button>
     </>
   );
 }
@@ -1092,11 +1053,20 @@ function AggregateSection({
   run?: Run;
   onSelectNode: (nodeId: string) => void;
 }) {
-  const skipped = run?.nodeStates.ledger?.status === "skipped";
-  const composites =
-    run?.iterations.flatMap((iteration) =>
-      iteration.composite ? [{ index: iteration.index, composite: iteration.composite }] : []
-    ) ?? [];
+  const summaries =
+    run?.iterations.map((iteration) => {
+      const visual = iteration.evalResults.filter(
+        (result) => result.evalId !== "audio-integrity"
+      );
+      const average =
+        visual.length > 0
+          ? Math.round(
+              visual.reduce((sum, result) => sum + result.score, 0) /
+                visual.length
+            )
+          : null;
+      return { index: iteration.index, count: visual.length, average };
+    }) ?? [];
 
   return (
     <>
@@ -1104,33 +1074,44 @@ function AggregateSection({
         <SectionTitle>Why this node matters</SectionTitle>
         <PromptTrace
           items={[
-            { label: skipped ? "Definition receives" : "Receives", value: "Violations from every completed check", color: "var(--running)" },
-            { label: skipped ? "Definition normalizes" : "Normalizes", value: "One canonical fix per eval + aspect", color: "var(--borderline)" },
-            { label: skipped ? "Definition writes" : "Writes", value: "Active corrections into the next generation brief", color: "var(--accent)" },
+            {
+              label: "Receives",
+              value: "Eight visual results returned together for the whole video",
+              color: "var(--running)",
+            },
+            {
+              label: "After Initial",
+              value: "Consolidates every actionable finding into one correction set",
+              color: "var(--borderline)",
+            },
+            {
+              label: "After Final",
+              value: "Stores the AI grades for blind human comparison",
+              color: "var(--accent)",
+            },
           ]}
         />
       </section>
-      {skipped ? (
-        <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-          Skipped on the selected durable live first cut. No automated checks
-          produced findings, so no fix list or retry prompt was compiled.
-        </p>
-      ) : composites.length > 0 ? (
+      {summaries.length > 0 ? (
         <section>
-          <SectionTitle>Overall score by attempt</SectionTitle>
-          <div className="space-y-2.5">
-            {composites.map(({ index, composite }) => (
-              <div key={index}>
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="text-2xs font-semibold uppercase tracking-[0.12em] text-faint">
-                    Attempt {index}
+          <SectionTitle>AI summary by video</SectionTitle>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {summaries.map(({ index, count, average }) => (
+              <div
+                key={index}
+                className="rounded-lg bg-raised px-3 py-2.5 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]"
+              >
+                <p className="text-2xs font-semibold uppercase tracking-[0.12em] text-faint">
+                  {index === 1 ? "Initial critique" : "Final evaluation"}
+                </p>
+                <div className="mt-1 flex items-baseline justify-between gap-3">
+                  <span className="text-lg font-semibold tabular-nums text-ink">
+                    {average ?? "—"}
                   </span>
-                  <VerdictBadge verdict={composite.passed ? "pass" : "fail"} />
+                  <span className="text-2xs tabular-nums text-faint">
+                    {count}/8 visual
+                  </span>
                 </div>
-                <ScoreMeter
-                  score={composite.score}
-                  verdict={composite.passed ? "pass" : "fail"}
-                />
               </div>
             ))}
           </div>
@@ -1140,15 +1121,13 @@ function AggregateSection({
           Scores and fixes appear here once the automated checks finish.
         </p>
       )}
-      {!skipped ? (
-        <button
-          type="button"
-          onClick={() => onSelectNode("compile")}
-          className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
-        >
-          Inspect the brief these fixes create →
-        </button>
-      ) : null}
+      <button
+        type="button"
+        onClick={() => onSelectNode("compile")}
+        className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
+      >
+        Inspect the Final prompt these fixes create →
+      </button>
     </>
   );
 }

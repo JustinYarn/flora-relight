@@ -14,12 +14,15 @@ export function VerdictLine({
   run,
   iteration,
   threshold,
+  hideAutomated = false,
 }: {
   run: Run;
   iteration?: Iteration;
   threshold: number;
+  hideAutomated?: boolean;
 }) {
   const composite = iteration?.composite;
+  const availableResultCount = iteration?.evalResults.length ?? 0;
   const sentDirectlyToHumanGrade =
     iteration?.status === "ungraded" && iteration.evalResults.length === 0;
   const meterVerdict: Verdict = composite
@@ -30,7 +33,25 @@ export function VerdictLine({
         : "fail"
     : "borderline";
 
-  const attempts = run.iterations.length;
+  const videosGenerated = run.iterations.length;
+  const scoreLabel =
+    iteration?.index === 2
+      ? "Final AI score"
+      : iteration?.index === 1
+        ? "Initial critique score"
+        : "Available AI score";
+
+  if (hideAutomated) {
+    return (
+      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 border-y border-edge py-5">
+        <span className="text-sm font-medium text-ink">Final is ready for your blind grade</span>
+        <span className="text-pretty text-2xs text-faint">
+          AI scores, verdicts, and findings unlock after your human grade is saved.
+        </span>
+        <span className="ml-auto text-2xs text-muted">Initial + Final generated</span>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 border-y border-edge py-5">
@@ -47,7 +68,7 @@ export function VerdictLine({
               className="text-2xs text-faint"
               title="Overall score (weighted composite of all checks)"
             >
-              Overall score · pass ≥ {threshold}
+              {scoreLabel} · pass ≥ {threshold}
             </span>
           </span>
           {composite.passed ? (
@@ -74,13 +95,19 @@ export function VerdictLine({
           <span className="text-3xl font-semibold tabular-nums text-faint">—</span>
           <span className="text-2xs text-faint">
             {iteration ? (
-              sentDirectlyToHumanGrade ? (
+              availableResultCount > 0 ? (
+                `${availableResultCount} AI result${
+                  availableResultCount === 1 ? "" : "s"
+                } available · no aggregate score recorded`
+              ) : sentDirectlyToHumanGrade ? (
                 "automated scoring not run · awaiting your grade"
-              ) : (
+              ) : iteration.status === "running" ? (
                 <span className="animate-pulse">scoring…</span>
+              ) : (
+                "evaluation stopped before a score was recorded"
               )
             ) : (
-              "waiting for the first attempt"
+              "waiting for the initial video"
             )}
           </span>
         </span>
@@ -88,19 +115,24 @@ export function VerdictLine({
 
       <span className="ml-auto flex items-baseline gap-4 text-sm text-muted">
         <span className="tabular-nums">
-          {attempts} attempt{attempts === 1 ? "" : "s"}
+          {videosGenerated >= 2
+            ? "Initial + Final generated"
+            : videosGenerated === 1
+              ? "Initial generated"
+              : "Preparing initial"}
         </span>
-        {run.bestIterationIndex !== undefined ? (
-          <span>
-            best <span className="text-accent">v{run.bestIterationIndex} ★</span>
-          </span>
-        ) : null}
         {run.cost ? (
           <span
             className="text-2xs tabular-nums text-faint"
-            title="What this run would cost against live APIs — mock mode spends $0"
+            title={
+              run.live
+                ? "Provider spend recorded for this Lamp run"
+                : "What this simulated run would cost against live APIs"
+            }
           >
-            est. live cost {formatUsd(run.cost.estimatedUsd)} · mock $0.00
+            {run.live
+              ? `actual spend ${formatUsd(run.cost.actualUsd)}`
+              : `est. live cost ${formatUsd(run.cost.estimatedUsd)} · mock $0.00`}
           </span>
         ) : null}
       </span>

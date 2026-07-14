@@ -9,6 +9,10 @@ import type {
   RunExecutionStatus,
 } from "@/lib/types";
 import { assertRunId } from "@/lib/server/runstore";
+import {
+  isLampApprovalReplayTransition,
+  LAMP_USER_ACTION_REQUIRED_PREFIX,
+} from "@/lib/server/run-execution-resume";
 import { createHash } from "node:crypto";
 
 const EXECUTION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
@@ -21,8 +25,9 @@ const PHASE_RANK: Record<RunExecutionPhase, number> = {
   queued: 0,
   preparing: 1,
   video_generation: 2,
-  finalizing: 3,
-  complete: 4,
+  evaluating: 3,
+  finalizing: 4,
+  complete: 5,
 };
 
 const STATUS_TRANSITIONS: Record<
@@ -37,7 +42,14 @@ const STATUS_TRANSITIONS: Record<
   ]),
   running: new Set([
     "running",
+    "user_action_required",
     "awaiting_review",
+    "failed",
+    "reconcile_required",
+  ]),
+  user_action_required: new Set([
+    "user_action_required",
+    "queued",
     "failed",
     "reconcile_required",
   ]),
@@ -152,6 +164,18 @@ export function assertRunExecution(execution: unknown): RunExecution {
   ) {
     throw new Error("An execution awaiting review must be complete");
   }
+  if (
+    candidate.status === "user_action_required" &&
+    (!candidate.executionId.startsWith("lamp:") ||
+      candidate.phase === "queued" ||
+      candidate.phase === "complete" ||
+      !candidate.workflowRunId ||
+      !candidate.error?.startsWith(LAMP_USER_ACTION_REQUIRED_PREFIX))
+  ) {
+    throw new Error(
+      "A Lamp execution awaiting approval must retain its active owner and reason"
+    );
+  }
 
   return candidate;
 }
@@ -189,6 +213,7 @@ export function assertRunExecutionTransition(
   if (candidate.revision !== expectedRevision + 1) {
     throw new Error("Run execution candidate must be the next revision");
   }
+  const approvalReplay = isLampApprovalReplayTransition(current, candidate);
   if (
     candidate.runId !== current.runId ||
     candidate.executionId !== current.executionId ||
@@ -201,6 +226,7 @@ export function assertRunExecutionTransition(
     throw new Error("Run execution identity fields are immutable");
   }
   if (
+    !approvalReplay &&
     current.workflowRunId !== undefined &&
     candidate.workflowRunId !== current.workflowRunId
   ) {
@@ -209,12 +235,13 @@ export function assertRunExecutionTransition(
   if (candidate.updatedAt < current.updatedAt) {
     throw new Error("Run execution updatedAt cannot move backwards");
   }
-  if (candidate.iteration < current.iteration) {
+  if (!approvalReplay && candidate.iteration < current.iteration) {
     throw new Error("Run execution iteration cannot move backwards");
   }
   // Phase order is per iteration. A later attempt intentionally resets to
   // preparing/video_generation while remaining lexicographically ahead.
   if (
+    !approvalReplay &&
     candidate.iteration === current.iteration &&
     PHASE_RANK[candidate.phase] < PHASE_RANK[current.phase]
   ) {

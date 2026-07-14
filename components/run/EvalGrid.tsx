@@ -58,7 +58,7 @@ function EvalCard({
         ) : (
           <span className="text-2xs text-faint">
             {def.id === "audio-integrity"
-              ? "not run — the bit-exact audio check runs on the winning cut after remux"
+              ? "not run — source audio is finalized and verified before each visual evaluation"
               : "not run this iteration"}
           </span>
         )}

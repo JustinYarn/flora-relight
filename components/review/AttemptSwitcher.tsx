@@ -12,10 +12,8 @@ function dotColor(status: Iteration["status"]): string {
       : "var(--fail)";
 }
 
-/**
- * Quiet row of text chips: v1 v2 v3 · Final. Selecting one drives the hero
- * and the eval rows. `activeKey` uses the page's keys: "iter-N" | "final".
- */
+/** Initial and Final are the two meaningful Lamp outputs. Legacy extra
+ * iterations remain inspectable by their version number. */
 export function AttemptSwitcher({
   run,
   activeKey,
@@ -28,35 +26,52 @@ export function AttemptSwitcher({
   if (run.iterations.length === 0) {
     return (
       <p className="text-2xs text-faint">
-        first attempt in progress — reading the clip and taking the scene inventory…
+        initial video in progress — preparing the mega prompt…
       </p>
     );
   }
 
   const chipClass = (active: boolean) =>
-    `flex items-center gap-1.5 rounded-md px-2.5 py-1 text-sm transition ${
+    `flex min-h-10 items-center gap-1.5 rounded-md px-3 py-1 text-sm transition-[color,background-color,transform] duration-150 ease-out active:scale-[0.96] ${
       active ? "bg-raised text-ink" : "text-muted hover:text-ink"
     }`;
+
+  const lampRun = run.workflowMode === "lamp" || run.workflowId === "lamp-v1";
+  // Older single-cut runs have one delivered artifact. Name that output Final
+  // instead of rendering duplicate Initial/Final controls for the same file.
+  const singleDelivered = run.iterations.length === 1 && Boolean(run.finalVideo);
 
   return (
     <div className="flex flex-wrap items-center gap-1">
       <span className="mr-2 text-2xs uppercase tracking-[0.14em] text-faint">
-        Attempts
+        Videos
       </span>
       {run.iterations.map((it) => {
-        const key = `iter-${it.index}`;
+        const lampFinal = lampRun && (singleDelivered || it.index === 2);
+        const key = lampFinal && run.finalVideo ? "final" : `iter-${it.index}`;
+        const label = lampRun
+          ? singleDelivered
+            ? "Final"
+            : it.index === 1
+              ? "Initial"
+              : it.index === 2
+                ? "Final"
+                : `v${it.index}`
+          : `v${it.index}`;
         return (
           <button
             key={key}
             onClick={() => onSelect(key)}
             className={chipClass(activeKey === key)}
+            aria-pressed={activeKey === key}
           >
             <span
               className={`h-1.5 w-1.5 rounded-full ${it.status === "running" ? "status-pulse" : ""}`}
               style={{ background: dotColor(it.status) }}
             />
-            v{it.index}
-            {run.bestIterationIndex === it.index ? (
+            {label}
+            <span className="text-2xs tabular-nums text-faint">v{it.index}</span>
+            {!lampRun && run.bestIterationIndex === it.index ? (
               <span className="text-2xs text-accent" title="best attempt">
                 ★
               </span>
@@ -64,12 +79,13 @@ export function AttemptSwitcher({
           </button>
         );
       })}
-      {run.finalVideo ? (
+      {!lampRun && run.finalVideo ? (
         <>
           <span className="px-1 text-faint">·</span>
           <button
             onClick={() => onSelect("final")}
             className={chipClass(activeKey === "final")}
+            aria-pressed={activeKey === "final"}
           >
             <span
               className="h-1.5 w-1.5 rounded-full"

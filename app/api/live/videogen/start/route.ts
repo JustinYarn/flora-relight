@@ -16,7 +16,7 @@ export async function POST(): Promise<NextResponse> {
   return NextResponse.json(
     {
       error:
-        "Direct video-generation starts are retired. Start or retry the durable run from Studio.",
+        "Direct video-generation starts are retired. Start or retry the durable run from Create.",
     },
     { status: 410 }
   );

@@ -1,17 +1,23 @@
 /**
- * RELIGHT_WORKFLOW — the default pipeline graph.
+ * LAMP_WORKFLOW — the fixed two-pass relighting method shown in the Method UI.
  *
- * Topology encodes the synthesized architecture: two-tier iteration (still
- * anchor before video), deterministic gates around the generative core,
- * a constraint ledger feeding a composite gate, feedback loop back to the
- * prompt compiler, terminal color-transfer fallback, and audio remux that
- * happens strictly outside the generative path.
+ * One source clip is generated from the mega prompt, evaluated holistically,
+ * corrected once, and generated one final time from the immutable source. Each
+ * generated cut has the original audio restored and verified before its single
+ * holistic evaluation; Final is then handed to a human grader. There is no anchor, pass gate, best-of
+ * selection, plateau loop, or fallback in Lamp.
  */
 
-import type { PipelineEdge, PipelineNode, WorkflowDefinition } from "@/lib/types";
+import { FLORA_WORKFLOW } from "./flora-workflow-def.ts";
+import type {
+  PipelineEdge,
+  PipelineNode,
+  WorkflowDefinition,
+  WorkflowMode,
+} from "@/lib/types";
 
-const COL = 230; // horizontal rhythm
-const MID = 320; // spine y
+const COL = 230;
+const MID = 320;
 
 const nodes: PipelineNode[] = [
   {
@@ -19,277 +25,205 @@ const nodes: PipelineNode[] = [
     kind: "input",
     label: "Source Video",
     description:
-      "10s webcam clip — the immutable source of truth. Every iteration regenerates from these pixels, never from a previous generation.",
+      "The immutable source clip. Both generations start from this same video; Lamp never generates the final from the pixels of the initial result.",
     position: { x: 0, y: MID },
   },
   {
     id: "ingest",
     kind: "process",
-    label: "Ingest & split audio",
+    label: "Protect original audio",
     description:
-      "Audio is split off and SHA-256-hashed before anything generative runs — it never enters the model path.",
+      "The original audio is isolated and fingerprinted before generation so model audio can be discarded and the source track restored unchanged.",
     position: { x: COL, y: MID },
-  },
-  {
-    id: "manifest",
-    kind: "process",
-    label: "Scene inventory",
-    description:
-      "Structured inventory (person, wardrobe, background, camera) extracted once. Ground truth for evals — never prompt filler.",
-    position: { x: COL * 2, y: MID },
-  },
-  {
-    id: "anchor",
-    kind: "generate",
-    label: "Look Anchor",
-    description:
-      "Stage A: relight one reference frame with the image model — cheap still-tier iteration before any video spend.",
-    providerId: "gemini",
-    position: { x: COL * 3, y: MID },
-  },
-  {
-    id: "anchor-gate",
-    kind: "gate",
-    label: "Approve the look",
-    description:
-      "Still-tier checks (identity, wardrobe, lighting drama) must approve the anchor before video generation is unlocked.",
-    position: { x: COL * 4, y: MID },
   },
   {
     id: "compile",
     kind: "process",
-    label: "Generation brief",
+    label: "Compile mega prompt",
     description:
-      "Deterministic compiler: immutable locks + lighting directive + active corrections from the constraint ledger. Same state → same bytes.",
-    position: { x: COL * 5, y: MID },
+      "Builds the initial generation brief from the fixed preservation locks. After the first critique, it compiles one final brief containing every actionable correction.",
+    position: { x: COL * 2, y: MID },
   },
   {
     id: "videogen",
     kind: "generate",
-    label: "Video Generation",
+    label: "Generate Initial, then Final",
     description:
-      "The video model as lighting propagator: original video (structure) + approved anchor (look) + compiled prompt + pinned seed.",
+      "Runs exactly twice: Initial from the mega prompt, then Final from the original source plus the single consolidated correction brief.",
     providerId: "omni",
-    position: { x: COL * 6, y: MID },
-  },
-  {
-    id: "conform",
-    kind: "process",
-    label: "Normalize output",
-    description:
-      "Normalize the returned stream (fps, timebase, dimensions) so frame indices line up for every comparison downstream.",
-    position: { x: COL * 7, y: MID },
-  },
-  {
-    id: "sample",
-    kind: "process",
-    label: "Sample frames",
-    description:
-      "Matched before/after frames at fixed percentiles (plus event-picked frames in real mode — drift hides in the hardest frames).",
-    position: { x: COL * 8, y: MID },
-  },
-  {
-    id: "eval-align",
-    kind: "evaluate",
-    label: "Timing matches",
-    description:
-      "Deterministic pre-gate: frame correlation must peak at offset 0, else every index-locked comparison silently lies.",
-    evalId: "temporal-alignment",
-    position: { x: COL * 9, y: -60 },
+    position: { x: COL * 3, y: MID },
   },
   {
     id: "eval-identity",
     kind: "evaluate",
     label: "Same person",
-    description: "Hard gate — same person on the WORST frame, not just on average.",
+    description:
+      "Checks identity preservation across the complete source and candidate videos.",
     evalId: "identity-preservation",
-    position: { x: COL * 9, y: 18 },
+    position: { x: COL * 4, y: 18 },
   },
   {
     id: "eval-skin",
     kind: "evaluate",
-    label: "Natural skin (no airbrushing)",
+    label: "Natural skin",
     description:
-      "Hard gate — detects beautification, smoothing, waxiness, and apparent-age shift; skin structure must ship at original strength once illumination is factored out.",
+      "Checks for beautification, smoothing, waxiness, texture loss, and apparent-age changes.",
     evalId: "skin-texture-age",
-    position: { x: COL * 9, y: 96 },
+    position: { x: COL * 4, y: 96 },
   },
   {
     id: "eval-appearance",
     kind: "evaluate",
     label: "Hair & clothing unchanged",
     description:
-      "Hard gate — blind-inventory diff: each judge lists garments/accessories independently, code diffs the lists.",
+      "Checks that hair, wardrobe, and accessories remain faithful to the source.",
     evalId: "appearance-fidelity",
-    position: { x: COL * 9, y: 174 },
+    position: { x: COL * 4, y: 174 },
   },
   {
     id: "eval-background",
     kind: "evaluate",
     label: "Room unchanged",
     description:
-      "Person-masked comparison; suspicious tiles adjudicated as lighting-explainable vs object change.",
+      "Checks that background objects, geometry, and scene content remain unchanged.",
     evalId: "background-fidelity",
-    position: { x: COL * 9, y: 252 },
+    position: { x: COL * 4, y: 252 },
   },
   {
     id: "eval-lighting-delta",
     kind: "evaluate",
     label: "Lighting clearly better",
     description:
-      "Anti-degenerate hard gate: the relight must measurably beat the original, blocking near-copy outputs.",
+      "Checks that the intended relight is visible and successful rather than a near-copy of the source.",
     evalId: "lighting-quality-delta",
-    position: { x: COL * 9, y: 330 },
-  },
-  {
-    id: "eval-lighting-anchor",
-    kind: "evaluate",
-    label: "Matches approved look",
-    description:
-      "Does the video hold the approved Look Anchor's key direction, intensity, and mood?",
-    evalId: "lighting-match-to-anchor",
-    position: { x: COL * 9, y: 408 },
+    position: { x: COL * 4, y: 330 },
   },
   {
     id: "eval-motion",
     kind: "evaluate",
-    label: "Movement & lips in sync",
+    label: "Movement & lips preserved",
     description:
-      "Hard gate — mouth and gesture timing vs source; valid precisely because the delivered audio IS the original.",
+      "Checks the complete performance for altered motion, gesture, expression, or mouth timing.",
     evalId: "motion-lipsync",
-    position: { x: COL * 9, y: 486 },
+    position: { x: COL * 4, y: 408 },
   },
   {
     id: "eval-temporal",
     kind: "evaluate",
-    label: "No flicker",
-    description: "Flicker and drift across frames — illumination must hold steady, not pulse.",
+    label: "No flicker or drift",
+    description:
+      "Checks the full candidate for illumination flicker, texture boiling, popping, and temporal drift.",
     evalId: "temporal-stability",
-    position: { x: COL * 9, y: 564 },
+    position: { x: COL * 4, y: 486 },
   },
   {
     id: "eval-halluc",
     kind: "evaluate",
     label: "Nothing invented",
     description:
-      "Hard gate — scans for invented objects, openings, light fixtures, warped geometry, or melted texture.",
+      "Checks for invented objects, warped geometry, melted texture, and other generative artifacts.",
     evalId: "hallucination-artifacts",
-    position: { x: COL * 9, y: 642 },
+    position: { x: COL * 4, y: 564 },
   },
   {
     id: "ledger",
     kind: "aggregate",
-    label: "Fix list",
+    label: "One consolidated critique",
     description:
-      "Merges judge verdicts, dedupes violations into canonical corrective clauses, tracks resolution across iterations.",
-    position: { x: COL * 10, y: MID },
-  },
-  {
-    id: "gate",
-    kind: "gate",
-    label: "Pass / retry decision",
-    description:
-      "Composite ≥ threshold AND every hard gate green. Fail feeds corrections back to the compiler; exhaustion routes to fallback.",
-    position: { x: COL * 11, y: MID },
-  },
-  {
-    id: "fallback",
-    kind: "process",
-    label: "Safe fallback",
-    description:
-      "Terminal safety net: temporally smoothed color transfer from the best generation applied to ORIGINAL pixels. Exact identity, lower drama ceiling — always labeled.",
-    position: { x: COL * 11, y: 560 },
+      "Collects all eight visual findings from one holistic evaluation call. After Initial it writes one correction set; after Final it stores the AI grades for comparison.",
+    position: { x: COL * 5, y: MID },
   },
   {
     id: "remux",
     kind: "process",
-    label: "Original audio restored",
+    label: "Restore source audio",
     description:
-      "Stream-copy the original audio onto the winning video, re-hash, and verify against the ingest hash.",
-    position: { x: COL * 12, y: MID },
+      "Runs after each generation: discards any generated audio and restores the original source track onto Initial and Final.",
+    position: { x: COL * 4, y: MID },
   },
   {
     id: "eval-audio",
     kind: "evaluate",
-    label: "Audio Integrity",
+    label: "Verify audio integrity",
     description:
-      "Deterministic post-remux gate: the delivered audio hash must equal the ingest hash bit-for-bit.",
+      "Deterministically verifies each finalized cut before any visual evaluation. A duration, content, or silent-source mismatch fails closed.",
     evalId: "audio-integrity",
-    position: { x: COL * 13, y: MID },
+    position: { x: COL * 5, y: MID },
   },
   {
     id: "review",
     kind: "output",
-    label: "Human Review",
+    label: "Blind human grade",
     description:
-      "Reviewer sees the best iteration, eval evidence, confidence flags, and any fallback label before sign-off.",
-    position: { x: COL * 14, y: MID },
+      "You grade the Final without seeing the AI scores first, then compare your result with the Final evaluation per video and per rubric.",
+    position: { x: COL * 8, y: MID },
   },
 ];
+
+const visualEvalNodeIds = [
+  "eval-identity",
+  "eval-skin",
+  "eval-appearance",
+  "eval-background",
+  "eval-lighting-delta",
+  "eval-motion",
+  "eval-temporal",
+  "eval-halluc",
+] as const;
 
 const edges: PipelineEdge[] = [
   { id: "e-src-ingest", source: "src", target: "ingest" },
-  { id: "e-ingest-manifest", source: "ingest", target: "manifest" },
-  { id: "e-manifest-anchor", source: "manifest", target: "anchor" },
-  { id: "e-anchor-anchorgate", source: "anchor", target: "anchor-gate" },
-  { id: "e-anchorgate-compile", source: "anchor-gate", target: "compile" },
+  { id: "e-ingest-compile", source: "ingest", target: "compile" },
   { id: "e-compile-videogen", source: "compile", target: "videogen" },
-  { id: "e-videogen-conform", source: "videogen", target: "conform" },
-  { id: "e-conform-align", source: "conform", target: "eval-align" },
-  { id: "e-align-ledger", source: "eval-align", target: "ledger" },
-  { id: "e-conform-sample", source: "conform", target: "sample" },
-  { id: "e-sample-identity", source: "sample", target: "eval-identity" },
-  { id: "e-sample-skin", source: "sample", target: "eval-skin" },
-  { id: "e-sample-appearance", source: "sample", target: "eval-appearance" },
-  { id: "e-sample-background", source: "sample", target: "eval-background" },
-  { id: "e-sample-lighting-delta", source: "sample", target: "eval-lighting-delta" },
-  { id: "e-sample-lighting-anchor", source: "sample", target: "eval-lighting-anchor" },
-  { id: "e-sample-motion", source: "sample", target: "eval-motion" },
-  { id: "e-sample-temporal", source: "sample", target: "eval-temporal" },
-  { id: "e-sample-halluc", source: "sample", target: "eval-halluc" },
-  { id: "e-identity-ledger", source: "eval-identity", target: "ledger" },
-  { id: "e-skin-ledger", source: "eval-skin", target: "ledger" },
-  { id: "e-appearance-ledger", source: "eval-appearance", target: "ledger" },
-  { id: "e-background-ledger", source: "eval-background", target: "ledger" },
-  { id: "e-lighting-delta-ledger", source: "eval-lighting-delta", target: "ledger" },
-  { id: "e-lighting-anchor-ledger", source: "eval-lighting-anchor", target: "ledger" },
-  { id: "e-motion-ledger", source: "eval-motion", target: "ledger" },
-  { id: "e-temporal-ledger", source: "eval-temporal", target: "ledger" },
-  { id: "e-halluc-ledger", source: "eval-halluc", target: "ledger" },
-  { id: "e-ledger-gate", source: "ledger", target: "gate" },
-  { id: "e-gate-remux", source: "gate", target: "remux", label: "all checks pass" },
-  {
-    id: "e-gate-compile",
-    source: "gate",
-    target: "compile",
-    label: "fixes",
-    isFeedbackLoop: true,
-  },
-  {
-    id: "e-gate-fallback",
-    source: "gate",
-    target: "fallback",
-    label: "loop exhausted",
-    isFeedbackLoop: true,
-  },
-  { id: "e-fallback-review", source: "fallback", target: "review" },
+  { id: "e-videogen-remux", source: "videogen", target: "remux" },
   { id: "e-remux-audio", source: "remux", target: "eval-audio" },
-  { id: "e-audio-review", source: "eval-audio", target: "review" },
+  ...visualEvalNodeIds.map((nodeId) => ({
+    id: `e-audio-${nodeId}`,
+    source: "eval-audio",
+    target: nodeId,
+  })),
+  ...visualEvalNodeIds.map((nodeId) => ({
+    id: `e-${nodeId}-ledger`,
+    source: nodeId,
+    target: "ledger",
+  })),
+  {
+    id: "e-ledger-compile",
+    source: "ledger",
+    target: "compile",
+    label: "one correction pass",
+    isFeedbackLoop: true,
+  },
+  {
+    id: "e-ledger-review",
+    source: "ledger",
+    target: "review",
+    label: "Final AI grades saved",
+  },
 ];
 
-export const RELIGHT_WORKFLOW: WorkflowDefinition = {
-  id: "relight-v1",
-  name: "Flora Relight Pipeline",
+export const LAMP_WORKFLOW: WorkflowDefinition = {
+  id: "lamp-v1",
+  name: "Lamp two-pass relight",
   description:
-    "Two-tier relighting loop: still-tier Look Anchor, video-tier lighting propagation, dual-judge evals with measured confidence, constraint-ledger corrections, terminal color-transfer fallback, and audio that never touches the generative path.",
+    "Generate Initial from the mega prompt, restore and verify its source audio, critique the whole video once, then repeat that fixed finalization and evaluation sequence for Final before blind human grading.",
   nodes,
   edges,
   config: {
-    maxIterations: 4,
+    maxIterations: 2,
     compositePassThreshold: 75,
-    judges: ["claude", "gemini"],
-    frameTimestamps: [0.5, 2.5, 5, 7.5, 9.5],
-    keyframeFirst: true,
-    plateauMinDelta: 3,
+    judges: ["gemini"],
+    frameTimestamps: [],
+    keyframeFirst: false,
+    plateauMinDelta: 0,
   },
 };
+
+/** Legacy import kept for components that have not yet selected a mode. */
+export const RELIGHT_WORKFLOW = LAMP_WORKFLOW;
+
+export function workflowForMode(mode: WorkflowMode): WorkflowDefinition {
+  return mode === "flora" ? FLORA_WORKFLOW : LAMP_WORKFLOW;
+}
+
+export { FLORA_WORKFLOW };

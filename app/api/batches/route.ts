@@ -89,6 +89,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
         runIds: current.runIds,
         concurrency: current.concurrency,
         budgetUsd: current.budgetUsd,
+        workflowMode: current.workflowMode,
       };
     })
   );

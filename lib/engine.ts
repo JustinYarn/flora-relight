@@ -20,8 +20,18 @@ import {
   getScenarioOutcome,
   MOCK_MANIFEST,
 } from "@/lib/mock/scenario";
-import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
-import { estimateRun, formatUsd, judgeCallUsd, PRICE_TABLE } from "@/lib/cost";
+import { workflowForMode } from "@/lib/workflow-def";
+import {
+  estimateLampRun,
+  estimateRun,
+  formatUsd,
+  judgeCallUsd,
+  PRICE_TABLE,
+} from "@/lib/cost";
+import {
+  lampCompositeForResults,
+  LAMP_VISUAL_EVAL_DEFS,
+} from "@/lib/lamp-evaluation";
 import { getEvalDef } from "@/lib/prompts/eval-defs";
 import {
   canonicalLiveAnchorPrompt,
@@ -289,6 +299,249 @@ const LOOP_NODES = [
   "gate",
 ];
 
+const LAMP_EVAL_NODE_BY_ID: Record<string, string> = {
+  "identity-preservation": "eval-identity",
+  "skin-texture-age": "eval-skin",
+  "appearance-fidelity": "eval-appearance",
+  "background-fidelity": "eval-background",
+  "lighting-quality-delta": "eval-lighting-delta",
+  "motion-lipsync": "eval-motion",
+  "temporal-stability": "eval-temporal",
+  "hallucination-artifacts": "eval-halluc",
+};
+
+function mockLampEvalResult(
+  evalId: string,
+  iteration: 1 | 2,
+  scenarioIteration: number,
+  previousResults: EvalResult[]
+): EvalResult {
+  const definition = getEvalDef(evalId);
+  const outcome = getScenarioOutcome(scenarioIteration, evalId);
+  const score = outcome?.score ?? 100;
+  const verdict = verdictFor(
+    score,
+    definition.passThreshold,
+    definition.borderlineThreshold
+  );
+  const previous = previousResults.find((result) => result.evalId === evalId);
+  const violations = outcome?.violations.map((violation) => ({ ...violation })) ?? [];
+  return {
+    evalId,
+    iteration,
+    verdicts: [
+      {
+        judge: "gemini",
+        score,
+        verdict,
+        violations,
+        reasoning:
+          "Simulated Lamp whole-video evaluation for layout and workflow testing; no provider was called.",
+      },
+    ],
+    score,
+    confidence: 0.9,
+    verdict,
+    violations,
+    ...(previous ? { deltaFromPrevious: round1(score - previous.score) } : {}),
+  };
+}
+
+/**
+ * Zero-cost Lamp rehearsal. It mirrors the fixed live contract closely enough
+ * to exercise the new layout without suggesting that mock evidence is a real
+ * provider result: exactly two generations, one all-results critique after
+ * each, and generation 2 is always the final.
+ */
+async function runLampMockWorkflow(input: {
+  runId: string;
+  original: VideoAsset;
+  instant: boolean;
+  pace: (minMs?: number, maxMs?: number) => Promise<void>;
+}): Promise<void> {
+  const { runId, original, instant, pace } = input;
+  const providers = getProviders("mock", { instant });
+  const estimate = estimateLampRun(original.durationSec);
+  const encode = (iteration: number) =>
+    encodeScenarioIteration(original.id, iteration);
+
+  mutateRun(runId, (run) => {
+    run.live = false;
+    run.cost = {
+      estimatedUsd: estimate.totalUsd,
+      actualUsd: 0,
+      items: estimate.items.map((item) => ({
+        label: item.label,
+        usd: item.usd,
+        estimated: true,
+      })),
+    };
+    delete run.bestIterationIndex;
+    delete run.finalVideo;
+    delete run.fallback;
+  });
+
+  setNode(runId, "src", "running");
+  await pace(120, 240);
+  setNode(runId, "src", "succeeded", "source locked");
+  setNode(runId, "ingest", "running");
+  await pace(120, 240);
+  setNode(runId, "ingest", "succeeded", "original audio sealed");
+  for (const nodeId of [
+    "manifest",
+    "anchor",
+    "anchor-gate",
+    "conform",
+    "sample",
+    "eval-align",
+    "eval-lighting-anchor",
+    "gate",
+    "fallback",
+  ]) {
+    setNode(
+      runId,
+      nodeId,
+      "skipped",
+      nodeId === "eval-align"
+        ? "not available in Lamp"
+        : nodeId === "eval-lighting-anchor"
+          ? "not applicable without a Look Anchor"
+          : "not part of Lamp's fixed two-pass method"
+    );
+  }
+
+  let previousPrompt: MegaPrompt | undefined;
+  let previousResults: EvalResult[] = [];
+  for (const iteration of [1, 2] as const) {
+    setNode(runId, "compile", "running");
+    const megaPrompt =
+      iteration === 1 || !previousPrompt
+        ? initialMegaPrompt("lamp")
+        : nextMegaPrompt(
+            previousPrompt,
+            previousResults.filter((result) => result.evalId !== "audio-integrity"),
+            "lamp"
+          );
+    mutateRun(runId, (run) => {
+      run.iterations.push({
+        index: iteration,
+        megaPrompt,
+        beforeFrames: [],
+        afterFrames: [],
+        evalResults: [],
+        status: "running",
+      });
+    });
+    await pace(120, 260);
+    setNode(
+      runId,
+      "compile",
+      "succeeded",
+      iteration === 1 ? "initial mega prompt" : "critique compiled into final prompt"
+    );
+
+    setNode(runId, "videogen", "running", `generation ${iteration} of 2`);
+    const generated = await providers.videoGen.generate({
+      originalVideo: original,
+      megaPrompt,
+      seed: 133742,
+      iteration: encode(iteration),
+    });
+    const video: VideoAsset = {
+      ...generated.video,
+      label: iteration === 1 ? "Lamp initial video" : "Lamp final video",
+    };
+    patchIteration(runId, iteration, (item) => {
+      item.generatedVideo = video;
+    });
+    setNode(runId, "videogen", "succeeded", `generation ${iteration} of 2`);
+
+    const phaseLabel =
+      iteration === 1 ? "whole-video critique" : "final whole-video evaluation";
+    for (const definition of LAMP_VISUAL_EVAL_DEFS) {
+      const nodeId = LAMP_EVAL_NODE_BY_ID[definition.id];
+      if (nodeId) setNode(runId, nodeId, "running", phaseLabel);
+    }
+    setNode(runId, "ledger", "running", phaseLabel);
+    await pace(220, 420);
+    const visualResults = LAMP_VISUAL_EVAL_DEFS.map((definition) =>
+      mockLampEvalResult(
+        definition.id,
+        iteration,
+        encode(iteration),
+        previousResults
+      )
+    );
+    const audioResult = deterministicResult(
+      "audio-integrity",
+      iteration,
+      getScenarioOutcome(encode(iteration), "audio-integrity"),
+      previousResults
+    );
+    const evaluationResults = [...visualResults, audioResult];
+    patchIteration(runId, iteration, (item) => {
+      item.evalResults = evaluationResults;
+      item.composite = lampCompositeForResults(evaluationResults);
+      item.status = "ungraded";
+    });
+    for (const result of visualResults) {
+      const nodeId = LAMP_EVAL_NODE_BY_ID[result.evalId];
+      if (nodeId) {
+        setNode(
+          runId,
+          nodeId,
+          "succeeded",
+          `${Math.round(result.score)} · ${result.verdict}`
+        );
+      }
+    }
+    setNode(
+      runId,
+      "ledger",
+      "succeeded",
+      iteration === 1
+        ? `${visualResults.flatMap((result) => result.violations).length} findings compiled together`
+        : "final evaluation saved"
+    );
+    log(
+      runId,
+      "info",
+      iteration === 1
+        ? "Lamp critiqued the complete initial video once and compiled every finding into the final mega prompt."
+        : "Lamp completed the final whole-video evaluation. This is the AI evidence used after blind human grading.",
+      "ledger"
+    );
+    previousPrompt = megaPrompt;
+    previousResults = evaluationResults;
+  }
+
+  const finalIteration = getRun(runId)?.iterations.find((item) => item.index === 2);
+  if (!finalIteration?.generatedVideo) {
+    throw new Error("Lamp mock final generation was not saved.");
+  }
+  const finalVideo: VideoAsset = {
+    ...finalIteration.generatedVideo,
+    id: uid("video"),
+    kind: "final",
+    hasAudio: true,
+    label: "Lamp final — original audio remuxed",
+  };
+  setNode(runId, "remux", "succeeded", "original audio restored");
+  setNode(runId, "eval-audio", "succeeded", "100 · pass");
+  setNode(runId, "review", "running", "awaiting your blind grade");
+  mutateRun(runId, (run) => {
+    delete run.bestIterationIndex;
+    run.finalVideo = finalVideo;
+    run.status = "awaiting-review";
+  });
+  log(
+    runId,
+    "info",
+    "Lamp demo complete: exactly two generations; the second is the final. Actual provider spend: $0.00.",
+    "review"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The engine
 // ---------------------------------------------------------------------------
@@ -305,7 +558,9 @@ export async function runWorkflow(
   const run0 = getRun(runId);
   if (!run0) return;
   const original = run0.originalVideo;
-  const config = RELIGHT_WORKFLOW.config;
+  const workflowMode =
+    run0.workflowMode ?? (run0.workflowId === "lamp-v1" ? "lamp" : "flora");
+  const config = workflowForMode(workflowMode).config;
   // The instant demo run is mock by definition (synthetic clip, zero-latency
   // replay); everything else follows the store's hydrated mode.
   const mode: "mock" | "live" = instant ? "mock" : useAppStore.getState().mode;
@@ -314,6 +569,21 @@ export async function runWorkflow(
     throw new Error(
       "Live browser execution is disabled. Durable server Workflows own all provider dispatch."
     );
+  }
+  if (workflowMode === "lamp") {
+    try {
+      await runLampMockWorkflow({ runId, original, instant, pace });
+    } catch (error) {
+      log(runId, "error", `Lamp demo error: ${errText(error)}`);
+      mutateRun(runId, (run) => {
+        run.status = "failed";
+        for (const state of Object.values(run.nodeStates)) {
+          if (state.status === "running") state.status = "failed";
+          if (state.status === "queued") state.status = "idle";
+        }
+      });
+    }
+    return;
   }
   const liveCtx: LiveRunContext | undefined = live
     ? {
@@ -334,7 +604,7 @@ export async function runWorkflow(
       runId,
       "error",
       `Clip is ${original.durationSec.toFixed(2)}s — the video model accepts at most 10s. ` +
-        `Upload it through the Studio dropzone so it gets auto-trimmed, then run again. ` +
+        `Upload it through the Create dropzone so it gets auto-trimmed, then run again. ` +
         `Nothing was spent on this run.`
     );
     mutateRun(runId, (r) => {
@@ -565,8 +835,8 @@ export async function runWorkflow(
       setNode(runId, "compile", "running");
       const megaPrompt =
         i === 1 || !prevMegaPrompt
-          ? initialMegaPrompt()
-          : nextMegaPrompt(prevMegaPrompt, prevResults);
+          ? initialMegaPrompt("flora")
+          : nextMegaPrompt(prevMegaPrompt, prevResults, "flora");
       const activeCorrections = megaPrompt.corrections.filter((c) => !c.resolved).length;
       mutateRun(runId, (r) => {
         r.iterations.push({

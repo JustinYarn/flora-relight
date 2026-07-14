@@ -109,7 +109,13 @@ export async function beginPaidOperation(
   // Checked only for a NEW claim. Returning an already-completed response is
   // non-billed and remains safe after approval expiry.
   try {
-    assertPaidOperationAuthorized(input.run, input.kind, input.iteration);
+    assertPaidOperationAuthorized(
+      input.run,
+      input.kind,
+      input.iteration,
+      input.evalId,
+      input.id
+    );
   } catch (error) {
     throw new PaidOperationAuthorizationError(
       error instanceof Error ? error.message : "Live spend is not authorized."

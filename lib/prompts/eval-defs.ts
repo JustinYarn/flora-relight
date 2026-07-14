@@ -85,10 +85,10 @@ export const EVAL_DEFS: EvalDefinition[] = [
   // -------------------------------------------------------------------------
   {
     id: "audio-integrity",
-    name: "Original audio untouched",
+    name: "Source audio preserved",
     category: "audio",
     description:
-      "Confirms the sound in the final video is exactly the sound from the original clip — the AI never hears or touches the audio.",
+      "Confirms each generated cut delivers the canonical source track unchanged, or stays silent when the source is silent; provider-generated sound is never delivered.",
     method: "deterministic",
     hardGate: true,
     weight: 0.02,
@@ -96,7 +96,7 @@ export const EVAL_DEFS: EvalDefinition[] = [
     borderlineThreshold: 99,
     promptTemplate: "",
     deterministicNote:
-      "No prompt — this eval never consults a model. Audio is demuxed at ingest and SHA-256-hashed; the video-generation adapter interface literally does not accept audio, so it cannot enter the generative path. After the winning iteration is selected, the original stream is remuxed onto the generated video via stream-copy (no re-encode) and re-hashed. Score is binary: 100 if the post-remux hash matches the ingest hash bit-for-bit and audio duration matches the container within one frame; 0 otherwise. Hard gate — any mismatch fails the iteration outright. This is a structural guarantee, not a judgment call.",
+      "No model grades this check. Ingest extracts a canonical source track (stream-copy when container-compatible; one ingest transcode otherwise). After each generation, Lamp discards provider sound and stream-copies that canonical track onto the candidate, or strips all audio when the source is silent. It then requires matching audio presence, raw/final/source timeline agreement within 50 ms, and matching source/final audio-bitstream MD5 over the aligned complete timeline. Score is binary: 100 only when every invariant passes; 0 otherwise. A failure stops before the paid visual evaluation, so it cannot become gradeable.",
   },
 
   // -------------------------------------------------------------------------

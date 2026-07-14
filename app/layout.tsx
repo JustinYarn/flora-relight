@@ -16,8 +16,9 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Flora Relight",
-  description: "Internal studio for identity-locked generative video relighting",
+  title: "Flora + Lamp",
+  description:
+    "One-pass Flora and exact two-pass Lamp video relight workflows",
 };
 
 export default function RootLayout({
@@ -30,19 +31,19 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} font-[family-name:var(--font-geist-sans)] antialiased`}
       >
-        <header className="sticky top-0 z-40 flex h-14 items-stretch gap-6 border-b border-edge bg-surface px-5">
-          <div className="flex items-baseline gap-2 self-center">
+        <header className="sticky top-0 z-40 flex min-h-14 flex-wrap items-center gap-x-4 border-b border-edge bg-surface px-4 sm:flex-nowrap sm:items-stretch sm:gap-x-5 sm:px-5">
+          <div className="flex h-14 items-center gap-2 self-center">
             <span className="text-sm font-semibold text-ink">
-              <span className="text-accent">✦</span> Flora Relight
+              <span className="text-accent">◐</span> Flora + Lamp
             </span>
             <span className="hidden text-2xs text-faint sm:inline">
-              relight studio
+              relight workspace
             </span>
           </div>
-          <div className="flex flex-1 items-stretch justify-center">
+          <div className="order-3 flex h-12 w-full items-stretch justify-start overflow-hidden sm:order-none sm:h-auto sm:w-auto sm:flex-1 sm:justify-center">
             <NavLinks />
           </div>
-          <div className="flex shrink-0 items-center gap-3 self-center whitespace-nowrap">
+          <div className="ml-auto flex shrink-0 items-center gap-3 self-center whitespace-nowrap">
             {/* Persistence dot + spend chip + MOCK/LIVE badge (client — reads store.mode). */}
             <SessionCostChip />
           </div>

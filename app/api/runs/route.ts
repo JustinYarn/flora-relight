@@ -16,10 +16,12 @@ import type {
   FrameSample,
   HumanCheckGrade,
   HumanGrade,
+  PaidOperation,
   ProviderOperation,
   Run,
   RunExecution,
   VideoAsset,
+  WorkflowMode,
 } from "@/lib/types";
 import { isValidRunId } from "@/lib/server/runstore";
 import {
@@ -27,14 +29,23 @@ import {
   type PaidOperationCostEntry,
   type RunPageCursor,
 } from "@/lib/server/storage";
-import { buildRun } from "@/lib/run-factory";
+import { buildRun, freshNodeStates } from "@/lib/run-factory";
+import { workflowForMode } from "@/lib/workflow-def";
 import {
   createSpendApproval,
   hasReusableFirstCutApproval,
+  hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
-import { estimateFirstCut, estimateRun } from "@/lib/cost";
+import { estimateFirstCut, estimateLampRun, estimateRun } from "@/lib/cost";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
+import {
+  compileLampFinalPrompt,
+  isLampEvaluationArtifact,
+  lampEvaluationOperationId,
+  projectLampEvaluationForRead,
+  type LampEvaluationArtifact,
+} from "@/lib/lamp-evaluation";
 import { readCanonicalIngestByRunId } from "@/lib/server/ingest";
 import { hasGeminiKey } from "@/lib/server/gemini";
 import { enqueueRunExecution } from "@/lib/server/run-execution-coordinator";
@@ -122,16 +133,34 @@ function parseHumanGrade(value: unknown): HumanGrade | null {
   };
 }
 
-async function enqueueFirstCut(run: Run) {
+function persistedWorkflowMode(run: Run): WorkflowMode {
+  return run.workflowMode ?? (run.workflowId === "lamp-v1" ? "lamp" : "flora");
+}
+
+async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
   const approval = run.spendApproval;
   if (!approval) throw new Error("Live spend approval was not persisted.");
   const existingExecution = await getStorage().getRunExecution(run.id);
+  if (
+    existingExecution &&
+    (existingExecution.source !== "single" ||
+      (workflowMode === "lamp") !==
+        existingExecution.executionId.startsWith("lamp:"))
+  ) {
+    throw new Error(
+      `A different durable workflow already owns this run; ${
+        workflowMode === "lamp" ? "Lamp" : "Flora"
+      } requires a fresh run id.`
+    );
+  }
   return enqueueRunExecution({
     runId: run.id,
     // Execution identity is stable across a fresh user confirmation that only
     // renews an expired approval. The approval remains the operation's spend
     // authority, but it must not strand an already-persisted queued execution.
-    executionId: existingExecution?.executionId ?? `first-cut:${run.id}`,
+    executionId:
+      existingExecution?.executionId ??
+      (workflowMode === "lamp" ? `lamp:${run.id}` : `first-cut:${run.id}`),
     source: "single",
   });
 }
@@ -275,7 +304,9 @@ function mergeServerGeneratedVideos(
         };
         candidate.iterations.push(iteration);
       } else {
-        const recoveredPrompt = initialMegaPrompt();
+        const recoveredPrompt = initialMegaPrompt(
+          persistedWorkflowMode(candidate)
+        );
         recoveredPrompt.version = operation.iteration;
         if (operation.renderedPrompt) {
           recoveredPrompt.rendered = operation.renderedPrompt;
@@ -332,6 +363,93 @@ function providerOperationMatchesExecution(
   );
 }
 
+interface LampEvaluationProjection {
+  first: PaidOperation | null;
+  final: PaidOperation | null;
+}
+
+async function readLampEvaluationProjection(
+  storage: ReturnType<typeof getStorage>,
+  runId: string
+): Promise<LampEvaluationProjection> {
+  const [first, final] = await Promise.all([
+    storage.getPaidOperation(runId, lampEvaluationOperationId(1)),
+    storage.getPaidOperation(runId, lampEvaluationOperationId(2)),
+  ]);
+  return { first, final };
+}
+
+function lampArtifact(
+  operation: PaidOperation | null,
+  iteration: 1 | 2
+): LampEvaluationArtifact | undefined {
+  return operation?.status === "completed" &&
+    isLampEvaluationArtifact(operation.result, iteration)
+    ? operation.result
+    : undefined;
+}
+
+function isLampExecution(execution: RunExecution | null | undefined): boolean {
+  return Boolean(execution?.executionId.startsWith("lamp:"));
+}
+
+function lampFinalPrompt(
+  execution: RunExecution,
+  evaluations: LampEvaluationProjection
+) {
+  const first = lampArtifact(evaluations.first, 1);
+  if (!first) return undefined;
+  return compileLampFinalPrompt(execution.renderedPrompt, first);
+}
+
+function providerOperationMatchesLampExecution(
+  operation: ProviderOperation,
+  execution: RunExecution,
+  evaluations: LampEvaluationProjection
+): boolean {
+  if (execution.inputHash !== runExecutionInputHash(execution.renderedPrompt)) {
+    return false;
+  }
+  if (operation.kind !== "video_generation") return true;
+  if (operation.iteration === 1) {
+    return providerOperationMatchesExecution(operation, execution);
+  }
+  if (operation.iteration === 2) {
+    return operation.renderedPrompt === lampFinalPrompt(execution, evaluations)?.rendered;
+  }
+  return false;
+}
+
+function mergeLampEvaluationResults(
+  candidate: Run,
+  execution: RunExecution,
+  evaluations: LampEvaluationProjection
+): void {
+  const first = lampArtifact(evaluations.first, 1);
+  const final = lampArtifact(evaluations.final, 2);
+  const finalPrompt = first ? lampFinalPrompt(execution, evaluations) : undefined;
+  const revealFinalEvidence = candidate.humanGrade !== undefined;
+  for (const [index, artifact] of [
+    [1, first],
+    [2, final],
+  ] as const) {
+    const iteration = candidate.iterations.find((item) => item.index === index);
+    if (!iteration) continue;
+    if (index === 2 && finalPrompt) iteration.megaPrompt = finalPrompt;
+    // The final paid artifact remains server-owned and is used by grade
+    // authorization, but normal reads must not prime the human grader. This
+    // also clears any browser-written/stale projection.
+    const projection = projectLampEvaluationForRead({
+      iteration: index,
+      artifact,
+      humanGradeSaved: revealFinalEvidence,
+    });
+    iteration.evalResults = projection.evalResults;
+    if (projection.composite) iteration.composite = projection.composite;
+    else delete iteration.composite;
+  }
+}
+
 function mergeCost(
   candidate: Run["cost"],
   current: Run["cost"]
@@ -359,6 +477,12 @@ function mergeCost(
  * snapshot cannot make a completed background artifact disappear from the UI.
  */
 function paidCostLabel(entry: PaidOperationCostEntry): string {
+  if (entry.id === lampEvaluationOperationId(1)) {
+    return "Lamp whole-video critique (Gemini)";
+  }
+  if (entry.id === lampEvaluationOperationId(2)) {
+    return "Lamp final whole-video evaluation (Gemini)";
+  }
   if (entry.kind === "manifest") return "Scene manifest extraction (Gemini)";
   if (entry.kind === "anchor") {
     return `Look Anchor relight v${entry.iteration ?? 1} (Gemini image edit)`;
@@ -373,22 +497,37 @@ function paidCostLabel(entry: PaidOperationCostEntry): string {
 function materializeServerResults(
   run: Run,
   paidCosts: PaidOperationCostEntry[] = [],
-  execution?: RunExecution | null
+  execution?: RunExecution | null,
+  lampEvaluations: LampEvaluationProjection = { first: null, final: null }
 ): Run {
   const materialized: Run = {
     ...run,
     iterations: run.iterations.map((iteration) => ({ ...iteration })),
+    nodeStates: { ...run.nodeStates },
+    log: [...run.log],
     cost: run.cost
       ? { ...run.cost, items: [...run.cost.items] }
       : undefined,
   };
   clearProviderTrustMarkers(materialized);
+  const lamp = isLampExecution(execution);
   const firstCutOperation = firstCutProviderOperation(materialized);
+  const secondCutOperation = materialized.providerOperations?.find(
+    (operation) =>
+      operation.kind === "video_generation" && operation.iteration === 2
+  );
   const executionBindingMismatch = Boolean(
     execution &&
       (execution.inputHash !== runExecutionInputHash(execution.renderedPrompt) ||
         (firstCutOperation &&
-          !providerOperationMatchesExecution(firstCutOperation, execution)))
+          !providerOperationMatchesExecution(firstCutOperation, execution)) ||
+        (lamp &&
+          secondCutOperation &&
+          !providerOperationMatchesLampExecution(
+            secondCutOperation,
+            execution,
+            lampEvaluations
+          )))
   );
   const durableExecution = executionBindingMismatch
     ? {
@@ -411,15 +550,17 @@ function materializeServerResults(
     ? materialized.providerOperations?.filter(
         (operation) =>
           operation.kind !== "video_generation" ||
-          operation.iteration !== 1 ||
-          providerOperationMatchesExecution(operation, execution)
+          (lamp
+            ? providerOperationMatchesLampExecution(
+                operation,
+                execution,
+                lampEvaluations
+              )
+            : operation.iteration === 1 &&
+              providerOperationMatchesExecution(operation, execution))
       )
     : materialized.providerOperations;
-  mergeServerGeneratedVideos(
-    materialized,
-    materialized,
-    artifactOperations
-  );
+  mergeServerGeneratedVideos(materialized, materialized, artifactOperations);
   // A live finalVideo was only a browser-created alias of the already-remuxed
   // generation. Prefer the exact journal-backed URL the trust marker proves.
   if (
@@ -461,20 +602,21 @@ function materializeServerResults(
   }
   if (durableExecution) {
     const execution = durableExecution;
+    const lamp = isLampExecution(execution);
     const budgetSkipped = execution.error?.startsWith("BATCH_BUDGET_SKIPPED") === true;
-    const firstCutEstimate = estimateFirstCut(
-      materialized.originalVideo.durationSec
-    );
+    const estimate = lamp
+      ? estimateLampRun(materialized.originalVideo.durationSec)
+      : estimateFirstCut(materialized.originalVideo.durationSec);
     const confirmedItems = (materialized.cost?.items ?? []).filter(
       (item) => !item.estimated
     );
     materialized.serverExecution = execution;
     materialized.live = true;
     materialized.cost = {
-      estimatedUsd: firstCutEstimate.totalUsd,
+      estimatedUsd: estimate.totalUsd,
       actualUsd: confirmedItems.reduce((sum, item) => sum + item.usd, 0),
       items: [
-        ...firstCutEstimate.items.map((item) => ({
+        ...estimate.items.map((item) => ({
           label: item.label,
           usd: item.usd,
           estimated: true,
@@ -482,10 +624,15 @@ function materializeServerResults(
         ...confirmedItems,
       ],
     };
-    const reviewed =
-      materialized.status === "approved" ||
-      materialized.status === "needs-changes";
-    if (!reviewed) {
+    const legacyReviewed =
+      !lamp &&
+      (materialized.status === "approved" ||
+        materialized.status === "needs-changes");
+    if (lamp && materialized.humanGrade) {
+      materialized.status = materialized.humanGrade.shipIt
+        ? "approved"
+        : "needs-changes";
+    } else if (!legacyReviewed) {
       materialized.status =
         execution.status === "awaiting_review"
           ? "awaiting-review"
@@ -499,7 +646,7 @@ function materializeServerResults(
     if (execution.iteration >= 1) {
       let iteration = materialized.iterations.find((item) => item.index === 1);
       if (!iteration) {
-        const megaPrompt = initialMegaPrompt();
+        const megaPrompt = initialMegaPrompt(lamp ? "lamp" : "flora");
         // RunExecution revision 1 binds the exact prompt bytes before any
         // Workflow contender can start. The provider journal is a secondary
         // replay record, not the source of truth for an as-yet queued run.
@@ -516,7 +663,6 @@ function materializeServerResults(
         materialized.iterations.sort((a, b) => a.index - b.index);
       }
       if (
-        execution.status === "awaiting_review" &&
         videoOperation?.status === "completed" &&
         videoOperation.result
       ) {
@@ -529,34 +675,84 @@ function materializeServerResults(
       }
     }
 
-    // This production cut is generation-to-human-grade only. Make every
-    // skipped automated stage explicit rather than inheriting optimistic
-    // browser state or presenting an unrun check as a pass.
-    const skipped = [
-      "manifest",
-      "anchor",
-      "anchor-gate",
-      "conform",
-      "sample",
-      "eval-align",
-      "eval-identity",
-      "eval-skin",
-      "eval-appearance",
-      "eval-background",
-      "eval-lighting-delta",
-      "eval-lighting-anchor",
-      "eval-motion",
-      "eval-temporal",
-      "eval-halluc",
-      "ledger",
-      "gate",
-      "fallback",
-    ];
+    const finalPrompt = lamp ? lampFinalPrompt(execution, lampEvaluations) : undefined;
+    if (lamp && execution.iteration >= 2 && finalPrompt) {
+      let iteration = materialized.iterations.find((item) => item.index === 2);
+      if (!iteration) {
+        iteration = {
+          index: 2,
+          megaPrompt: finalPrompt,
+          beforeFrames: [],
+          afterFrames: [],
+          evalResults: [],
+          status: "running",
+        };
+        materialized.iterations.push(iteration);
+        materialized.iterations.sort((a, b) => a.index - b.index);
+      } else {
+        iteration.megaPrompt = finalPrompt;
+      }
+      if (
+        execution.status === "awaiting_review" &&
+        secondCutOperation?.status === "completed" &&
+        secondCutOperation.result &&
+        lampArtifact(lampEvaluations.final, 2)
+      ) {
+        iteration.status = "ungraded";
+      } else if (
+        execution.status === "failed" ||
+        execution.status === "reconcile_required"
+      ) {
+        iteration.status = "failed";
+      }
+    }
+    if (lamp) {
+      mergeLampEvaluationResults(materialized, execution, lampEvaluations);
+    }
+
+    const skipped = lamp
+      ? [
+          "manifest",
+          "anchor",
+          "anchor-gate",
+          "conform",
+          "sample",
+          "eval-align",
+          "eval-lighting-anchor",
+          "gate",
+          "fallback",
+        ]
+      : [
+          "manifest",
+          "anchor",
+          "anchor-gate",
+          "conform",
+          "sample",
+          "eval-align",
+          "eval-identity",
+          "eval-skin",
+          "eval-appearance",
+          "eval-background",
+          "eval-lighting-delta",
+          "eval-lighting-anchor",
+          "eval-motion",
+          "eval-temporal",
+          "eval-halluc",
+          "ledger",
+          "gate",
+          "fallback",
+        ];
     for (const nodeId of skipped) {
       materialized.nodeStates[nodeId] = {
         nodeId,
         status: "skipped",
-        detail: "not run — first cut sent to human grading",
+        detail: lamp
+          ? nodeId === "eval-align"
+            ? "not available — deterministic frame correlation is not implemented"
+            : nodeId === "eval-lighting-anchor"
+              ? "not applicable — Lamp does not create a Look Anchor"
+              : "not part of Lamp's two-pass workflow"
+          : "not run — first cut sent to human grading",
       };
     }
     const active =
@@ -582,13 +778,22 @@ function materializeServerResults(
     materialized.nodeStates.compile = {
       nodeId: "compile",
       status: execution.iteration >= 1 ? "succeeded" : active ? "queued" : "skipped",
-      detail: execution.iteration >= 1 ? "canonical first-cut brief" : undefined,
+      detail:
+        execution.iteration >= 2 && lamp
+          ? "first critique compiled into the final mega prompt"
+          : execution.iteration >= 1
+            ? lamp
+              ? "canonical initial mega prompt"
+              : "canonical first-cut brief"
+            : undefined,
     };
     materialized.nodeStates.videogen = {
       nodeId: "videogen",
       status:
         budgetSkipped
           ? "skipped"
+          : execution.status === "user_action_required"
+            ? "queued"
           : execution.status === "awaiting_review"
           ? "succeeded"
           : execution.status === "failed" || execution.status === "reconcile_required"
@@ -599,45 +804,121 @@ function materializeServerResults(
       detail:
         budgetSkipped
           ? "not started — batch budget cap"
+          : execution.status === "user_action_required"
+            ? "paused — renew the exact Lamp approval to resume"
           : execution.status === "reconcile_required"
           ? "provider outcome needs reconciliation"
           : execution.status === "awaiting_review"
-            ? "canonical first cut ready"
-            : "server Workflow owns this stage",
+            ? lamp
+              ? "initial and final cuts are complete"
+              : "canonical first cut ready"
+            : lamp
+              ? `server Workflow owns generation ${Math.max(1, execution.iteration)} of 2`
+              : "server Workflow owns this stage",
     };
+    const firstEvaluation = lampArtifact(lampEvaluations.first, 1);
+    const finalEvaluation = lampArtifact(lampEvaluations.final, 2);
+    if (lamp) {
+      const evalNodeIds = [
+        "eval-identity",
+        "eval-skin",
+        "eval-appearance",
+        "eval-background",
+        "eval-lighting-delta",
+        "eval-motion",
+        "eval-temporal",
+        "eval-halluc",
+      ];
+      for (const nodeId of evalNodeIds) {
+        materialized.nodeStates[nodeId] = {
+          nodeId,
+          status: finalEvaluation
+            ? "succeeded"
+            : execution.status === "user_action_required"
+              ? "queued"
+            : execution.phase === "evaluating"
+              ? "running"
+              : firstEvaluation
+                ? "succeeded"
+                : "queued",
+          detail: finalEvaluation
+            ? "included in Lamp's final whole-video evaluation"
+            : execution.status === "user_action_required"
+              ? "paused — renew approval to continue the same evaluation journal"
+            : firstEvaluation
+              ? "included in Lamp's first whole-video critique"
+              : "awaiting whole-video evaluation",
+        };
+      }
+      materialized.nodeStates.ledger = {
+        nodeId: "ledger",
+        status: firstEvaluation ? "succeeded" : execution.phase === "evaluating" ? "running" : "queued",
+        detail: firstEvaluation
+          ? "all first-pass findings compiled together"
+          : "awaiting the first whole-video critique",
+      };
+    }
+    const currentAudioOperation =
+      lamp && execution.iteration >= 2 ? secondCutOperation : videoOperation;
+    const currentAudioLabel = lamp && execution.iteration >= 2 ? "Final" : "Initial";
     materialized.nodeStates.remux = {
       nodeId: "remux",
-      status: execution.status === "awaiting_review" ? "succeeded" : "queued",
+      status:
+        currentAudioOperation?.status === "completed" &&
+        currentAudioOperation.result?.audioVerified
+          ? "succeeded"
+          : execution.phase === "finalizing"
+            ? "running"
+            : "queued",
       detail:
-        execution.status === "awaiting_review"
-          ? "original audio finalized onto generated cut"
-          : undefined,
+        currentAudioOperation?.result?.audioVerified
+          ? lamp
+            ? `source audio finalized onto ${currentAudioLabel}`
+            : "source audio finalized onto generated cut"
+          : execution.phase === "finalizing"
+            ? `finalizing ${lamp ? currentAudioLabel : "generated cut"} with source audio`
+            : undefined,
     };
+    const audioOperation = currentAudioOperation;
     materialized.nodeStates["eval-audio"] = {
       nodeId: "eval-audio",
       status:
-        execution.status === "awaiting_review"
-          ? videoOperation?.result?.audioVerified
+        audioOperation?.status === "completed" && audioOperation.result
+          ? audioOperation.result.audioVerified
             ? "succeeded"
             : "failed"
-          : "queued",
+          : execution.phase === "finalizing"
+            ? "running"
+            : "queued",
       detail:
-        execution.status === "awaiting_review"
-          ? videoOperation?.result?.audioVerified
-            ? "original audio verified"
-            : "audio verification needs review"
-          : undefined,
+        audioOperation?.status === "completed" && audioOperation.result
+          ? audioOperation.result.audioVerified
+            ? `${lamp ? currentAudioLabel : "generated cut"} source audio verified before evaluation`
+            : "audio verification failed closed"
+          : execution.phase === "finalizing"
+            ? "verifying the complete source audio timeline"
+            : undefined,
     };
     materialized.nodeStates.review = {
       nodeId: "review",
       status:
-        reviewed
+        (lamp ? Boolean(materialized.humanGrade) : legacyReviewed)
           ? "succeeded"
           : execution.status === "awaiting_review"
             ? "queued"
             : "idle",
-      detail: reviewed ? materialized.review?.decision : "human grade required",
+      detail: lamp
+        ? materialized.humanGrade
+          ? materialized.humanGrade.shipIt
+            ? "human grade saved — ship"
+            : "human grade saved — do not ship"
+          : "human grade required"
+        : legacyReviewed
+          ? materialized.review?.decision
+          : "human review required",
     };
+    // Durable Lamp resolves v2 explicitly and durable legacy jobs are one-cut;
+    // neither path may inherit a browser-authored best-of marker.
     delete materialized.bestIterationIndex;
     delete materialized.finalVideo;
     delete materialized.fallback;
@@ -652,18 +933,24 @@ function materializeServerResults(
         budgetSkipped
           ? `${logKey}: skipped — batch budget reached before this clip was dispatched; actual spend $0.00`
           : execution.status === "awaiting_review"
-          ? `${logKey}: canonical first cut generated and audio finalized; automated quality checks were not run — awaiting human grading`
+          ? lamp
+            ? `${logKey}: Lamp generated the initial cut, critiqued it as a whole, generated the final cut, and completed the final evaluation — awaiting human grading`
+            : `${logKey}: canonical first cut generated and audio finalized; automated quality checks were not run — awaiting human grading`
           : execution.status === "reconcile_required"
             ? `${logKey}: provider outcome is ambiguous and requires reconciliation; no automatic retry will run`
+            : execution.status === "user_action_required"
+              ? `${logKey}: paused before the next paid operation; renew the same exact Lamp approval to replay completed journals and resume without rebilling them`
             : execution.status === "failed"
-              ? `${logKey}: durable first-cut execution stopped before a gradeable artifact was confirmed${safeExecutionError ? ` — ${safeExecutionError}` : ""}`
-              : `${logKey}: durable server Workflow owns first-cut generation; this browser may close safely`;
+              ? `${logKey}: durable ${lamp ? "Lamp" : "first-cut"} execution stopped before a gradeable artifact was confirmed${safeExecutionError ? ` — ${safeExecutionError}` : ""}`
+              : `${logKey}: durable server Workflow owns ${lamp ? "Lamp's two-pass run" : "first-cut generation"}; this browser may close safely`;
       materialized.log.push({
         at: execution.updatedAt,
         nodeId: execution.status === "awaiting_review" ? "review" : "videogen",
         level:
           execution.status === "failed" || execution.status === "reconcile_required"
             ? "error"
+            : execution.status === "user_action_required"
+              ? "warn"
             : "info",
         message,
       });
@@ -706,13 +993,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     if (!isValidRunId(requestedId)) {
       return NextResponse.json({ error: "Invalid run id." }, { status: 400 });
     }
-    const [storedRun, paidCosts, execution] = await Promise.all([
+    const [storedRun, paidCosts, execution, lampEvaluations] = await Promise.all([
       storage.getRun(requestedId),
       storage.listPaidOperationCosts(requestedId),
       storage.getRunExecution(requestedId),
+      readLampEvaluationProjection(storage, requestedId),
     ]);
     const run = storedRun
-      ? materializeServerResults(storedRun, paidCosts, execution)
+      ? materializeServerResults(
+          storedRun,
+          paidCosts,
+          execution,
+          lampEvaluations
+        )
       : null;
     if (!run) return NextResponse.json({ error: "Run not found." }, { status: 404 });
     // Old records may contain several megabytes of frame data. Return it only
@@ -746,11 +1039,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const batchExecutions = storedBatchExecutions?.map(summarizeBatchExecution);
   const runs = await Promise.all(
     page.runs.map(async (run) => {
-      const [paidCosts, execution] = await Promise.all([
+      const [paidCosts, execution, lampEvaluations] = await Promise.all([
         storage.listPaidOperationCosts(run.id),
         storage.getRunExecution(run.id),
+        readLampEvaluationProjection(storage, run.id),
       ]);
-      return compactRun(materializeServerResults(run, paidCosts, execution));
+      return compactRun(
+        materializeServerResults(run, paidCosts, execution, lampEvaluations)
+      );
     })
   );
   let truncatedForBytes = false;
@@ -791,11 +1087,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
  * persistence debounce window.
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  let body: { video?: unknown; approveLiveSpend?: unknown };
+  let body: {
+    video?: unknown;
+    approveLiveSpend?: unknown;
+    workflowMode?: unknown;
+  };
   try {
     body = (await req.json()) as {
       video?: unknown;
       approveLiveSpend?: unknown;
+      workflowMode?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "Body must be JSON." }, { status: 400 });
@@ -824,6 +1125,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 400 }
     );
   }
+  if (
+    body.workflowMode !== undefined &&
+    body.workflowMode !== "flora" &&
+    body.workflowMode !== "lamp"
+  ) {
+    return NextResponse.json(
+      { error: 'workflowMode must be either "flora" or "lamp".' },
+      { status: 400 }
+    );
+  }
+  const workflowMode: WorkflowMode =
+    body.workflowMode === "flora" ? "flora" : "lamp";
   if (body.approveLiveSpend === true && !hasGeminiKey()) {
     return NextResponse.json(
       { error: "Gemini video generation is not configured." },
@@ -864,24 +1177,56 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   };
   const existing = await storage.getRun(video.runId);
   if (existing) {
-    const existingFirstCutApproval = hasReusableFirstCutApproval(
-      existing,
-      "single"
-    ) &&
+    const existingExecution = await storage.getRunExecution(video.runId);
+    const existingMode = persistedWorkflowMode(existing);
+    const canAdoptWorkflowMode =
+      existingExecution === null &&
+      existing.spendApproval === undefined &&
+      (existing.providerOperations?.length ?? 0) === 0 &&
+      existing.iterations.length === 0 &&
+      existing.humanGrade === undefined;
+    if (existingMode !== workflowMode && !canAdoptWorkflowMode) {
+      return NextResponse.json(
+        {
+          error: `This saved clip already belongs to ${
+            existingMode === "lamp" ? "Lamp" : "Flora"
+          }. Upload it again as a fresh ${
+            workflowMode === "lamp" ? "Lamp" : "Flora"
+          } run so approvals and artifacts cannot be mixed.`,
+        },
+        { status: 409 }
+      );
+    }
+    if (
+      existingExecution &&
+      (workflowMode === "lamp") !== isLampExecution(existingExecution)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "This run's saved method and durable execution disagree. It was left untouched to avoid replaying provider work.",
+        },
+        { status: 409 }
+      );
+    }
+    const existingApproval =
+      (workflowMode === "lamp"
+        ? hasReusableLampApproval(existing)
+        : hasReusableFirstCutApproval(existing, "single")) &&
       existing.originalVideo.runId === canonicalVideo.runId &&
       existing.originalVideo.url === canonicalVideo.url &&
       Math.abs(existing.originalVideo.durationSec - canonicalVideo.durationSec) <=
         0.001;
-    const updated = await storage.putCanonicalRunSource(
+    let updated = await storage.putCanonicalRunSource(
       video.runId,
       canonicalVideo,
-      body.approveLiveSpend === true && !existingFirstCutApproval
+      body.approveLiveSpend === true && !existingApproval
         ? createSpendApproval(
             canonicalVideo,
             "single",
             undefined,
             Date.now(),
-            "first_cut"
+            workflowMode === "lamp" ? "lamp_two_pass" : "first_cut"
           )
         : undefined
     );
@@ -891,9 +1236,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: 409 }
       );
     }
+    if (existingMode !== workflowMode) {
+      const workflow = workflowForMode(workflowMode);
+      updated = {
+        ...updated,
+        workflowId: workflow.id,
+        workflowMode,
+        nodeStates: freshNodeStates(workflowMode),
+      };
+      await storage.putRun(updated);
+    }
     if (body.approveLiveSpend === true) {
       try {
-        const launch = await enqueueFirstCut(updated);
+        const launch = await enqueueSingleRun(updated, workflowMode);
         if (
           launch.execution.status === "failed" ||
           launch.execution.status === "reconcile_required"
@@ -903,7 +1258,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               error:
                 launch.execution.status === "reconcile_required"
                   ? "This run has an unresolved provider outcome. It will not be billed again automatically; reconcile the existing attempt first."
-                  : "This durable first-cut attempt already stopped and cannot be presented as newly started. Create a fresh run after reviewing its saved error.",
+                  : `This durable ${
+                      workflowMode === "lamp" ? "Lamp" : "Flora"
+                    } run already stopped and cannot be presented as newly started. Create a fresh run after reviewing its saved error.`,
               run: { ...updated, serverExecution: launch.execution },
               execution: launch.execution,
             },
@@ -924,8 +1281,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         );
         return NextResponse.json(
           {
-            error:
-              "The run was saved, but its durable first-cut execution could not be enqueued. Retry this confirmation; paid operations will not be repeated.",
+            error: `The run was saved, but its durable ${
+              workflowMode === "lamp" ? "Lamp" : "Flora"
+            } execution could not be enqueued. Retry this confirmation; paid operations will not be repeated.`,
           },
           { status: 502 }
         );
@@ -933,20 +1291,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     return NextResponse.json({ ok: true, created: false, run: updated });
   }
-  const run = buildRun(canonicalVideo);
+  const run = buildRun(canonicalVideo, Date.now(), workflowMode);
   if (body.approveLiveSpend === true) {
     run.spendApproval = createSpendApproval(
       canonicalVideo,
       "single",
       undefined,
       Date.now(),
-      "first_cut"
+      workflowMode === "lamp" ? "lamp_two_pass" : "first_cut"
     );
   }
   await storage.putRun(run);
   if (body.approveLiveSpend === true) {
     try {
-      const launch = await enqueueFirstCut(run);
+      const launch = await enqueueSingleRun(run, workflowMode);
       if (
         launch.execution.status === "failed" ||
         launch.execution.status === "reconcile_required"
@@ -956,7 +1314,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             error:
               launch.execution.status === "reconcile_required"
                 ? "This run has an unresolved provider outcome. It will not be billed again automatically; reconcile the existing attempt first."
-                : "This durable first-cut attempt already stopped and cannot be presented as newly started. Create a fresh run after reviewing its saved error.",
+                : `This durable ${
+                    workflowMode === "lamp" ? "Lamp" : "Flora"
+                  } run already stopped and cannot be presented as newly started. Create a fresh run after reviewing its saved error.`,
             run: { ...run, serverExecution: launch.execution },
             execution: launch.execution,
           },
@@ -980,8 +1340,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
       return NextResponse.json(
         {
-          error:
-            "The run was saved, but its durable first-cut execution could not be enqueued. Retry this confirmation; paid operations will not be repeated.",
+          error: `The run was saved, but its durable ${
+            workflowMode === "lamp" ? "Lamp" : "Flora"
+          } execution could not be enqueued. Retry this confirmation; paid operations will not be repeated.`,
         },
         { status: 502 }
       );
@@ -1028,6 +1389,8 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   // Read-model only. Durable execution lives in the separate CAS record.
   delete persisted.serverExecution;
   persisted.originalVideo = current.originalVideo;
+  persisted.workflowId = current.workflowId;
+  persisted.workflowMode = current.workflowMode;
   persisted.providerOperations = current.providerOperations;
   clearProviderTrustMarkers(persisted);
   stripIncomingUnverifiedRealArtifacts(persisted);
@@ -1084,18 +1447,27 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
 
   const storage = getStorage();
-  const [current, execution] = await Promise.all([
+  const [current, execution, lampEvaluations] = await Promise.all([
     storage.getRun(id),
     storage.getRunExecution(id),
+    readLampEvaluationProjection(storage, id),
   ]);
   if (!current) {
     return NextResponse.json({ error: "Run not found." }, { status: 404 });
   }
-  const materialized = materializeServerResults(current, [], execution);
+  const materialized = materializeServerResults(
+    current,
+    [],
+    execution,
+    lampEvaluations
+  );
+  const authoritativeExecution = materialized.serverExecution;
+  const lamp = isLampExecution(authoritativeExecution);
   const lastIteration = materialized.iterations.at(-1);
   const selectedIndex = materialized.bestIterationIndex;
-  const shipped =
-    selectedIndex === undefined
+  const shipped = lamp
+    ? materialized.iterations.find((iteration) => iteration.index === 2)
+    : selectedIndex === undefined
       ? lastIteration
       : materialized.iterations.find(
           (iteration) => iteration.index === selectedIndex
@@ -1106,17 +1478,34 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       operation.status === "completed" &&
       operation.result?.videoUrl === shipped?.generatedVideo?.url
   );
-  const executionOwnsArtifact = execution
-    ? execution.status === "awaiting_review" &&
-      shipped?.index === 1 &&
-      shippedOperation !== undefined &&
-      providerOperationMatchesExecution(shippedOperation, execution)
+  const executionOwnsArtifact = authoritativeExecution
+    ? lamp
+      ? authoritativeExecution.status === "awaiting_review" &&
+        shipped?.index === 2 &&
+        shippedOperation !== undefined &&
+        shippedOperation.result?.audioVerified === true &&
+        providerOperationMatchesLampExecution(
+          shippedOperation,
+          authoritativeExecution,
+          lampEvaluations
+        ) &&
+        lampArtifact(lampEvaluations.final, 2) !== undefined
+      : authoritativeExecution.status === "awaiting_review" &&
+        shipped?.index === 1 &&
+        shippedOperation !== undefined &&
+        providerOperationMatchesExecution(
+          shippedOperation,
+          authoritativeExecution
+        )
     : true;
   const canonicalArtifact =
-    shipped?.recoveredFromProviderOperation === true &&
-    shipped.generatedVideo !== undefined &&
-    shippedOperation !== undefined &&
-    executionOwnsArtifact;
+    (!authoritativeExecution &&
+      materialized.live !== true &&
+      shipped?.generatedVideo?.simulatedFilter !== undefined) ||
+    (shipped?.recoveredFromProviderOperation === true &&
+      shipped.generatedVideo !== undefined &&
+      shippedOperation !== undefined &&
+      executionOwnsArtifact);
   if (!canonicalArtifact) {
     return NextResponse.json(
       { error: "A completed server-verified relit video is required before grading." },
@@ -1128,14 +1517,16 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Run not found." }, { status: 404 });
   }
   if (!result.ok) {
-    const [paidCosts, freshExecution] = await Promise.all([
+    const [paidCosts, freshExecution, freshLampEvaluations] = await Promise.all([
       storage.listPaidOperationCosts(id),
       storage.getRunExecution(id),
+      readLampEvaluationProjection(storage, id),
     ]);
     const conflictRun = materializeServerResults(
       result.current!,
       paidCosts,
-      freshExecution
+      freshExecution,
+      freshLampEvaluations
     );
     return NextResponse.json(
       {
@@ -1148,14 +1539,16 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       }
     );
   }
-  const [paidCosts, freshExecution] = await Promise.all([
+  const [paidCosts, freshExecution, freshLampEvaluations] = await Promise.all([
     storage.listPaidOperationCosts(id),
     storage.getRunExecution(id),
+    readLampEvaluationProjection(storage, id),
   ]);
   const savedRun = materializeServerResults(
     result.run,
     paidCosts,
-    freshExecution
+    freshExecution,
+    freshLampEvaluations
   );
   return NextResponse.json(
     { ok: true, run: compactRun(savedRun) },

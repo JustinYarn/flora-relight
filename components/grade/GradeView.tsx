@@ -5,7 +5,7 @@ import Link from "next/link";
 import type { GradeClipDraft, Run } from "@/lib/types";
 import { useAppStore } from "@/lib/store";
 import { EmptyState } from "@/components/ui";
-import { isGradeable } from "@/components/grade/derive";
+import { finalLampIteration, isGradeable } from "@/components/grade/derive";
 import { ClipGrader } from "@/components/grade/ClipGrader";
 import { ResultsView } from "@/components/grade/ResultsView";
 import { useGradeDraft } from "@/components/grade/useGradeDraft";
@@ -39,7 +39,7 @@ function ModeTabs({
   onChange: (m: Mode) => void;
 }) {
   const cls = (m: Mode) =>
-    `rounded-md px-3 py-1 text-sm transition ${
+    `min-h-10 rounded-md px-3 py-1 text-sm transition-[transform,color,background-color] duration-150 ease-out active:scale-[0.96] ${
       mode === m ? "bg-raised text-ink" : "text-muted hover:text-ink"
     }`;
   return (
@@ -163,7 +163,7 @@ export function GradeView() {
     return () => controller.abort();
   }, [hydrated]);
 
-  // Keep the grading queue live while durable first cuts finish. The broad
+  // Keep the grading queue live while durable Lamp finals finish. The broad
   // refresh above discovers all persisted runs once; this focused loop then
   // polls only active execution ids and stops as soon as each cut settles.
   useEffect(() => {
@@ -238,10 +238,10 @@ export function GradeView() {
   );
   const hasAutomatedResults = useMemo(
     () =>
-      gradeable.some((run) =>
-        run.iterations.some((iteration) => iteration.evalResults.length > 0)
+      graded.some(
+        (run) => (finalLampIteration(run)?.evalResults.length ?? 0) > 0
       ),
-    [gradeable]
+    [graded]
   );
   const queue = useMemo(() => {
     const ungraded = gradeable.filter((r) => !r.humanGrade);
@@ -351,15 +351,13 @@ export function GradeView() {
   return (
     <main className="mx-auto max-w-5xl px-6 pb-16 pt-8">
       <header className="flex flex-wrap items-center gap-3 pb-5">
-        <h1 className="text-base font-semibold text-ink">Grade</h1>
-        <p className="text-2xs text-faint">
+        <h1 className="text-balance text-base font-semibold text-ink">Grade</h1>
+        <p className="text-pretty text-2xs text-faint">
           {mode === "grade"
-            ? hasAutomatedResults
-              ? "your eyes on the same 11 checks — automated verdicts stay hidden until you compare"
-              : "your eyes on 11 quality checks — these first cuts went directly to human grading"
+            ? "grade all 11 rubric rows by eye — Lamp keeps the final AI evaluation sealed until you save"
             : hasAutomatedResults
-              ? "where your judgement and the automated checks line up — and where they don't"
-              : "your saved human grades — automated checks were not run on these first cuts"}
+              ? "compare each final video first, then use the aggregate view to calibrate the method"
+              : "your saved human grades — no final AI results are available to compare"}
         </p>
         <span className="ml-auto flex items-center gap-3">
           {mode === "grade" ? (
@@ -379,13 +377,13 @@ export function GradeView() {
         gradeable.length === 0 ? (
           <EmptyState
             title="Nothing to grade yet"
-            hint="Finish some runs first — once a clip has a real relit cut, it lands here for blind grading."
+            hint="Finish a Lamp run first — once its real final video is ready, it lands here for blind grading."
             action={
               <Link
                 href="/"
-                className="mt-1 rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition hover:border-faint"
+                className="mt-1 inline-flex min-h-10 items-center rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition-[transform,border-color] duration-150 ease-out hover:border-faint active:scale-[0.96]"
               >
-                Go to Studio
+                Go to Create
               </Link>
             }
           />
@@ -412,7 +410,7 @@ export function GradeView() {
             action={
               <button
                 onClick={() => setMode("results")}
-                className="mt-1 rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition hover:border-faint"
+                className="mt-1 min-h-10 rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition-[transform,border-color] duration-150 ease-out hover:border-faint active:scale-[0.96]"
               >
                 {hasAutomatedResults ? "Compare results" : "View saved grades"}
               </button>
@@ -426,7 +424,7 @@ export function GradeView() {
           action={
             <button
               onClick={() => setMode("grade")}
-              className="mt-1 rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition hover:border-faint"
+              className="mt-1 min-h-10 rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition-[transform,border-color] duration-150 ease-out hover:border-faint active:scale-[0.96]"
             >
               Start grading
             </button>

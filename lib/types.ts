@@ -368,6 +368,13 @@ export interface WorkflowDefinition {
 // Run state
 // ---------------------------------------------------------------------------
 
+/**
+ * User-selected relighting method. Legacy records omit this field and are
+ * interpreted as Flora so existing runs and batches keep their original
+ * execution semantics after Lamp is introduced.
+ */
+export type WorkflowMode = "flora" | "lamp";
+
 export type NodeRunStatus =
   | "idle"
   | "queued"
@@ -436,6 +443,7 @@ export type RunStatus =
 export type RunExecutionStatus =
   | "queued"
   | "running"
+  | "user_action_required"
   | "awaiting_review"
   | "failed"
   | "reconcile_required";
@@ -444,6 +452,7 @@ export type RunExecutionPhase =
   | "queued"
   | "preparing"
   | "video_generation"
+  | "evaluating"
   | "finalizing"
   | "complete";
 
@@ -489,7 +498,7 @@ export interface HumanCheckGrade {
 /**
  * A human's blind grade of one run's shipped cut — the same 11 checks the AI
  * judges scored, graded WITHOUT seeing the AI's verdicts (that's the point:
- * no anchoring). Compared against the shipped attempt's evalResults on the
+ * no anchoring). Compared against Lamp Final's evalResults on the
  * /grade "Compare with AI" view to calibrate the judge rubrics.
  */
 export interface HumanGrade {
@@ -572,7 +581,7 @@ export interface SpendApproval {
   id: string;
   source: "single" | "batch";
   /** Legacy records without this field are treated as full_pipeline. */
-  scope?: "full_pipeline" | "first_cut";
+  scope?: "full_pipeline" | "first_cut" | "lamp_two_pass";
   batchId?: string;
   /** Canonical durable ingest identity and facts this approval was priced for. */
   runId: string;
@@ -624,6 +633,8 @@ export interface Run {
    */
   _compact?: true;
   workflowId: string;
+  /** Persisted method discriminator; absent on legacy Flora records. */
+  workflowMode?: WorkflowMode;
   createdAt: number;
   originalVideo: VideoAsset;
   status: RunStatus;
@@ -638,11 +649,11 @@ export interface Run {
   /** Extracted once at ingest; ground truth for all evals. */
   manifest?: SceneManifest;
   iterations: Iteration[];
-  /** Best-of tracking: the loop returns the best iteration, never the last. */
+  /** Legacy best-of tracking. Lamp leaves this unset because v2 is always Final. */
   bestIterationIndex?: number;
   nodeStates: Record<string, NodeRunState>;
   log: RunLogEntry[];
-  /** Original audio remuxed onto the winning generated video. */
+  /** Original audio remuxed onto the delivered generated video. */
   finalVideo?: VideoAsset;
   /**
    * Terminal safety net: when video generation cannot pass the gates, a
@@ -698,11 +709,17 @@ export interface BatchUploadItem {
 }
 
 /** Server-owned lifecycle for the durable generation-only batch dispatcher. */
-export type BatchExecutionStatus = "queued" | "running" | "done" | "failed";
+export type BatchExecutionStatus =
+  | "queued"
+  | "running"
+  | "user_action_required"
+  | "done"
+  | "failed";
 
 export type BatchExecutionMemberState =
   | "queued"
   | "running"
+  | "user_action_required"
   | "awaiting_review"
   | "failed"
   | "reconcile_required"
@@ -727,6 +744,8 @@ export interface BatchExecutionMember {
 export interface BatchExecution {
   batchId: string;
   executionId: string;
+  /** Persisted method discriminator; absent on legacy Flora executions. */
+  workflowMode?: WorkflowMode;
   /** Exact first-cut prompt shared by every admitted member. */
   renderedPrompt: string;
   /** Lowercase sha256 of renderedPrompt. */
@@ -739,6 +758,11 @@ export interface BatchExecution {
   settledMicros: number;
   members: BatchExecutionMember[];
   startedAt: number;
+  /**
+   * Approval epoch for the currently authorized dispatch window. Missing on
+   * legacy records, where startedAt remains the approval epoch.
+   */
+  approvalStartedAt?: number;
   updatedAt: number;
   workflowRunId?: string;
   error?: string;
@@ -757,6 +781,8 @@ export type BatchExecutionSummary = Omit<BatchExecution, "renderedPrompt">;
 export interface Batch {
   id: string;
   name: string;
+  /** Persisted method discriminator; absent on legacy Flora batches. */
+  workflowMode?: WorkflowMode;
   createdAt: number;
   runIds: string[];
   concurrency: number;

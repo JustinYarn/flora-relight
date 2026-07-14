@@ -1374,7 +1374,8 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
                    FROM run_executions AS execution
                    WHERE execution.run_id = runs.id
                      AND execution.status IN (
-                       'queued', 'running', 'reconcile_required'
+                       'queued', 'running', 'user_action_required',
+                       'reconcile_required'
                      )
                  )
                  AND CASE

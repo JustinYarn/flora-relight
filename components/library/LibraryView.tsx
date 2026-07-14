@@ -269,8 +269,8 @@ export function LibraryView() {
         />
         <Stat
           value={avgScore !== undefined ? avgScore.toFixed(1) : "—"}
-          label="avg Overall score (shipped cuts)"
-          title="mean Overall score of each run's shipped attempt"
+          label="avg Final AI score"
+          title="mean Overall score of each Lamp run's Final video"
         />
         <Stat
           value={formatUsd(spend.actual)}
@@ -330,7 +330,7 @@ export function LibraryView() {
                   href="/"
                   className="mt-1 rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition hover:border-faint"
                 >
-                  Go to Studio
+                  Go to Create
                 </Link>
               }
             />

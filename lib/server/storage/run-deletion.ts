@@ -8,6 +8,7 @@ import type {
 const ACTIVE_EXECUTION_STATUSES = new Set<RunExecution["status"]>([
   "queued",
   "running",
+  "user_action_required",
   "reconcile_required",
 ]);
 

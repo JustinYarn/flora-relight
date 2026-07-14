@@ -25,25 +25,27 @@ export const STATUS_META: Record<RunStatus, { color: string; label: string }> = 
 };
 
 /**
- * The attempt this run ships (or would ship): bestIterationIndex resolved
- * against Iteration.index (1-based), tolerant of arbitrary version numbers
- * (a salvaged run may carry v101) — falls back to array position, then the
- * last attempt.
+ * Lamp always resolves v2 as Final. Legacy runs still resolve their historical
+ * bestIterationIndex against Iteration.index (1-based), tolerate arbitrary
+ * salvaged version numbers, and fall back to array position then newest.
  */
 export function shippedIteration(run: Run): Iteration | undefined {
   const last = run.iterations[run.iterations.length - 1];
+  if (run.workflowId === "lamp-v1") {
+    return run.iterations.find((iteration) => iteration.index === 2) ?? last;
+  }
   const bi = run.bestIterationIndex;
   if (bi === undefined) return last;
   return run.iterations.find((it) => it.index === bi) ?? run.iterations[bi] ?? last;
 }
 
-/** The cut to show as "after": the final remuxed video, else the shipped attempt's generation. */
+/** The cut to show as "after": Lamp Final or the legacy run's shipped generation. */
 export function shippedVideo(run: Run): VideoAsset | undefined {
   return run.finalVideo ?? shippedIteration(run)?.generatedVideo;
 }
 
 /**
- * Overall score of the shipped cut. Prefers the shipped attempt's composite;
+ * Overall score of Lamp Final or the legacy shipped cut. Prefers that composite;
  * if that attempt never got scored (crashed mid-judging), walks back to the
  * newest attempt that did.
  */
@@ -51,6 +53,7 @@ export function shippedComposite(
   run: Run
 ): { score: number; passed: boolean } | undefined {
   const it = shippedIteration(run);
+  if (run.workflowId === "lamp-v1") return it?.composite;
   if (it?.composite) return it.composite;
   for (let i = run.iterations.length - 1; i >= 0; i -= 1) {
     const c = run.iterations[i]?.composite;

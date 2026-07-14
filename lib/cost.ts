@@ -16,12 +16,15 @@
  * judge automatically moves every estimate in the app.
  */
 
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
-import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
+import { EVAL_DEFS } from "./prompts/eval-defs.ts";
+import { RELIGHT_WORKFLOW } from "./workflow-def.ts";
 import type { JudgeId, VideoAsset } from "@/lib/types";
 
 /** Provider-supported output window reserved by generation-only approvals. */
 export const FIRST_CUT_MAX_OUTPUT_SECONDS = 10;
+/** Lamp always performs two generations and two one-shot holistic evaluations. */
+export const LAMP_GENERATION_COUNT = 2;
+export const LAMP_EVALUATION_COUNT = 2;
 
 // ---------------------------------------------------------------------------
 // Cost item (lives here, not in lib/types.ts, to keep the core contract stable)
@@ -206,6 +209,41 @@ export function estimateFirstCut(durationSec: number): CostEstimate {
       provider: "local",
       units: 1,
       unitLabel: "cut",
+      usd: 0,
+    },
+  ]);
+}
+
+/**
+ * Lamp's exact fixed workflow: initial generation, one whole-video critique,
+ * one final regeneration, and one final whole-video evaluation. The original
+ * audio is remuxed and verified after each generation at no provider cost.
+ */
+export function estimateLampRun(durationSec: number): CostEstimate {
+  return total([
+    {
+      label: `Two video generations (${durationSec.toFixed(1)}s each)`,
+      provider: PRICE_TABLE.omniFlashPerOutputSecond.provider,
+      units: durationSec * LAMP_GENERATION_COUNT,
+      unitLabel: PRICE_TABLE.omniFlashPerOutputSecond.unitLabel,
+      usd:
+        durationSec *
+        LAMP_GENERATION_COUNT *
+        PRICE_TABLE.omniFlashPerOutputSecond.usd,
+    },
+    {
+      label: "Two holistic whole-video evaluations",
+      provider: PRICE_TABLE.geminiJudgePerCall.provider,
+      units: LAMP_EVALUATION_COUNT,
+      unitLabel: PRICE_TABLE.geminiJudgePerCall.unitLabel,
+      usd:
+        LAMP_EVALUATION_COUNT * PRICE_TABLE.geminiJudgePerCall.usd,
+    },
+    {
+      label: "Original-audio remux and verification (both cuts)",
+      provider: "local",
+      units: LAMP_GENERATION_COUNT,
+      unitLabel: "cuts",
       usd: 0,
     },
   ]);

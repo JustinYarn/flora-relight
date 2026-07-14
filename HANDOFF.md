@@ -1,200 +1,203 @@
-# HANDOFF — Flora Relight session handoff
+# HANDOFF — Flora + Lamp relight workspace
 
-Written 2026-07-13 for whoever (human or AI session) picks this project up next.
-Read `README.md` for product-level docs and `ARCHITECTURE.md` for the design
-rationale; this file is the "where were we" note.
+Written 2026-07-14 for whoever picks up this branch next. Read `README.md` for
+product and operator instructions and `ARCHITECTURE.md` for the older Flora
+design rationale. This file records the dual-mode Flora/Lamp release contract.
 
-## Current state (2026-07-13)
+## Current state (2026-07-14)
 
-- **The app has live provider adapters.** Real Omni Flash video-to-video
-  (`gemini-omni-flash-preview` via the Interactions API), real Gemini
-  video-native judge + Claude frame-grid judge, with server routes under
-  `app/api/live/*`. Earlier local/session testing produced real relit clips with
-  audio-bit-identical output. Do not transfer that result to a new hosted
-  deployment: configured keys remain unverified there until the Workflow smoke
-  test and a separately authorized provider artifact round trip pass. Without
-  keys the app falls back to mock mode.
-- **Local persistence**: every run writes to `data/runs/<runId>/` (`run.json`
-  plus `source.mp4`, `source-audio.m4a`, `relit-vN.mp4`, `anchor-vN.jpg`, …).
-  `data/` is gitignored — it is the artifact of record on this machine.
-- **GitHub**: public repo at `github.com/JustinYarn/flora-relight`.
-  The durable release candidate is on `codex/flora-durable-production`; `main`
-  remains the older production baseline. The first consolidated hardening commit
-  is `46c8a49`; always verify and deploy the branch's exact current
-  `git rev-parse HEAD` because follow-up hardening may advance it. The older
-  `vercel-prep` branch was merged into `main`; the worktree at
-  `../flora-relight-vercel` is redundant.
-- **Vercel deployment target**: the existing production URL is
-  **https://flora-relight.vercel.app** (project `flora-relight`, org
-  `justin-5763s-projects`). The current working tree is a standard Next.js
-  deployment with `ffmpeg-static` included by output-file tracing and a shared
-  password gate via `FLORA_ACCESS_PASSWORD` (middleware + `/gate`). Once this
-  working tree is deployed, a guarded route starts the background Gemini
-  interaction once; Vercel Workflow owns its non-billed polling, download,
-  original-audio remux, verification, and operation-journal completion. Do not
-  assume the existing hosted revision includes or has verified this path.
-- **Storage driver architecture** (`lib/server/storage/`): env-selected seam.
-  Hosted media now requires a **new private Vercel Blob store** plus Neon:
-  `BLOB_READ_WRITE_TOKEN` + `DATABASE_URL` + `FLORA_BLOB_ACCESS=private`.
-  The former `flora-relight-media` store is public and cannot be converted in
-  place; do not reconnect its token for the hardened deployment. Create and
-  connect a private store, then set the explicit access variable. Existing
-  public entries remain readable only through Flora's authenticated proxy
-  during migration; all new media is private. Without complete cloud config,
-  local development uses `data/` but hosted production fails closed.
-  Cloud ingest is a two-step client-direct-to-private-Blob upload (see README).
-  `/api/readiness` earns hosted readiness through private Blob and database
-  write/read/delete probes plus ffmpeg, rather than env presence alone.
-- **New this session**: the **/grade** tab — blind human grading of every run
-  with a real relit cut (5-point scale per check + a ship-it call, stored as
-  `Run.humanGrade`) and a "Compare with AI" view (agreement %, per-check score
-  gaps, biggest disagreements ranked by score-gap × AI-confidence). The
-  **Batch nav entry was removed** by request; `/batch` itself is still
-  routable. Nav is now Studio · Library · Grade · Engine · Rubrics.
-- **Production-hardening in the working tree**: canonical ingest/run IDs;
-  durable pre-upload batch drafts plus ingest-receipt recovery; server-persisted
-  run skeletons before any processing begins; independent monotonic batch records
-  with an atomic start winner; compact paginated history; revisioned single-run
-  and batch execution records; immutable exact prompts and batch membership;
-  server-owned first-cut Workflows with a seven-day recovery window; admission-bound
-  seven-day batch approvals (single approvals remain 24 hours); a hard
-  micro-dollar batch reservation ledger and server-fixed concurrency of two;
-  revisioned autosaved grading drafts and conflict-safe final grades; persistent
-  client retry; exact-once journals for every potentially paid provider action;
-  single-owner Workflow enqueue and leased video finalization; truthful readiness
-  gating; server-probed approval inputs; and permanent run deletion tombstones.
-  These changes are committed on the release-candidate branch but still must be
-  deployed before production behavior changes.
-- **Durability boundary**: completed uploads, run skeletons, batch drafts, run
-  history, exact execution inputs, provider-operation handles/results, paid-call
-  claims/responses, batch reservations, and revisioned `/grade` drafts are
-  server-persisted. Vercel Workflow owns each live first-cut run and the live
-  batch dispatcher, including provider polling, artifact finalization, audio
-  remux/verification, settlement, and transition to human review. Closing the
-  tab does not stop admitted live work. The production milestone deliberately
-  stops there: manifest, Look Anchor, judges, gates, correction decisions, and
-  later iterations do **not** run in the live Workflow. `lib/engine.ts` and its
-  browser batch queue are now mock-only. Do not describe a first cut as having
-  passed the 11 automated checks.
-- **Secrets**: both API keys (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`) live in
-  `.env.local` (gitignored). Never echo or commit them.
+- **Branch and product name:** the release lives on
+  `codex/flora-prompt-map-ux` and presents **Flora + Lamp** as one workspace.
+  The repo, deployed project, API paths, persisted records, and environment
+  variables keep their existing `flora` / `FLORA_` names for compatibility.
+- **Scope:** Create has a persistent method selector. Flora keeps the established
+  one-cut live workflow; Lamp runs its exact two-pass method. Both methods accept
+  one video or a server-owned batch. Every run and batch persists `workflowMode`;
+  missing mode means legacy Flora.
+- **Provider truth:** the app has live generation and Gemini-evaluation seams,
+  but configured keys are not evidence that a deployment works. No paid provider
+  artifact round trip was run during this Lamp implementation session. Do not
+  describe the live two-pass path as verified until an explicitly approved test
+  completes submission, polling, download, audio remux/verification, both
+  evaluations, and final artifact materialization on the target deployment.
+- **Local persistence:** every run writes to `data/runs/<runId>/` (`run.json`
+  plus source audio/video and generated artifacts). `data/` is gitignored and is
+  the local artifact of record. Hosted runs use private Blob + Postgres.
+- **Secrets:** provider keys remain in `.env.local` (gitignored). Never echo or
+  commit them, and never infer permission for a paid call from their presence.
+
+## The Lamp method
+
+Every new live Lamp run follows the same fixed sequence:
+
+1. Freeze the initial mega prompt and generate **Initial** (iteration 1) from the
+   original source video.
+2. Restore and verify the original audio.
+3. Send the generated video to one holistic Gemini evaluation call covering all
+   eight applicable visual checks:
+   `identity-preservation`, `skin-texture-age`, `appearance-fidelity`,
+   `background-fidelity`, `lighting-quality-delta`, `motion-lipsync`,
+   `temporal-stability`, and `hallucination-artifacts`.
+4. Record deterministic `audio-integrity` alongside those visual results.
+5. Compile exactly one correction mega prompt from the Initial critique.
+6. Generate **Final** (iteration 2) from the original source video and corrected
+   prompt, then restore and verify the original audio again.
+7. Run one final holistic Gemini evaluation across the same eight applicable
+   visual checks and record deterministic audio integrity.
+8. Present Final for blind human grading. After the grade is submitted, compare
+   the human score with the **final** AI evaluation for that video, per check.
+
+Final is always the grading target; Lamp does not choose a best-scoring attempt or
+loop again. It does not create a manifest or Look Anchor, run a Claude second
+judge, gate on a pass threshold, or invoke a fallback.
+
+The canonical human rubric still has 11 rows. Two AI rows intentionally have no
+score:
+
+- `temporal-alignment` is **unavailable** because the deterministic live
+  correlation metric is not implemented.
+- `lighting-match-to-anchor` is **inapplicable** because Lamp has no Look Anchor.
+
+The Grade Results view must preserve those truth boundaries instead of converting
+missing results to zero or presenting invented agreement.
+
+## Durability and recovery boundary
+
+- **Upload identity:** each upload receives a stable run id. The browser writes a
+  server run skeleton before analysis and can recover a completed ingest receipt
+  after a lost response. A partially streamed browser-to-Blob upload still needs
+  retransmission; a finalized upload survives reload.
+- **Canonical execution:** a revisioned `RunExecution` owns the exact source,
+  persisted Initial-prompt bytes, iteration, phase, spend approval, and
+  provider-operation bindings. Canonical evaluation 1 deterministically patches
+  only the version header and correction section of those persisted bytes; the
+  v2 provider journal binds that exact Final prompt across deploys. Browser state
+  is a read cache and cannot move execution backwards or replace server evidence.
+- **Potentially paid work:** Lamp approval covers exactly two generations and two
+  holistic evaluations. Every call has a stable operation id and durable claim.
+  Completed results replay from the journal. In-flight or ambiguous outcomes fail
+  closed into reconciliation; do not automatically repeat a potentially billed
+  request.
+- **Approval renewal:** if an exact Lamp grant expires before a later operation is
+  claimed, the execution enters `user_action_required`. A fresh exact grant CAS-
+  requeues the same execution id and prompt; completed provider journals replay as
+  cache hits, and the paused run remains deletion-protected.
+- **Workflow ownership:** Vercel Workflow owns provider submission, non-billed
+  polling, artifact download, original-audio remux, media verification, both
+  holistic evaluations, prompt correction, settlement, and transition to review.
+  Closing the browser does not stop an admitted run. Recovery polling may continue
+  for up to seven days.
+- **Blind grading:** `/grade` restores and autosaves a revisioned draft through
+  `/api/grade-drafts`. Draft and final submission use compare-and-swap revisions,
+  so a stale tab receives a conflict instead of overwriting newer work. The
+  journaled Final artifact and final AI evaluation are the comparison target.
+  Normal run reads explicitly clear Final's AI projection until `humanGrade` is
+  saved; that successful save response is the reveal boundary for Review,
+  Journey, Results, and share/read surfaces.
+- **Deletion:** deleted run ids are tombstoned. Normal deletion is refused while
+  an execution, batch membership, or provider journal is active or needs
+  reconciliation.
+- **Dual-mode batches:** the immutable parent plan records the selected method,
+  ordered membership, concurrency, and per-member reservation. Flora approvals
+  remain one-cut. Lamp members reserve and execute the complete two-generation,
+  two-evaluation plan. The parent enqueues child Workflows and settles only
+  journaled actuals; ambiguous provider work remains reserved for reconciliation.
 
 ## Where everything lives
 
 | What | Where |
 | --- | --- |
 | Repo (local) | `~/Desktop/claude test flora/flora-relight` |
-| Core contract (read first) | `lib/types.ts` |
-| The 11 eval rubrics | `lib/prompts/eval-defs.ts` |
-| Mock engine / UI store / persistence sync | `lib/engine.ts`, `lib/store.ts`, `lib/persist.ts` |
-| Live provider routes | `app/api/live/*` (cost real money — never call casually) |
-| Storage drivers (fs ↔ blob+db) | `lib/server/storage/` |
-| Run artifacts | `data/runs/<runId>/` (local) / Blob + Neon (deployed) |
-| Durable live run + batch owners | `workflows/durable-relight-{run,batch}.ts`, `lib/server/{run,batch}-execution-coordinator.ts` |
-| Workflow-owned video start/poll/finalize | `workflows/durable-video-generation.ts`, `lib/server/video-generation-start.ts`, `app/api/live/videogen/poll/` (direct HTTP start is retired) |
-| Exact-once paid-call journal | `lib/server/paid-operation.ts`, `lib/server/storage/` |
+| Core contract | `lib/types.ts` |
+| Canonical 11 eval rubrics | `lib/prompts/eval-defs.ts` |
+| Lamp eval set + correction compiler | `lib/lamp-evaluation.ts` |
+| Lamp server evaluator | `lib/server/lamp-evaluator.ts` |
+| Lamp mega prompts | `lib/prompts/mega-prompt.ts` |
+| Cost rates and fixed two-pass estimator | `lib/cost.ts` |
+| Durable live run owner | `workflows/durable-relight-run.ts` |
+| Run admission/recovery | `lib/server/run-execution-coordinator.ts`, `app/api/runs/recover/` |
+| Exact-once paid journal | `lib/server/paid-operation.ts`, `lib/server/storage/` |
+| Storage drivers (fs or Blob + Postgres) | `lib/server/storage/` |
+| Run artifacts | `data/runs/<runId>/` locally; Blob + Postgres when hosted |
+| Blind grading and comparison | `app/grade/`, `components/grade/`, `app/api/grade-drafts/` |
 | Provider-free Workflow probe | `workflows/durability-smoke.ts`, `app/api/debug/workflow/` |
-| Human grading + revisioned drafts | `app/grade/`, `components/grade/`, `app/api/grade-drafts/` |
-| Cost rate card + estimators | `lib/cost.ts` |
+| Dual-mode batch owner | `workflows/durable-relight-batch.ts`, `lib/server/batch-execution-coordinator.ts`, `lib/server/batch-contract.ts` |
 
 ## Run locally
 
 ```bash
 cd "~/Desktop/claude test flora/flora-relight"
-nvm use          # .nvmrc pins Node 22 — the GenAI SDK needs >= 20
+nvm use          # .nvmrc pins Node 22
 npm install
-npm run dev      # → http://localhost:3000
+npm run dev      # http://localhost:3000
 ```
 
-ffmpeg must be on PATH (`brew install ffmpeg`). The dev server **must be
-started with the project dir as cwd** or Tailwind and the `data/` paths break.
-Keys in `.env.local` flip the app to live mode automatically (`/api/live/health`).
+ffmpeg must be on `PATH` (`brew install ffmpeg`). Start the dev server with the
+project directory as its working directory or Tailwind and `data/` paths break.
+Keys in `.env.local` change provider readiness; their presence does not prove a
+functional artifact round trip.
 
-## Deploy
+## Deploy and verify without providers
+
+The Vercel project remains `flora-relight` under `justin-5763s-projects`:
 
 ```bash
-vercel link            # once — project flora-relight, org justin-5763s-projects
-vercel deploy --prod   # from the repo root
+vercel link
+vercel deploy --prod
 ```
 
-Env vars needed in production: `FLORA_ACCESS_PASSWORD`, `GEMINI_API_KEY`,
-`ANTHROPIC_API_KEY`, plus `BLOB_READ_WRITE_TOKEN`, `DATABASE_URL`, and
-`FLORA_BLOB_ACCESS=private` (after connecting a newly created **private** Blob
-store and Neon from the project's Storage tab). The access password must be 20+ characters with no
-surrounding whitespace; use a random 32+ character value and configure Vercel
-Deployment Protection or an edge/WAF rate limit for `/api/gate`. Full
-walkthrough in README → "Deploying to Vercel".
-Use Node 22 and keep `/.well-known/workflow/*` outside the human password gate;
-those generated routes receive Vercel's internal queue traffic.
+Keep the established environment-variable names:
 
-After deploying Workflow changes, temporarily set
-`FLORA_WORKFLOW_SMOKE_ENABLED=1`, redeploy, and run the signed-in browser-console
-probe in README → "Provider-free Workflow deployment test". Poll for up to 120
-seconds (every two seconds) so a cold Workflow worker is not mistaken for a
-failure. A completed result
-with `['started', 'completed']`, `runtime.ready: true`, and a successful
-`runtime.mediaTransform` proves the queue/control plane, private storage, writable
-scratch, and a synthetic ffmpeg encode/audio demux/remux/probe from inside a Workflow
-step, without reading user media or calling a provider. Set the flag back to `0` and
-redeploy immediately.
-Neither `/api/readiness` nor this smoke proves a paid provider path.
+- `FLORA_ACCESS_PASSWORD`
+- `FLORA_BLOB_ACCESS=private`
+- `BLOB_READ_WRITE_TOKEN`
+- `DATABASE_URL`
+- `GEMINI_API_KEY`
+- `ANTHROPIC_API_KEY` (legacy/other evaluation paths; Lamp's holistic evaluator is
+  Gemini-only)
+- `FLORA_WORKFLOW_SMOKE_ENABLED` (temporary provider-free probe flag)
+- `FLORA_FFMPEG_DEBUG_ENABLED` (temporary diagnostics only)
 
-## Open work items (priority order)
+Hosted Preview and Production fail closed unless private Blob, Postgres, ffmpeg,
+and the access policy are configured. The access password must be at least 20
+characters with no surrounding whitespace; use a random 32+ character value and
+protect `/api/gate` with Deployment Protection or an edge/WAF rate limit. Keep
+`/.well-known/workflow/*` outside the human password middleware because Vercel's
+internal Workflow queue must reach it.
 
-1. **Deploy and verify the durable control plane.** The production URL still
-   runs an older commit. Commit/reconcile the shared working tree, deploy it,
-   check `/api/readiness`, and run the provider-free Workflow smoke with the
-   temporary flag. That proves storage, ffmpeg, and Workflow routing only. Do
-   not infer a paid provider round trip from a green build or smoke probe.
-2. **Small, explicitly approved live validation before scale.** After the
-   provider-free checks, authorize one non-sensitive clip and confirm the full
-   server path: submission, long poll, download, original-audio verification,
-   reload recovery, batch settlement, and appearance in `/grade`. Then test a
-   very small batch under an explicit cap before attempting ~50 clips. No paid
-   validation has been run for this working tree.
-3. **Judge calibration workflow** via the new `/grade` tab: blind-grade the
-   batch, then use "Compare with AI" (biggest disagreements, sorted by
-   confidence-weighted gap) to refine the judge rubrics (`/prompts`) and the
-   generation brief.
-4. **Decide whether to productionize the automated loop.** The durable live
-   milestone intentionally generates one first cut for human grading. If the
-   manifest, Look Anchor, 11-check judges, gates, and corrections should run
-   live, implement them as explicit server Workflow stages with their own CAS
-   state and spend approvals; do not re-enable the browser live engine.
-5. **Release Arbiter node** — a final-artifact re-verify gate before ship
-   (re-run the gates on the actual remuxed final file), from Justin's original
-   Flora graph.
-6. **Veo 1080p quality path** — optional higher-res generation path
-   (current output 720p24); price it in `lib/cost.ts` first.
-7. **Local `data/` → cloud migration script** — one-shot uploader for the
-   existing local runs into Blob + Neon so the deployed app sees history.
+`GET /api/readiness` performs private Blob and database write/read/delete probes
+plus an ffmpeg check. It calls no AI provider and uploads no user media. After a
+Workflow change, temporarily enable `FLORA_WORKFLOW_SMOKE_ENABLED=1`, redeploy,
+and run the signed-in probe documented in README. It verifies the Workflow control
+plane, private storage, writable scratch, and a synthetic ffmpeg
+encode/demux/remux/probe. Remove the flag and redeploy immediately afterward.
 
-## Cost table (verified rates, 2026-07-11 — `lib/cost.ts` is source of truth)
+Neither readiness nor the Workflow smoke proves Lamp's paid provider path.
 
-| Item | Rate | Notes |
-| --- | --- | --- |
-| Omni Flash video-to-video | $0.10 / output second | ≈ $1.00 per 10s clip per attempt |
-| Gemini image edit (Look Anchor relight) | $0.13 / image | Stage A, per anchor attempt |
-| Gemini judge call (video-native) | $0.02 / call | per eval per iteration |
-| Gemini manifest extraction | $0.02 / call | once per run |
-| Claude judge call (frame-grid) | $0.12 / call | per eval per iteration |
-| ffmpeg trim/demux/remux | $0 | local by construction |
-| **Typical full run** | **≈ $4** | pre-flight estimate shown before every run |
+## Next work (priority order)
 
-**Cost-transparency rule (standing, non-negotiable):** before ANY paid API
-work, show the spend estimate and get confirmation; while it runs, surface
-actuals as they accrue; afterwards, report the total. Manifest, anchor, every
-configured judge slot, and video creation require a server-persisted approval
-plus a stable operation claim; ambiguous outcomes have no automatic paid retry.
-Completed operation costs are rebuilt from server journals. A
-`reconcile_required` operation can represent an unknown upstream charge and is
-not included in the confirmed numeric actual until reconciled; add an explicit
-potential-charge warning to the UI before describing that number as a hard total.
-Live batches reserve the maximum first-cut cost atomically in integer
-micro-dollars before dispatch; reserved plus settled spend cannot exceed the
-frozen cap. Confirmed cost uses the raw provider output duration before remux;
-an over-cap output is sealed for reconciliation. Ambiguous provider work keeps
-its reservation until reconciled.
-Mock batches retain only the browser planning guardrail because they spend $0.
-Sessions operating the app or its APIs directly must preserve the same approval
-boundary.
+1. Finish local automated validation with Node 22: tests, lint, typecheck, and a
+   production build. Exercise the UI with mock/provider-free data, including
+   Initial/Final switching, blind grading, final-AI comparison, and the two missing
+   AI rows.
+2. Deploy the exact branch SHA to a protected environment and run readiness plus
+   the provider-free Workflow smoke. Record the source SHA and results.
+3. Only with explicit authorization, run one non-sensitive short clip through the
+   live two-pass path. Confirm exactly two generations and two holistic evaluations,
+   original-audio verification both times, reload recovery, durable Final selection,
+   blind grading, final-AI comparison, and journaled cost.
+4. Calibrate the eight visual rubrics using accumulated human-versus-final-AI
+   disagreements. Do not hide missing temporal-alignment or anchor-match evidence.
+5. Run an explicitly approved small Lamp batch after the single-video round trip.
+   Confirm per-member two-pass journals, blind-grade sealing, bounded concurrency,
+   budget skips, reload recovery, and final batch settlement.
+
+## Cost and approval truth
+
+`lib/cost.ts` is the source of truth. A Lamp estimate is the sum of two Omni
+video-to-video generations, two Gemini holistic evaluation calls, and local ffmpeg
+work. Show that complete estimate and obtain confirmation before any paid call.
+Completed actuals come from the server journal; `reconcile_required` may represent
+an unknown upstream charge and must stay visibly unresolved. Never treat a browser
+estimate, configured key, green build, readiness probe, or provider-free smoke as
+permission or evidence for a paid provider round trip.

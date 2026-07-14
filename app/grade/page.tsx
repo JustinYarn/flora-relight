@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import { GradeView } from "@/components/grade/GradeView";
 
 export const metadata: Metadata = {
-  title: "Grade — Flora Relight",
+  title: "Grade — Lamp",
   description:
-    "Blind-grade relit before/after cuts across 11 quality checks and review saved results",
+    "Blind-grade final Lamp videos, then compare your calls with the available final AI evaluation",
 };
 
 /**

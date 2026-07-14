@@ -1,69 +1,23 @@
 "use client";
 
-/**
- * WorkflowRail — a compact vertical mirror of the engine graph for the Review
- * page's right rail: the six stage lanes in plain English, one dot each,
- * joined by a line that fills as stages complete. Answers "how far along is
- * it?" without leaving the page; the full canvas stays one click away.
- *
- * Terminal runs keep the rail rendered — all-green (or a failed dot) is the
- * record of how the run ended, and the props: { run } contract means it
- * live-updates through the same store subscription as everything else.
- */
-
 import Link from "next/link";
-import type { NodeRunStatus, Run } from "@/lib/types";
-import { useAppStore } from "@/lib/store";
+import type { Iteration, Run } from "@/lib/types";
+import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
 
-type StageState = "idle" | "active" | "done" | "failed" | "skipped";
+type StageState = "idle" | "active" | "done" | "failed";
 
-/** The six stages, mirroring the pipeline canvas lanes (components/canvas). */
-const STAGES: { id: string; label: string; nodeIds: string[] }[] = [
-  { id: "ingest", label: "Ingest", nodeIds: ["src", "ingest", "manifest"] },
-  { id: "anchor", label: "Approve the look", nodeIds: ["anchor", "anchor-gate"] },
-  { id: "generate", label: "Generate", nodeIds: ["compile", "videogen", "conform"] },
-  {
-    id: "checks",
-    label: "Automated checks",
-    nodeIds: [
-      "sample",
-      "eval-align",
-      "eval-identity",
-      "eval-skin",
-      "eval-appearance",
-      "eval-background",
-      "eval-lighting-delta",
-      "eval-lighting-anchor",
-      "eval-motion",
-      "eval-temporal",
-      "eval-halluc",
-    ],
-  },
-  { id: "decide", label: "Decide", nodeIds: ["ledger", "gate"] },
-  { id: "deliver", label: "Deliver", nodeIds: ["remux", "eval-audio", "review"] },
-];
-
-/** Checks judged per attempt (the post-remux audio check is not one of them). */
-const CHECKS_PER_ITERATION = 10;
-
-/** Collapse one stage's node statuses into a single dot state. */
-function stageState(run: Run, nodeIds: string[]): StageState {
-  const statuses: NodeRunStatus[] = nodeIds.map(
-    (id) => run.nodeStates[id]?.status ?? "idle"
-  );
-  if (statuses.some((s) => s === "failed")) return "failed";
-  if (statuses.some((s) => s === "running" || s === "queued")) return "active";
-  if (statuses.every((s) => s === "skipped")) return "skipped";
-  if (statuses.every((s) => s === "succeeded" || s === "skipped")) return "done";
-  return "idle";
-}
+const STAGES = [
+  { id: "initial", label: "Initial video" },
+  { id: "critique", label: "Whole-video critique" },
+  { id: "final", label: "Final video" },
+  { id: "grade", label: "Your grade" },
+] as const;
 
 const DOT_COLOR: Record<StageState, string> = {
   idle: "var(--edge)",
   active: "var(--running)",
   done: "var(--pass)",
   failed: "var(--fail)",
-  skipped: "var(--faint)",
 };
 
 const LABEL_CLASS: Record<StageState, string> = {
@@ -71,48 +25,82 @@ const LABEL_CLASS: Record<StageState, string> = {
   active: "text-ink",
   done: "text-muted",
   failed: "text-fail",
-  skipped: "text-faint",
 };
 
-export function WorkflowRail({ run }: { run: Run }) {
-  const maxIterations = useAppStore((s) => s.workflow.config.maxIterations);
+function availableEvalCount(iteration: Iteration | undefined): number {
+  return (
+    iteration?.evalResults.filter(
+      (result) =>
+        !LAMP_UNAVAILABLE_EVAL_IDS.includes(
+          result.evalId as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
+        )
+    ).length ?? 0
+  );
+}
 
-  const states = STAGES.map((stage) => stageState(run, stage.nodeIds));
-  // "stage X of 6" — the furthest stage the run has reached (last non-idle).
+/**
+ * Lamp's compact progress rail. It intentionally mirrors the product method,
+ * not every engine node: v1, one holistic critique, v2, then blind human grade.
+ */
+export function WorkflowRail({ run }: { run: Run }) {
+  const initial =
+    run.iterations.find((iteration) => iteration.index === 1) ?? run.iterations[0];
+  const final =
+    run.iterations.find((iteration) => iteration.index === 2) ??
+    (run.iterations.length > 1 ? run.iterations.at(-1) : undefined);
+  const initialCritiqueCount = availableEvalCount(initial);
+  const finalEvalCount = availableEvalCount(final);
+
+  const states: StageState[] = [
+    initial?.generatedVideo
+      ? "done"
+      : run.status === "running"
+        ? "active"
+        : run.status === "failed"
+          ? "failed"
+          : "idle",
+    final
+      ? "done"
+      : initialCritiqueCount > 0 && run.status === "running"
+        ? "active"
+        : run.status === "failed" && Boolean(initial?.generatedVideo)
+          ? "failed"
+          : "idle",
+    run.finalVideo || final?.generatedVideo
+      ? "done"
+      : final && run.status === "running"
+        ? "active"
+        : "idle",
+    run.humanGrade
+      ? "done"
+      : run.status === "awaiting-review" || Boolean(run.finalVideo)
+        ? "active"
+        : "idle",
+  ];
+
   let reached = 0;
-  states.forEach((state, i) => {
-    if (state !== "idle") reached = i;
+  states.forEach((state, index) => {
+    if (state !== "idle") reached = index;
   });
 
-  const latest = run.iterations[run.iterations.length - 1];
-  const attempt = latest?.index ?? 1;
-  const checksLanded = latest
-    ? Math.min(
-        CHECKS_PER_ITERATION,
-        latest.evalResults.filter((r) => r.evalId !== "audio-integrity").length
-      )
-    : null;
-
   return (
-    <nav aria-label="Pipeline progress">
+    <nav aria-label="Lamp progress">
       <p className="text-2xs tabular-nums text-faint">
-        attempt {attempt} of {maxIterations} · stage {reached + 1} of{" "}
-        {STAGES.length}
+        step {reached + 1} of {STAGES.length}
       </p>
 
       <ol className="mt-3">
-        {STAGES.map((stage, i) => {
-          const state = states[i];
+        {STAGES.map((stage, index) => {
+          const state = states[index];
           return (
             <li
               key={stage.id}
               className="relative flex items-start gap-2.5 pb-5 last:pb-0"
             >
-              {/* Connector to the next dot — fills pass-green once this stage is done. */}
-              {i < STAGES.length - 1 ? (
+              {index < STAGES.length - 1 ? (
                 <span
                   aria-hidden="true"
-                  className="absolute bottom-0 left-[3px] top-3.5 w-px transition-colors duration-500"
+                  className="absolute bottom-0 left-[3px] top-3.5 w-px transition-[background-color] duration-300 ease-out"
                   style={{
                     background: state === "done" ? "var(--pass)" : "var(--edge)",
                   }}
@@ -125,14 +113,17 @@ export function WorkflowRail({ run }: { run: Run }) {
                 style={{ background: DOT_COLOR[state] }}
               />
               <span
-                className={`flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs leading-snug ${LABEL_CLASS[state]}`}
+                className={`min-w-0 text-pretty text-xs leading-snug ${LABEL_CLASS[state]}`}
               >
                 {stage.label}
-                {stage.id === "checks" && checksLanded !== null ? (
-                  <span className="rounded-full bg-raised px-1.5 py-px text-2xs tabular-nums text-muted">
-                    {state === "skipped"
-                      ? "not run"
-                      : `${checksLanded}/${CHECKS_PER_ITERATION}`}
+                {stage.id === "critique" && initialCritiqueCount > 0 ? (
+                  <span className="mt-1 block text-2xs tabular-nums text-faint">
+                    {initialCritiqueCount} results returned
+                  </span>
+                ) : null}
+                {stage.id === "final" && finalEvalCount > 0 ? (
+                  <span className="mt-1 block text-2xs tabular-nums text-faint">
+                    {finalEvalCount} final results available
                   </span>
                 ) : null}
               </span>
@@ -143,9 +134,9 @@ export function WorkflowRail({ run }: { run: Run }) {
 
       <Link
         href="/pipeline"
-        className="mt-4 inline-block text-2xs text-faint transition hover:text-ink"
+        className="mt-3 inline-flex min-h-10 items-center text-2xs text-faint transition-[color,transform] duration-150 ease-out hover:text-ink active:scale-[0.96]"
       >
-        Full engine graph →
+        Inspect the engine →
       </Link>
     </nav>
   );

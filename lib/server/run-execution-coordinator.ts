@@ -2,9 +2,18 @@ import "server-only";
 
 import { start } from "workflow/api";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
+import {
+  compileLampFinalPrompt,
+  isLampEvaluationArtifact,
+  lampEvaluationOperationId,
+} from "@/lib/lamp-evaluation";
 import { getStorage } from "@/lib/server/storage";
 import { runExecutionInputHash } from "@/lib/server/run-execution-input";
-import { hasReusableFirstCutApproval } from "@/lib/server/spend-approval";
+import { requeueLampExecutionAfterApproval } from "@/lib/server/run-execution-resume";
+import {
+  hasReusableFirstCutApproval,
+  hasReusableLampApproval,
+} from "@/lib/server/spend-approval";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
 import { durableRelightRun } from "@/workflows/durable-relight-run";
 import type { RunExecution } from "@/lib/types";
@@ -61,20 +70,45 @@ export async function repairCompletedRunExecution(
       return execution;
     }
 
+    const lamp = execution.executionId.startsWith("lamp:");
+    const targetIteration = lamp ? 2 : 1;
     const operation = run.providerOperations?.find(
-      (item) => item.id === videoGenerationOperationId(1)
+      (item) => item.id === videoGenerationOperationId(targetIteration)
     );
+    let expectedPrompt = input.renderedPrompt;
+    let finalEvaluationComplete = true;
+    if (lamp) {
+      const [firstEvaluation, finalEvaluation] = await Promise.all([
+        storage.getPaidOperation(input.runId, lampEvaluationOperationId(1)),
+        storage.getPaidOperation(input.runId, lampEvaluationOperationId(2)),
+      ]);
+      if (
+        firstEvaluation?.status !== "completed" ||
+        !isLampEvaluationArtifact(firstEvaluation.result, 1)
+      ) {
+        return execution;
+      }
+      expectedPrompt = compileLampFinalPrompt(
+        input.renderedPrompt,
+        firstEvaluation.result
+      ).rendered;
+      finalEvaluationComplete =
+        finalEvaluation?.status === "completed" &&
+        isLampEvaluationArtifact(finalEvaluation.result, 2);
+    }
     if (
       operation?.status !== "completed" ||
       !operation.result ||
-      operation.renderedPrompt !== input.renderedPrompt
+      operation.renderedPrompt !== expectedPrompt ||
+      (lamp && !operation.result.audioVerified) ||
+      !finalEvaluationComplete
     ) {
       return execution;
     }
     if (
       execution.status === "awaiting_review" &&
       execution.phase === "complete" &&
-      execution.iteration === 1
+      execution.iteration === targetIteration
     ) {
       return execution;
     }
@@ -89,7 +123,7 @@ export async function repairCompletedRunExecution(
       ...execution,
       status: "awaiting_review",
       phase: "complete",
-      iteration: 1,
+      iteration: targetIteration,
       revision: execution.revision + 1,
       updatedAt: Math.max(Date.now(), execution.updatedAt),
       error: undefined,
@@ -140,6 +174,43 @@ export async function enqueueRunExecution(
     ) {
       throw new Error("A different exact prompt is already bound to this run.");
     }
+    if (current.status === "user_action_required") {
+      if (
+        !input.executionId.startsWith("lamp:") ||
+        !hasReusableLampApproval(run, input.source, input.batchId)
+      ) {
+        throw new Error(
+          "Lamp is paused until a fresh exact two-pass approval is confirmed."
+        );
+      }
+      const rearmed = await storage.advanceRunExecution(
+        requeueLampExecutionAfterApproval(current),
+        current.revision
+      );
+      if (!rearmed.execution) {
+        throw new Error("Lamp disappeared while its approval was renewed.");
+      }
+      current = rearmed.execution;
+      if (
+        current.executionId !== input.executionId ||
+        current.source !== input.source ||
+        current.batchId !== input.batchId
+      ) {
+        throw new Error(
+          "Lamp changed ownership while its approval was renewed."
+        );
+      }
+      if (current.status !== "queued") {
+        if (current.status === "user_action_required") {
+          throw new Error(
+            "Lamp approval renewal changed concurrently; retry confirmation."
+          );
+        }
+        // A concurrent confirmation already re-armed and dispatched this same
+        // execution. Its contender owns progress; this request is a safe no-op.
+        return { execution: current, enqueued: false };
+      }
+    }
     if (current.status !== "queued") {
       current =
         (await repairCompletedRunExecution({
@@ -159,20 +230,26 @@ export async function enqueueRunExecution(
   if (!run.spendApproval) {
     throw new Error("Live spend was not approved for this run.");
   }
-  if (
-    !hasReusableFirstCutApproval(
-      run,
-      input.source === "batch" ? "batch" : "single",
-      input.batchId
-    )
-  ) {
+  const reusableApproval =
+    input.executionId.startsWith("lamp:")
+      ? hasReusableLampApproval(run, input.source, input.batchId)
+      : hasReusableFirstCutApproval(
+          run,
+          input.source === "batch" ? "batch" : "single",
+          input.batchId
+        );
+  if (!reusableApproval) {
     throw new Error(
-      "The durable first-cut approval is expired or does not match this execution and canonical source."
+      "The durable spend approval is expired or does not match this execution and canonical source."
     );
   }
 
   const now = Date.now();
-  const canonicalPrompt = input.renderedPrompt ?? initialMegaPrompt().rendered;
+  const canonicalPrompt =
+    input.renderedPrompt ??
+    initialMegaPrompt(
+      input.executionId.startsWith("lamp:") ? "lamp" : "flora"
+    ).rendered;
   const created = current
     ? { created: false as const, execution: current }
     : await storage.createRunExecution({

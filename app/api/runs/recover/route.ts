@@ -18,7 +18,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { isValidRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
 import { enqueueRunExecution } from "@/lib/server/run-execution-coordinator";
-import { hasReusableFirstCutApproval } from "@/lib/server/spend-approval";
+import {
+  hasReusableFirstCutApproval,
+  hasReusableLampApproval,
+} from "@/lib/server/spend-approval";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -64,7 +67,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     current &&
     (current.source !== "single" ||
       current.batchId !== undefined ||
-      current.executionId !== `first-cut:${body.runId}`)
+      (current.executionId !== `first-cut:${body.runId}` &&
+        current.executionId !== `lamp:${body.runId}`))
   ) {
     return NextResponse.json(
       { error: "This run belongs to a different durable execution." },
@@ -73,7 +77,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   if (
     (!current || current.status === "queued") &&
-    !hasReusableFirstCutApproval(run, "single")
+    !(
+      current?.executionId.startsWith("lamp:") ||
+      (!current && run.spendApproval?.scope === "lamp_two_pass")
+        ? hasReusableLampApproval(run)
+        : hasReusableFirstCutApproval(run, "single")
+    )
   ) {
     return NextResponse.json(
       {
@@ -113,9 +122,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   try {
+    const executionId =
+      current?.executionId ??
+      (run.spendApproval?.scope === "lamp_two_pass"
+        ? `lamp:${body.runId}`
+        : `first-cut:${body.runId}`);
     const adopted = await enqueueRunExecution({
       runId: body.runId,
-      executionId: current?.executionId ?? `first-cut:${body.runId}`,
+      executionId,
       source: "single",
       ...(current ? { renderedPrompt: current.renderedPrompt } : {}),
     });

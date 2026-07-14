@@ -139,6 +139,7 @@ export function BatchSummary({
   const batchMeta = BATCH_STATUS_META[batch.status];
 
   if (execution) {
+    const lamp = execution.workflowMode === "lamp";
     const count = (
       state: BatchExecutionSummary["members"][number]["state"]
     ): number =>
@@ -156,13 +157,19 @@ export function BatchSummary({
     const reconcile = count("reconcile_required");
     const queued = count("queued");
     const running = count("running");
+    const approvalRequired = count("user_action_required");
     const settled = awaitingMembers.length + skipped + failed;
     const executionMeta =
       execution.status === "done"
         ? { color: "var(--pass)", label: "batch settled" }
         : execution.status === "failed"
           ? { color: "var(--borderline)", label: "needs reconciliation" }
-          : { color: "var(--running)", label: "generating first cuts" };
+          : execution.status === "user_action_required"
+            ? { color: "var(--borderline)", label: "approval required" }
+            : {
+                color: "var(--running)",
+                label: lamp ? "running Lamp two-pass" : "generating Flora cuts",
+              };
 
     return (
       <Card className="p-5">
@@ -192,13 +199,18 @@ export function BatchSummary({
             sub={
               <span className="text-2xs text-faint">
                 {running} running · {queued} queued
+                {approvalRequired > 0 ? ` · ${approvalRequired} paused` : ""}
               </span>
             }
           />
           <Stat
             label="Ready to grade"
             value={ready}
-            sub={<span className="text-2xs text-faint">canonical first cuts</span>}
+            sub={
+              <span className="text-2xs text-faint">
+                {lamp ? "blind Lamp Finals" : "canonical Flora cuts"}
+              </span>
+            }
           />
           <Stat
             label="Human grades"

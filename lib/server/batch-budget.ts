@@ -1,7 +1,5 @@
-import "server-only";
-
-import { PRICE_TABLE } from "@/lib/cost";
-import { MAX_GEN_SECONDS } from "@/lib/server/ffmpeg";
+import { PRICE_TABLE } from "../cost.ts";
+import { MAX_GEN_SECONDS } from "./ffmpeg.ts";
 
 export const USD_MICROS = 1_000_000;
 
@@ -11,17 +9,21 @@ export const USD_MICROS = 1_000_000;
  */
 export const DURABLE_BATCH_CONCURRENCY = 2;
 
-export interface FirstCutBudgetMember {
+export interface BatchBudgetMember {
   runId: string;
   reservedMicros: number;
 }
 
-export interface FirstCutBudgetPlan {
-  selected: FirstCutBudgetMember[];
+export interface BatchBudgetPlan {
+  selected: BatchBudgetMember[];
   skippedRunIds: string[];
   budgetLimitMicros: number;
   reservedMicros: number;
 }
+
+/** Backwards-compatible names retained for the legacy Flora first-cut path. */
+export type FirstCutBudgetMember = BatchBudgetMember;
+export type FirstCutBudgetPlan = BatchBudgetPlan;
 
 /** Integer money conversion used by every server-owned batch decision. */
 export function usdToMicros(usd: number): number {
@@ -59,24 +61,30 @@ export function firstCutMaximumMicros(): number {
  * Deterministically admit a prefix under the hard cap. Reserving every
  * admitted member up front means later concurrency cannot race the budget.
  */
-export function planFirstCutBudget(
+export function planBatchBudget(
   runIds: string[],
+  reservationMicros: number,
   budgetUsd?: number
-): FirstCutBudgetPlan {
-  const reservation = firstCutMaximumMicros();
-  const uncappedTotal = reservation * runIds.length;
+): BatchBudgetPlan {
+  if (
+    !Number.isSafeInteger(reservationMicros) ||
+    reservationMicros <= 0
+  ) {
+    throw new Error("Member reservation must be a positive safe integer.");
+  }
+  const uncappedTotal = reservationMicros * runIds.length;
   if (!Number.isSafeInteger(uncappedTotal)) {
     throw new Error("Batch reservation is too large to represent safely.");
   }
   const budgetLimitMicros =
     budgetUsd === undefined ? uncappedTotal : usdToMicros(budgetUsd);
-  const selected: FirstCutBudgetMember[] = [];
+  const selected: BatchBudgetMember[] = [];
   const skippedRunIds: string[] = [];
   let reservedMicros = 0;
   for (const runId of runIds) {
-    if (reservedMicros + reservation <= budgetLimitMicros) {
-      selected.push({ runId, reservedMicros: reservation });
-      reservedMicros += reservation;
+    if (reservedMicros + reservationMicros <= budgetLimitMicros) {
+      selected.push({ runId, reservedMicros: reservationMicros });
+      reservedMicros += reservationMicros;
     } else {
       skippedRunIds.push(runId);
     }
@@ -87,4 +95,12 @@ export function planFirstCutBudget(
     budgetLimitMicros,
     reservedMicros,
   };
+}
+
+
+export function planFirstCutBudget(
+  runIds: string[],
+  budgetUsd?: number
+): FirstCutBudgetPlan {
+  return planBatchBudget(runIds, firstCutMaximumMicros(), budgetUsd);
 }

@@ -143,6 +143,10 @@ export function mergeBatch(current: Batch | null, incoming: Batch): Batch {
     ...winner,
     id: current.id,
     createdAt: current.createdAt,
+    // Method selection belongs to the batch identity. A later tab may merge
+    // upload receipts or presentation text, but it cannot turn a Flora draft
+    // into Lamp (or vice versa), including after server admission.
+    workflowMode: current.workflowMode,
     status: advances ? incoming.status : current.status,
     runIds,
     uploads: mergeBatchUploads(current.uploads, incoming.uploads),

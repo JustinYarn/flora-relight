@@ -1,5 +1,21 @@
 import { getWorkflowMetadata, sleep } from "workflow";
 import {
+  compileLampFinalPrompt,
+  isLampEvaluationArtifact,
+  lampEvaluationOperationId,
+  type LampEvaluationArtifact,
+} from "@/lib/lamp-evaluation";
+import {
+  batchApprovalStartedAt,
+  batchApprovalScope,
+  batchCompletionIteration,
+  batchExecutionId,
+  batchExecutionMode,
+  batchMemberExecutionId,
+  batchMaximumIterations,
+} from "@/lib/server/batch-contract";
+import { LAMP_BATCH_USER_ACTION_REQUIRED_PREFIX } from "@/lib/server/batch-execution-resume";
+import {
   DURABLE_BATCH_CONCURRENCY,
   usdToMicros,
 } from "@/lib/server/batch-budget";
@@ -12,11 +28,13 @@ import {
   BATCH_APPROVAL_LIFETIME_MS,
   assertVideoGenerationAuthorized,
 } from "@/lib/server/spend-approval";
+import { confirmedLampBatchActualMicros } from "@/lib/server/lamp-batch-accounting";
 import { getStorage, type StorageDriver } from "@/lib/server/storage";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
 import type {
   BatchExecution,
   BatchExecutionMember,
+  PaidOperation,
   ProviderOperation,
   Run,
   RunExecution,
@@ -30,7 +48,7 @@ export interface DurableRelightBatchInput {
 export interface DurableRelightBatchResult {
   batchId: string;
   executionId: string;
-  status: "not_owner" | "done" | "failed";
+  status: "not_owner" | "user_action_required" | "done" | "failed";
 }
 
 interface BindResult {
@@ -47,23 +65,16 @@ interface BatchProgress {
   owner: boolean;
   allTerminal: boolean;
   stalledOnReconciliation: boolean;
+  readyForApproval: boolean;
 }
 
 const BATCH_BUDGET_SKIPPED = "BATCH_BUDGET_SKIPPED";
 const BATCH_PRE_PROVIDER_FAILED = "BATCH_PRE_PROVIDER_FAILED";
 const BATCH_DISPATCH_ABORTED = "BATCH_DISPATCH_ABORTED";
 const FAST_BATCH_POLLS = 60 * 2; // First hour at 30 seconds.
-const SLOW_BATCH_POLLS = 7 * 24 * 12 - 12; // Remaining 167 hours at five minutes.
+const SLOW_BATCH_POLLS = 14 * 24 * 12 - 12; // Recovery window includes one approval renewal.
 const MAX_BATCH_POLLS = FAST_BATCH_POLLS + SLOW_BATCH_POLLS;
 const MAX_CAS_ATTEMPTS = 20;
-
-function expectedBatchExecutionId(batchId: string): string {
-  return `first-cuts:${batchId}`;
-}
-
-function expectedMemberExecutionId(batchId: string, runId: string): string {
-  return `batch:${batchId}:${runId}`;
-}
 
 function safeError(error: unknown, fallback: string): string {
   return (error instanceof Error ? error.message : fallback).slice(0, 1_900);
@@ -78,29 +89,137 @@ function ownsBatchExecution(
     execution &&
       execution.batchId === input.batchId &&
       execution.executionId === input.executionId &&
-      execution.executionId === expectedBatchExecutionId(input.batchId) &&
+      execution.executionId ===
+        batchExecutionId(input.batchId, batchExecutionMode(execution)) &&
       execution.concurrency === DURABLE_BATCH_CONCURRENCY &&
       execution.workflowRunId === workflowRunId
   );
 }
 
-function operationForFirstCut(run: Run | null): ProviderOperation | undefined {
+function generationOperation(
+  run: Run | null,
+  iteration: 1 | 2
+): ProviderOperation | undefined {
   return run?.providerOperations?.find(
-    (operation) => operation.id === videoGenerationOperationId(1)
+    (operation) => operation.id === videoGenerationOperationId(iteration)
   );
+}
+
+interface LampPaidOperations {
+  first: PaidOperation | null;
+  final: PaidOperation | null;
+}
+
+async function readLampPaidOperations(
+  storage: StorageDriver,
+  runId: string
+): Promise<LampPaidOperations> {
+  const [first, final] = await Promise.all([
+    storage.getPaidOperation(runId, lampEvaluationOperationId(1)),
+    storage.getPaidOperation(runId, lampEvaluationOperationId(2)),
+  ]);
+  return { first, final };
+}
+
+async function paidOperationsForBatch(
+  storage: StorageDriver,
+  batch: BatchExecution,
+  runId: string
+): Promise<LampPaidOperations | null> {
+  return batchExecutionMode(batch) === "lamp"
+    ? readLampPaidOperations(storage, runId)
+    : null;
+}
+
+function hasAnyProviderEvidence(
+  run: Run | null,
+  paid: LampPaidOperations | null
+): boolean {
+  return Boolean(
+    (run?.providerOperations?.length ?? 0) > 0 || paid?.first || paid?.final
+  );
+}
+
+function completedLampArtifacts(input: {
+  batch: BatchExecution;
+  run: Run;
+  paid: LampPaidOperations;
+}): {
+  firstEvaluation: LampEvaluationArtifact;
+  finalEvaluation: LampEvaluationArtifact;
+  finalPrompt: string;
+} | null {
+  const firstGeneration = generationOperation(input.run, 1);
+  const finalGeneration = generationOperation(input.run, 2);
+  if (
+    firstGeneration?.status !== "completed" ||
+    !firstGeneration.result?.audioVerified ||
+    firstGeneration.renderedPrompt !== input.batch.renderedPrompt ||
+    input.paid.first?.status !== "completed" ||
+    !isLampEvaluationArtifact(input.paid.first.result, 1)
+  ) {
+    return null;
+  }
+  let finalPrompt: string;
+  try {
+    finalPrompt = compileLampFinalPrompt(
+      input.batch.renderedPrompt,
+      input.paid.first.result
+    ).rendered;
+  } catch {
+    return null;
+  }
+  if (
+    finalGeneration?.status !== "completed" ||
+    !finalGeneration.result?.audioVerified ||
+    finalGeneration.renderedPrompt !== finalPrompt ||
+    input.paid.final?.status !== "completed" ||
+    !isLampEvaluationArtifact(input.paid.final.result, 2)
+  ) {
+    return null;
+  }
+  return {
+    firstEvaluation: input.paid.first.result,
+    finalEvaluation: input.paid.final.result,
+    finalPrompt,
+  };
+}
+
+function confirmedLampActualMicros(input: {
+  run: Run;
+  paid: LampPaidOperations;
+}): number {
+  const firstGeneration = generationOperation(input.run, 1)?.result;
+  const finalGeneration = generationOperation(input.run, 2)?.result;
+  if (
+    !firstGeneration ||
+    !finalGeneration ||
+    !isLampEvaluationArtifact(input.paid.first?.result, 1) ||
+    !isLampEvaluationArtifact(input.paid.final?.result, 2)
+  ) {
+    throw new Error("Lamp spend is not completely journaled.");
+  }
+  return confirmedLampBatchActualMicros({
+    initialGenerationUsd: firstGeneration.costUsd,
+    initialEvaluationUsd: input.paid.first.result.costUsd,
+    finalGenerationUsd: finalGeneration.costUsd,
+    finalEvaluationUsd: input.paid.final.result.costUsd,
+  });
 }
 
 function memberExecutionMatches(
   execution: RunExecution | null,
-  batchId: string,
+  batch: BatchExecution,
   runId: string
 ): execution is RunExecution {
+  const mode = batchExecutionMode(batch);
   return Boolean(
     execution &&
       execution.runId === runId &&
-      execution.executionId === expectedMemberExecutionId(batchId, runId) &&
+      execution.executionId ===
+        batchMemberExecutionId(batch.batchId, runId, mode) &&
       execution.source === "batch" &&
-      execution.batchId === batchId
+      execution.batchId === batch.batchId
   );
 }
 
@@ -139,6 +258,7 @@ function accountingForMembers(members: BatchExecutionMember[]): {
     if (
       member.state === "queued" ||
       member.state === "running" ||
+      member.state === "user_action_required" ||
       member.state === "reconcile_required"
     ) {
       reservedMicros += member.maxReservedMicros;
@@ -168,20 +288,27 @@ function progressForExecution(execution: BatchExecution): BatchProgress {
   const reconcile = execution.members.filter(
     (member) => member.state === "reconcile_required"
   ).length;
+  const approvalRequired = execution.members.filter(
+    (member) => member.state === "user_action_required"
+  ).length;
   return {
     owner: true,
-    allTerminal: queued + running + reconcile === 0,
+    allTerminal: queued + running + reconcile + approvalRequired === 0,
     stalledOnReconciliation:
       reconcile > 0 &&
       running === 0 &&
       (queued === 0 || reconcile >= DURABLE_BATCH_CONCURRENCY),
+    readyForApproval:
+      approvalRequired > 0 && queued + running + reconcile === 0,
   };
 }
 
 /**
- * Generation-only parent: it schedules child durable run Workflows but never
- * performs provider work itself. Batch and child CAS records remain the only
- * dispatch/spend authority across replay, retries, and deployments.
+ * Server-owned parent: it schedules child durable run Workflows but never
+ * performs provider work itself. Flora children retain the legacy first-cut
+ * path; Lamp children execute the exact two-generation/two-evaluation
+ * contract. Batch and child CAS records remain the only dispatch/spend
+ * authority across replay, retries, and deployments.
  */
 export async function durableRelightBatch(
   input: DurableRelightBatchInput
@@ -226,6 +353,11 @@ export async function durableRelightBatch(
 
       const progress = await reconcileBatchMembers(input, workflowRunId);
       if (!progress.owner) return { ...input, status: "not_owner" };
+      if (progress.readyForApproval) {
+        const paused = await pauseBatchForApproval(input, workflowRunId);
+        if (paused === "not_owner") return { ...input, status: paused };
+        return { ...input, status: "user_action_required" };
+      }
       if (progress.allTerminal) {
         const status = await finishCompletedBatch(input, workflowRunId);
         if (status === "not_owner") return { ...input, status };
@@ -245,7 +377,7 @@ export async function durableRelightBatch(
     }
 
     throw new Error(
-      "Batch execution exceeded its seven-day reconciliation deadline."
+      "Batch execution exceeded its fourteen-day reconciliation deadline."
     );
   } catch (error) {
     const failure = safeError(error, "Durable batch execution failed.");
@@ -271,7 +403,8 @@ async function bindBatchExecution(
   if (
     !current ||
     current.executionId !== input.executionId ||
-    current.executionId !== expectedBatchExecutionId(input.batchId)
+    current.executionId !==
+      batchExecutionId(input.batchId, batchExecutionMode(current))
   ) {
     return { status: "not_owner", skippedRunIds: [] };
   }
@@ -341,7 +474,8 @@ async function materializeBudgetSkippedRun(
   }
   const run = await storage.getRun(runId);
   if (!run) throw new Error(`Budget-skipped run ${runId} was not found.`);
-  if (operationForFirstCut(run)) {
+  const paid = await paidOperationsForBatch(storage, execution, runId);
+  if (hasAnyProviderEvidence(run, paid)) {
     throw new Error(
       `Budget-skipped run ${runId} already has provider work and cannot be labeled zero-spend.`
     );
@@ -448,12 +582,16 @@ async function ensureMemberEnqueued(
   assertBatchMemberApproval(run, execution, member);
   const launch = await enqueueRunExecution({
     runId,
-    executionId: expectedMemberExecutionId(input.batchId, runId),
+    executionId: batchMemberExecutionId(
+      input.batchId,
+      runId,
+      batchExecutionMode(execution)
+    ),
     source: "batch",
     batchId: input.batchId,
     renderedPrompt: execution.renderedPrompt,
   });
-  if (!memberExecutionMatches(launch.execution, input.batchId, runId)) {
+  if (!memberExecutionMatches(launch.execution, execution, runId)) {
     throw new Error(`A different child execution already owns run ${runId}.`);
   }
 }
@@ -465,20 +603,24 @@ function assertBatchMemberApproval(
   execution: BatchExecution,
   member: BatchExecutionMember
 ): void {
+  const mode = batchExecutionMode(execution);
+  const expectedScope = batchApprovalScope(mode);
+  const expectedIterations = batchMaximumIterations(mode);
+  const approvalStartedAt = batchApprovalStartedAt(execution);
   const approval = run.spendApproval;
   if (
     !approval ||
     approval.source !== "batch" ||
-    approval.scope !== "first_cut" ||
+    approval.scope !== expectedScope ||
     approval.batchId !== execution.batchId ||
     approval.runId !== run.id ||
     run.originalVideo.runId !== run.id ||
     approval.sourceUrl !== run.originalVideo.url ||
     Math.abs(approval.durationSec - run.originalVideo.durationSec) > 0.001 ||
-    approval.maxIterations !== 1 ||
-    approval.approvedAt !== execution.startedAt ||
+    approval.maxIterations !== expectedIterations ||
+    approval.approvedAt !== approvalStartedAt ||
     approval.expiresAt !==
-      execution.startedAt + BATCH_APPROVAL_LIFETIME_MS
+      approvalStartedAt + BATCH_APPROVAL_LIFETIME_MS
   ) {
     throw new Error(`Run ${run.id} lost its canonical batch approval.`);
   }
@@ -513,7 +655,8 @@ async function recordMemberEnqueueFailure(
   // created. Preserve it so the next parent poll can submit another harmless
   // contender. Provider evidence or any conflicting child is also never safe
   // to rewrite as a zero-spend failure.
-  if (child || operationForFirstCut(run)) return;
+  const paid = await paidOperationsForBatch(storage, batch, runId);
+  if (child || hasAnyProviderEvidence(run, paid)) return;
   if (!run) return;
   try {
     assertBatchMemberApproval(run, batch, member);
@@ -542,7 +685,10 @@ async function failUnstartedRunExecution(
   error: string
 ): Promise<RunExecution | null> {
   const run = await storage.getRun(runId);
-  if (!run || operationForFirstCut(run)) return storage.getRunExecution(runId);
+  const paid = await paidOperationsForBatch(storage, batch, runId);
+  if (!run || hasAnyProviderEvidence(run, paid)) {
+    return storage.getRunExecution(runId);
+  }
 
   let current = await storage.getRunExecution(runId);
   if (!current) {
@@ -550,7 +696,11 @@ async function failUnstartedRunExecution(
     const now = Date.now();
     const created = await storage.createRunExecution({
       runId,
-      executionId: expectedMemberExecutionId(batch.batchId, runId),
+      executionId: batchMemberExecutionId(
+        batch.batchId,
+        runId,
+        batchExecutionMode(batch)
+      ),
       source: "batch",
       batchId: batch.batchId,
       status: "queued",
@@ -565,7 +715,7 @@ async function failUnstartedRunExecution(
     current = created.execution;
   }
   for (let attempt = 0; current && attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
-    if (!memberExecutionMatches(current, batch.batchId, runId)) return current;
+    if (!memberExecutionMatches(current, batch, runId)) return current;
     if (current.status !== "queued") return current;
     const candidate: RunExecution = {
       ...current,
@@ -589,14 +739,15 @@ async function isBudgetSkippedMaterialized(
   batch: BatchExecution,
   member: BatchExecutionMember
 ): Promise<boolean> {
-  const [child, run] = await Promise.all([
+  const [child, run, paid] = await Promise.all([
     storage.getRunExecution(member.runId),
     storage.getRun(member.runId),
+    paidOperationsForBatch(storage, batch, member.runId),
   ]);
   return Boolean(
     run &&
-      !operationForFirstCut(run) &&
-      memberExecutionMatches(child, batch.batchId, member.runId) &&
+      !hasAnyProviderEvidence(run, paid) &&
+      memberExecutionMatches(child, batch, member.runId) &&
       child.renderedPrompt === batch.renderedPrompt &&
       child.inputHash === batch.inputHash &&
       child.status === "failed" &&
@@ -617,6 +768,7 @@ async function reconcileBatchMembers(
         owner: false,
         allTerminal: false,
         stalledOnReconciliation: false,
+        readyForApproval: false,
       };
     }
     if (current.status !== "running") return progressForExecution(current);
@@ -629,16 +781,29 @@ async function reconcileBatchMembers(
         ) {
           return member;
         }
-        let [child, run] = await Promise.all([
+        const [initialChild, run, paid] = await Promise.all([
           storage.getRunExecution(member.runId),
           storage.getRun(member.runId),
+          paidOperationsForBatch(storage, current, member.runId),
         ]);
-        const operation = operationForFirstCut(run);
+        let child = initialChild;
+        const mode = batchExecutionMode(current);
+        const completionReady =
+          mode === "lamp"
+            ? Boolean(
+                run &&
+                  paid &&
+                  completedLampArtifacts({ batch: current, run, paid })
+              )
+            : Boolean(
+                generationOperation(run, 1)?.status === "completed" &&
+                  generationOperation(run, 1)?.result &&
+                  generationOperation(run, 1)?.renderedPrompt ===
+                    current.renderedPrompt
+              );
         if (
-          operation?.status === "completed" &&
-          operation.result &&
-          operation.renderedPrompt === current.renderedPrompt &&
-          memberExecutionMatches(child, current.batchId, member.runId) &&
+          completionReady &&
+          memberExecutionMatches(child, current, member.runId) &&
           child.renderedPrompt === current.renderedPrompt &&
           child.inputHash === current.inputHash &&
           (child.status === "running" ||
@@ -658,12 +823,16 @@ async function reconcileBatchMembers(
             // instead of finishing the batch ahead of the grading queue.
             return withMemberError(
               member,
-              "running",
-              "The completed first cut is waiting for durable settlement."
+              member.state === "reconcile_required"
+                ? "reconcile_required"
+                : "running",
+              mode === "lamp"
+                ? "The completed Lamp Final and evaluation are waiting for durable settlement."
+                : "The completed first cut is waiting for durable settlement."
             );
           }
         }
-        return classifyMember(current, member, child, run);
+        return classifyMember(current, member, child, run, paid);
       })
     );
     const changed = members.some(
@@ -696,7 +865,8 @@ function classifyMember(
   batch: BatchExecution,
   member: BatchExecutionMember,
   child: RunExecution | null,
-  run: Run | null
+  run: Run | null,
+  paid: LampPaidOperations | null
 ): BatchExecutionMember {
   if (!run) {
     return withMemberError(
@@ -705,7 +875,7 @@ function classifyMember(
       "The canonical run disappeared while provider spend may be unresolved."
     );
   }
-  if (child && !memberExecutionMatches(child, batch.batchId, member.runId)) {
+  if (child && !memberExecutionMatches(child, batch, member.runId)) {
     return withMemberError(
       member,
       "reconcile_required",
@@ -724,7 +894,11 @@ function classifyMember(
     );
   }
 
-  const operation = operationForFirstCut(run);
+  if (batchExecutionMode(batch) === "lamp") {
+    return classifyLampMember(batch, member, child, run, paid);
+  }
+
+  const operation = generationOperation(run, 1);
   if (operation && operation.renderedPrompt !== batch.renderedPrompt) {
     return withMemberError(
       member,
@@ -751,7 +925,9 @@ function classifyMember(
       ) {
         return withMemberError(
           member,
-          "running",
+          member.state === "reconcile_required"
+            ? "reconcile_required"
+            : "running",
           "The completed first cut is waiting for durable settlement."
         );
       }
@@ -819,6 +995,215 @@ function classifyMember(
   return member;
 }
 
+function classifyLampMember(
+  batch: BatchExecution,
+  member: BatchExecutionMember,
+  child: RunExecution | null,
+  run: Run,
+  paid: LampPaidOperations | null
+): BatchExecutionMember {
+  if (!paid) {
+    return withMemberError(
+      member,
+      "reconcile_required",
+      "Lamp paid-operation journals could not be loaded."
+    );
+  }
+  const firstGeneration = generationOperation(run, 1);
+  const finalGeneration = generationOperation(run, 2);
+  if (
+    firstGeneration &&
+    firstGeneration.renderedPrompt !== batch.renderedPrompt
+  ) {
+    return withMemberError(
+      member,
+      "reconcile_required",
+      "Lamp Initial provider work does not match the immutable batch prompt."
+    );
+  }
+  if (hasAnyProviderEvidence(run, paid) && !child) {
+    return withMemberError(
+      member,
+      "reconcile_required",
+      "Lamp provider work exists without its matching child execution."
+    );
+  }
+
+  if (finalGeneration) {
+    if (
+      paid.first?.status !== "completed" ||
+      !isLampEvaluationArtifact(paid.first.result, 1)
+    ) {
+      return withMemberError(
+        member,
+        "reconcile_required",
+        "Lamp Final provider work exists without a valid Initial holistic evaluation."
+      );
+    }
+    let expectedFinalPrompt: string;
+    try {
+      expectedFinalPrompt = compileLampFinalPrompt(
+        batch.renderedPrompt,
+        paid.first.result
+      ).rendered;
+    } catch {
+      return withMemberError(
+        member,
+        "reconcile_required",
+        "Lamp's persisted Initial prompt cannot reproduce the exact Final prompt."
+      );
+    }
+    if (finalGeneration.renderedPrompt !== expectedFinalPrompt) {
+      return withMemberError(
+        member,
+        "reconcile_required",
+        "Lamp Final provider work does not match the critique-corrected prompt."
+      );
+    }
+  }
+
+  const completed = completedLampArtifacts({ batch, run, paid });
+  if (completed) {
+    if (
+      child?.status !== "awaiting_review" ||
+      child.phase !== "complete" ||
+      child.iteration !== batchCompletionIteration("lamp")
+    ) {
+      if (
+        child?.status === "running" ||
+        child?.status === "reconcile_required"
+      ) {
+        return withMemberError(
+          member,
+          member.state === "reconcile_required"
+            ? "reconcile_required"
+            : "running",
+          "The completed Lamp Final and evaluation are waiting for durable settlement."
+        );
+      }
+      return withMemberError(
+        member,
+        "reconcile_required",
+        "The exact Lamp two-pass artifacts have no gradeable child settlement."
+      );
+    }
+    try {
+      const actualMicros = confirmedLampActualMicros({ run, paid });
+      if (actualMicros > member.maxReservedMicros) {
+        return withMemberError(
+          member,
+          "reconcile_required",
+          "Confirmed Lamp cost exceeded the immutable member reservation."
+        );
+      }
+      return withMemberError(
+        member,
+        "awaiting_review",
+        undefined,
+        actualMicros
+      );
+    } catch {
+      return withMemberError(
+        member,
+        "reconcile_required",
+        "Completed Lamp cost could not be represented safely."
+      );
+    }
+  }
+
+  if (child?.status === "failed") {
+    if (!hasAnyProviderEvidence(run, paid)) {
+      return withMemberError(
+        member,
+        "failed",
+        child.error ?? "The Lamp child failed before provider work began.",
+        0
+      );
+    }
+    return withMemberError(
+      member,
+      "reconcile_required",
+      child.error ?? "Lamp stopped after partial provider work; spend requires reconciliation."
+    );
+  }
+  if (child?.status === "user_action_required") {
+    return withMemberError(
+      member,
+      "user_action_required",
+      child.error ?? "Lamp needs a renewed batch approval before pass 2."
+    );
+  }
+  if (
+    child?.status === "reconcile_required" ||
+    child?.status === "awaiting_review"
+  ) {
+    return withMemberError(
+      member,
+      "reconcile_required",
+      child.error ?? "Lamp child state and provider journals require reconciliation."
+    );
+  }
+  if (
+    firstGeneration ||
+    finalGeneration ||
+    paid.first ||
+    paid.final
+  ) {
+    if (child?.status === "running") {
+      return member.state === "reconcile_required"
+        ? member
+        : withMemberError(member, "running");
+    }
+    const providerError =
+      finalGeneration?.error ??
+      firstGeneration?.error ??
+      paid.final?.error ??
+      paid.first?.error;
+    return withMemberError(
+      member,
+      "reconcile_required",
+      providerError ?? "Lamp provider work exists without confirmed terminal evidence."
+    );
+  }
+  return member;
+}
+
+async function pauseBatchForApproval(
+  input: DurableRelightBatchInput,
+  workflowRunId: string
+): Promise<"user_action_required" | "not_owner"> {
+  "use step";
+  const storage = getStorage();
+  for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
+    const current = await storage.getBatchExecution(input.batchId);
+    if (!ownsBatchExecution(current, input, workflowRunId)) return "not_owner";
+    if (current.status === "user_action_required") {
+      return "user_action_required";
+    }
+    if (current.status !== "running") return "not_owner";
+    const progress = progressForExecution(current);
+    if (!progress.readyForApproval) {
+      throw new Error("Lamp batch cannot pause while another member is active.");
+    }
+    const candidate: BatchExecution = {
+      ...current,
+      status: "user_action_required",
+      revision: current.revision + 1,
+      updatedAt: Math.max(Date.now(), current.updatedAt),
+      error:
+        `${LAMP_BATCH_USER_ACTION_REQUIRED_PREFIX} renew the exact Lamp batch approval to continue pass 2 from existing journals.`,
+    };
+    const advanced = await storage.advanceBatchExecution(
+      candidate,
+      current.revision
+    );
+    if (advanced.advanced) return "user_action_required";
+  }
+  throw new Error("Lamp batch changed too often to pause for approval.");
+}
+
+pauseBatchForApproval.maxRetries = 2;
+
 async function finishCompletedBatch(
   input: DurableRelightBatchInput,
   workflowRunId: string
@@ -859,7 +1244,7 @@ async function failUnresolvedBatch(
 ): Promise<"failed" | "done" | "not_owner"> {
   "use step";
   const storage = getStorage();
-  let initial = await storage.getBatchExecution(input.batchId);
+  const initial = await storage.getBatchExecution(input.batchId);
   if (!ownsBatchExecution(initial, input, workflowRunId)) return "not_owner";
   if (initial.status === "done" || initial.status === "failed") {
     return initial.status;
@@ -890,11 +1275,12 @@ async function failUnresolvedBatch(
         ) {
           return member;
         }
-        const [child, run] = await Promise.all([
+        const [child, run, paid] = await Promise.all([
           storage.getRunExecution(member.runId),
           storage.getRun(member.runId),
+          paidOperationsForBatch(storage, current, member.runId),
         ]);
-        const classified = classifyMember(current, member, child, run);
+        const classified = classifyMember(current, member, child, run, paid);
         if (
           classified.state === "running" ||
           classified.state === "queued"

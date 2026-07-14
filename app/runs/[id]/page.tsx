@@ -20,6 +20,7 @@ import { AttemptSwitcher } from "@/components/review/AttemptSwitcher";
 import { EvalList } from "@/components/review/EvalList";
 import { ReviewActions } from "@/components/review/ReviewActions";
 import { WorkflowRail } from "@/components/review/WorkflowRail";
+import { isLampBlindGradeLocked } from "@/components/grade/derive";
 
 const STATUS_COLOR: Record<RunStatus, string> = {
   running: "var(--running)",
@@ -37,12 +38,24 @@ const STATUS_LABEL: Record<RunStatus, string> = {
   failed: "failed",
 };
 
-/** Resolve run.bestIterationIndex against Iteration.index (1-based), with fallbacks. */
-function bestIteration(run: Run): Iteration | undefined {
+function isLampRun(run: Run): boolean {
+  return run.workflowMode === "lamp" || run.workflowId === "lamp-v1";
+}
+
+/** Resolve the evaluation attached to the delivered artifact for either workflow. */
+function finalIteration(run: Run): Iteration | undefined {
   const last = run.iterations[run.iterations.length - 1];
-  const bi = run.bestIterationIndex;
-  if (bi === undefined) return last;
-  return run.iterations.find((it) => it.index === bi) ?? run.iterations[bi] ?? last;
+  if (isLampRun(run)) {
+    return run.iterations.find((iteration) => iteration.index === 2) ?? last;
+  }
+
+  const bestIndex = run.bestIterationIndex;
+  if (bestIndex === undefined) return last;
+  return (
+    run.iterations.find((iteration) => iteration.index === bestIndex) ??
+    run.iterations[bestIndex] ??
+    last
+  );
 }
 
 /**
@@ -62,13 +75,13 @@ export default function RunReviewPage() {
       <main className="mx-auto max-w-5xl px-6 py-10">
         <EmptyState
           title="Run not found"
-          hint="This run may have been deleted, or its id is wrong. Head back to Studio to pick an existing run or upload a new clip."
+          hint="This run may have been deleted, or its id is wrong. Head back to Create to pick an existing run or upload a new clip."
           action={
             <Link
               href="/"
-              className="mt-1 rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition hover:border-faint"
+              className="mt-1 inline-flex min-h-10 items-center rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition-[transform,border-color] duration-150 ease-out hover:border-faint active:scale-[0.96]"
             >
-              Back to studio
+              Back to Create
             </Link>
           }
         />
@@ -77,21 +90,29 @@ export default function RunReviewPage() {
   }
 
   const latest = run.iterations[run.iterations.length - 1];
-  // Default to the final cut when it exists; mid-flight, follow the latest attempt.
+  const lampRun = isLampRun(run);
+  const blindGradeLocked = isLampBlindGradeLocked(run);
+  // Default to Lamp's delivered v2 final; mid-flight, follow the newest stage.
   const autoKey = run.finalVideo ? "final" : latest ? `iter-${latest.index}` : null;
-  const activeKey = userSelected ?? autoKey;
+  const activeKey = blindGradeLocked ? "final" : userSelected ?? autoKey;
   const isFinal = activeKey === "final" && Boolean(run.finalVideo);
 
   const selectedIteration: Iteration | undefined = isFinal
-    ? bestIteration(run)
+    ? finalIteration(run)
     : (run.iterations.find((it) => `iter-${it.index}` === activeKey) ?? latest);
 
   const relitVideo = isFinal ? run.finalVideo : selectedIteration?.generatedVideo;
   const relitLabel = isFinal
-    ? "RELIT · FINAL"
+    ? `${lampRun ? "FINAL VIDEO" : "FLORA VIDEO"}${selectedIteration ? ` · v${selectedIteration.index}` : ""}`
     : selectedIteration
-      ? `RELIT v${selectedIteration.index}`
-      : "RELIT";
+      ? lampRun && selectedIteration.index === 1
+        ? "INITIAL VIDEO · v1"
+        : lampRun && selectedIteration.index === 2
+          ? "FINAL VIDEO · v2"
+          : `VIDEO · v${selectedIteration.index}`
+      : lampRun
+        ? "LAMP VIDEO"
+        : "FLORA VIDEO";
 
   const shortId = run.id.length > 12 ? `${run.id.slice(0, 12)}…` : run.id;
 
@@ -99,8 +120,11 @@ export default function RunReviewPage() {
     <main className="mx-auto max-w-5xl px-6 pb-16 pt-6 xl:max-w-6xl">
       {/* SLIM HEADER — one line */}
       <header className="flex flex-wrap items-center gap-3 pb-6">
-        <Link href="/" className="text-sm text-muted transition hover:text-ink">
-          ← Studio
+        <Link
+          href="/"
+          className="inline-flex min-h-10 items-center text-sm text-muted transition-[color,transform] duration-150 ease-out hover:text-ink active:scale-[0.96]"
+        >
+          ← Create
         </Link>
         <span className="text-sm font-medium text-ink">{run.originalVideo.label}</span>
         <Badge
@@ -111,8 +135,8 @@ export default function RunReviewPage() {
             : STATUS_LABEL[run.status]}
         </Badge>
         <span className="font-mono text-2xs text-faint">{shortId}</span>
-        <span className="ml-auto flex items-center gap-3">
-          <RunTabs runId={run.id} active="review" />
+        <span className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto sm:flex-nowrap sm:gap-3">
+          <RunTabs runId={run.id} active="review" journeyLocked={blindGradeLocked} />
           <DownloadSideBySide run={run} />
           <ShareButton run={run} />
         </span>
@@ -141,18 +165,22 @@ export default function RunReviewPage() {
               run={run}
               iteration={selectedIteration}
               threshold={workflow.config.compositePassThreshold}
+              hideAutomated={blindGradeLocked}
             />
           </div>
 
           {/* ATTEMPT SWITCHER */}
-          <div className="py-3">
-            <AttemptSwitcher run={run} activeKey={activeKey} onSelect={setUserSelected} />
-          </div>
+          {blindGradeLocked ? null : (
+            <div className="py-3">
+              <AttemptSwitcher run={run} activeKey={activeKey} onSelect={setUserSelected} />
+            </div>
+          )}
 
           {/* EVALS — eleven flat rows */}
           <EvalList
             iteration={selectedIteration}
             evalsUnderway={run.status !== "running" || evalPhaseReached(run)}
+            hiddenUntilHumanGrade={blindGradeLocked}
           />
 
           {/* REVIEW */}

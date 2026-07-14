@@ -50,7 +50,7 @@ export function SectionTitle({
 }) {
   return (
     <div className="mb-3 flex items-center justify-between">
-      <h2 className="text-2xs font-semibold uppercase tracking-[0.14em] text-muted">
+      <h2 className="text-balance text-2xs font-semibold uppercase tracking-[0.14em] text-muted">
         {children}
       </h2>
       {right}
@@ -105,7 +105,7 @@ export function ScoreMeter({
     <div className="flex items-center gap-2">
       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-raised">
         <div
-          className="h-full rounded-full transition-all duration-500"
+          className="h-full rounded-full transition-[width] duration-500"
           style={{ width: `${score}%`, background: color }}
         />
       </div>
@@ -125,7 +125,7 @@ export function ConfidenceMeter({ confidence }: { confidence: number }) {
   return (
     <div
       className="flex items-center gap-1"
-      title={`Judge agreement: ${Math.round(confidence * 100)}%`}
+      title={`Evaluation confidence: ${Math.round(confidence * 100)}%`}
     >
       {Array.from({ length: 5 }, (_, i) => (
         <span
@@ -179,7 +179,7 @@ export function Button({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`rounded-lg px-3.5 py-1.5 text-sm transition disabled:cursor-not-allowed disabled:opacity-40 ${styles[variant]} ${className}`}
+      className={`min-h-10 rounded-lg px-3.5 py-1.5 text-sm transition-[transform,filter,color,background-color,border-color] duration-150 ease-out active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100 ${styles[variant]} ${className}`}
     >
       {children}
     </button>
@@ -206,8 +206,8 @@ export function EmptyState({
 }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-edge py-14 text-center">
-      <p className="text-sm text-muted">{title}</p>
-      {hint ? <p className="max-w-md text-xs text-faint">{hint}</p> : null}
+      <p className="text-balance text-sm text-muted">{title}</p>
+      {hint ? <p className="max-w-md text-pretty text-xs text-faint">{hint}</p> : null}
       {action}
     </div>
   );

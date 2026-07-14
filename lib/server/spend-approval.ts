@@ -1,16 +1,34 @@
 import { randomUUID } from "node:crypto";
-import { estimateRun } from "@/lib/cost";
+import {
+  FIRST_CUT_MAX_OUTPUT_SECONDS,
+  estimateLampRun,
+  estimateRun,
+} from "../cost.ts";
 import {
   firstCutMaximumMicros,
   microsToUsd,
   usdToMicros,
-} from "@/lib/server/batch-budget";
-import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
-import type { PaidOperation, Run, SpendApproval, VideoAsset } from "@/lib/types";
+} from "./batch-budget.ts";
+import { RELIGHT_WORKFLOW } from "../workflow-def.ts";
+import { lampEvaluationOperationId } from "../lamp-evaluation.ts";
+import type {
+  PaidOperation,
+  Run,
+  SpendApproval,
+  VideoAsset,
+} from "../types.ts";
 
 export const SINGLE_APPROVAL_LIFETIME_MS = 24 * 60 * 60 * 1000;
 export const BATCH_APPROVAL_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 const APPROVAL_CLOCK_SKEW_MS = 60_000;
+/** Preserve recovery of pre-Lamp approvals that allowed up to four attempts. */
+const LEGACY_MAX_ITERATIONS = 4;
+
+export function lampMaximumMicros(): number {
+  return usdToMicros(
+    estimateLampRun(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd
+  );
+}
 
 function approvalLifetimeMs(source: SpendApproval["source"]): number {
   return source === "batch"
@@ -40,7 +58,12 @@ export function createSpendApproval(
   if (source === "single" && batchId !== undefined) {
     throw new Error("Single-run spend approval cannot carry a batch identity.");
   }
-  const maxIterations = scope === "first_cut" ? 1 : RELIGHT_WORKFLOW.config.maxIterations;
+  const maxIterations =
+    scope === "first_cut"
+      ? 1
+      : scope === "lamp_two_pass"
+        ? 2
+        : RELIGHT_WORKFLOW.config.maxIterations;
   return {
     id: randomUUID(),
     source,
@@ -54,6 +77,8 @@ export function createSpendApproval(
     maxUsd:
       scope === "first_cut"
         ? microsToUsd(firstCutMaximumMicros())
+        : scope === "lamp_two_pass"
+          ? microsToUsd(lampMaximumMicros())
         : estimateRun(video.durationSec, maxIterations).totalUsd,
     maxIterations,
   };
@@ -87,10 +112,12 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
     approval.maxUsd <= 0 ||
     (approval.scope !== undefined &&
       approval.scope !== "full_pipeline" &&
-      approval.scope !== "first_cut") ||
+      approval.scope !== "first_cut" &&
+      approval.scope !== "lamp_two_pass") ||
     !Number.isSafeInteger(approval.maxIterations) ||
     approval.maxIterations < 1 ||
-    approval.maxIterations > RELIGHT_WORKFLOW.config.maxIterations
+    approval.maxIterations >
+      (approval.scope === "lamp_two_pass" ? 2 : LEGACY_MAX_ITERATIONS)
   ) {
     throw new Error("Live spend approval is invalid.");
   }
@@ -100,6 +127,8 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
   const authorizedWorstCase =
     approval.scope === "first_cut"
       ? microsToUsd(firstCutMaximumMicros())
+      : approval.scope === "lamp_two_pass"
+        ? microsToUsd(lampMaximumMicros())
       : estimateRun(
           run.originalVideo.durationSec,
           approval.maxIterations
@@ -107,7 +136,9 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
   if (
     approval.maxUsd + Number.EPSILON < authorizedWorstCase ||
     (approval.scope === "first_cut" &&
-      usdToMicros(approval.maxUsd) !== firstCutMaximumMicros())
+      usdToMicros(approval.maxUsd) !== firstCutMaximumMicros()) ||
+    (approval.scope === "lamp_two_pass" &&
+      usdToMicros(approval.maxUsd) !== lampMaximumMicros())
   ) {
     throw new Error("Live spend approval does not match the configured run limit.");
   }
@@ -139,6 +170,29 @@ export function hasReusableFirstCutApproval(
 }
 
 /**
+ * Lost-response retries may reuse only the exact two-pass grant for the same
+ * execution owner. Batch grants stay bound to their immutable batch id.
+ */
+export function hasReusableLampApproval(
+  run: Run,
+  source: SpendApproval["source"] = "single",
+  batchId?: string,
+  now = Date.now()
+): boolean {
+  try {
+    const approval = assertApprovalCoversRun(run, now);
+    return (
+      approval.scope === "lamp_two_pass" &&
+      approval.source === source &&
+      approval.batchId === batchId &&
+      approval.maxIterations === 2
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Authorize a new synchronous paid operation. Cache reads and reconciliation
  * never call this because they cannot incur new provider spend.
  */
@@ -146,6 +200,8 @@ export function assertPaidOperationAuthorized(
   run: Run,
   kind: PaidOperation["kind"],
   iteration?: number,
+  evalId?: string,
+  operationId?: string,
   now = Date.now()
 ): void {
   const approval = assertApprovalCoversRun(run, now);
@@ -153,6 +209,21 @@ export function assertPaidOperationAuthorized(
     throw new Error(
       "This approval covers first-cut video generation only; automated paid checks were not authorized."
     );
+  }
+  if (approval.scope === "lamp_two_pass") {
+    if (
+      kind !== "judge" ||
+      evalId !== "lamp-holistic" ||
+      operationId !== lampEvaluationOperationId(iteration ?? 0)
+    ) {
+      throw new Error(
+        "Lamp authorizes only its two stable holistic evaluation operations; individual judges, manifests, and anchors are outside this workflow."
+      );
+    }
+    if (iteration !== 1 && iteration !== 2) {
+      throw new Error("Lamp evaluation must belong to generation 1 or 2.");
+    }
+    return;
   }
   if (kind === "manifest") {
     if (iteration !== undefined) {
@@ -164,7 +235,7 @@ export function assertPaidOperationAuthorized(
     !Number.isSafeInteger(iteration) ||
     (iteration as number) < 1 ||
     (iteration as number) > approval.maxIterations ||
-    (iteration as number) > RELIGHT_WORKFLOW.config.maxIterations
+    (iteration as number) > LEGACY_MAX_ITERATIONS
   ) {
     throw new Error("This paid operation is outside the approved iteration limit.");
   }
@@ -184,9 +255,17 @@ export function assertVideoGenerationAuthorized(
     throw new Error("This approval covers only the first video generation attempt.");
   }
   if (
+    approval.scope === "lamp_two_pass" &&
+    iteration !== 1 &&
+    iteration !== 2
+  ) {
+    throw new Error("Lamp authorizes exactly two video generation attempts.");
+  }
+  if (
     iteration < 1 ||
     iteration > approval.maxIterations ||
-    iteration > RELIGHT_WORKFLOW.config.maxIterations
+    iteration >
+      (approval.scope === "lamp_two_pass" ? 2 : LEGACY_MAX_ITERATIONS)
   ) {
     throw new Error("This generation attempt is outside the approved limit.");
   }
