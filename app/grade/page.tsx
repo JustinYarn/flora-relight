@@ -4,14 +4,22 @@ import { GradeView } from "@/components/grade/GradeView";
 export const metadata: Metadata = {
   title: "Grade — Lamp",
   description:
-    "Blind-grade final Lamp videos, then compare your calls with the available final AI evaluation",
+    "Grade final Lamp videos independently, with the saved AI evaluation hidden by default",
 };
 
 /**
- * /grade — blind human grading with optional automated-result comparison.
+ * /grade — human grading with an optional, explicit AI-evaluation reveal.
  * Draft answers are durable server-side working memory; final grades are
  * stored atomically on the canonical run document.
  */
-export default function GradePage() {
-  return <GradeView />;
+export default async function GradePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ run?: string | string[] }>;
+}) {
+  const params = await searchParams;
+  const requestedRunId =
+    typeof params.run === "string" ? params.run : undefined;
+
+  return <GradeView requestedRunId={requestedRunId} />;
 }

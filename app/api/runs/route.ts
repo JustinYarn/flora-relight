@@ -423,12 +423,12 @@ function providerOperationMatchesLampExecution(
 function mergeLampEvaluationResults(
   candidate: Run,
   execution: RunExecution,
-  evaluations: LampEvaluationProjection
+  evaluations: LampEvaluationProjection,
+  revealFinalEvaluation = false
 ): void {
   const first = lampArtifact(evaluations.first, 1);
   const final = lampArtifact(evaluations.final, 2);
   const finalPrompt = first ? lampFinalPrompt(execution, evaluations) : undefined;
-  const revealFinalEvidence = candidate.humanGrade !== undefined;
   for (const [index, artifact] of [
     [1, first],
     [2, final],
@@ -442,7 +442,8 @@ function mergeLampEvaluationResults(
     const projection = projectLampEvaluationForRead({
       iteration: index,
       artifact,
-      humanGradeSaved: revealFinalEvidence,
+      humanGradeSaved: candidate.humanGrade !== undefined,
+      revealFinalEvaluation,
     });
     iteration.evalResults = projection.evalResults;
     if (projection.composite) iteration.composite = projection.composite;
@@ -498,7 +499,8 @@ function materializeServerResults(
   run: Run,
   paidCosts: PaidOperationCostEntry[] = [],
   execution?: RunExecution | null,
-  lampEvaluations: LampEvaluationProjection = { first: null, final: null }
+  lampEvaluations: LampEvaluationProjection = { first: null, final: null },
+  revealFinalEvaluation = false
 ): Run {
   const materialized: Run = {
     ...run,
@@ -707,7 +709,15 @@ function materializeServerResults(
       }
     }
     if (lamp) {
-      mergeLampEvaluationResults(materialized, execution, lampEvaluations);
+      // An explicit reveal is available only after the exact durable execution
+      // has reached its normal grading boundary. The paid artifact is read from
+      // its existing journal; this branch never invokes an evaluator.
+      mergeLampEvaluationResults(
+        materialized,
+        execution,
+        lampEvaluations,
+        revealFinalEvaluation && durableExecution?.status === "awaiting_review"
+      );
     }
 
     const skipped = lamp
@@ -999,12 +1009,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       storage.getRunExecution(requestedId),
       readLampEvaluationProjection(storage, requestedId),
     ]);
+    const revealFinalEvaluation =
+      req.nextUrl.searchParams.get("revealFinalEvaluation") === "1";
     const run = storedRun
       ? materializeServerResults(
           storedRun,
           paidCosts,
           execution,
-          lampEvaluations
+          lampEvaluations,
+          revealFinalEvaluation
         )
       : null;
     if (!run) return NextResponse.json({ error: "Run not found." }, { status: 404 });

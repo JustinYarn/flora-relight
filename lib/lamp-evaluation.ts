@@ -88,18 +88,24 @@ export function lampCompositeForResults(
 }
 
 /**
- * Final AI evidence stays sealed until the human grade is durably saved.
- * Initial evidence remains available to drive and inspect the correction pass.
+ * Final AI evidence stays sealed on ordinary reads until the human grade is
+ * durably saved. The Grade workspace may explicitly reveal the already-saved
+ * artifact; that opt-in read never starts or retries provider work. Initial
+ * evidence remains available to drive and inspect the correction pass.
  * Returning an empty projection also overwrites any stale browser-authored copy.
  */
 export function projectLampEvaluationForRead(input: {
   iteration: 1 | 2;
   artifact?: LampEvaluationArtifact;
   humanGradeSaved: boolean;
+  /** Explicit, read-only reveal requested from the exact-run Grade surface. */
+  revealFinalEvaluation?: boolean;
 }): { evalResults: EvalResult[]; composite?: IterationComposite } {
   if (
     !input.artifact ||
-    (input.iteration === 2 && !input.humanGradeSaved)
+    (input.iteration === 2 &&
+      !input.humanGradeSaved &&
+      input.revealFinalEvaluation !== true)
   ) {
     return { evalResults: [] };
   }

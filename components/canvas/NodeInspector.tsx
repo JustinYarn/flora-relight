@@ -1086,7 +1086,7 @@ function AggregateSection({
             },
             {
               label: "After Final",
-              value: "Stores the AI grades for blind human comparison",
+              value: "Stores AI grades hidden by default for optional reveal and comparison",
               color: "var(--accent)",
             },
           ]}

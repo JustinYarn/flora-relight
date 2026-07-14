@@ -1,13 +1,20 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import type { GradeClipDraft, HumanCheckGrade, HumanGrade, Run } from "@/lib/types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type {
+  GradeClipDraft,
+  HumanCheckGrade,
+  HumanGrade,
+  Iteration,
+  Run,
+} from "@/lib/types";
 import { useAppStore } from "@/lib/store";
 import { markServerRunObserved } from "@/lib/persist";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { Button, verdictColor } from "@/components/ui";
 import { PairPlayer } from "@/components/library/PairPlayer";
 import { formatRunDate } from "@/components/library/derive";
+import { EvalList } from "@/components/review/EvalList";
 import {
   finalLampIteration,
   finalLampVideo,
@@ -17,10 +24,10 @@ import {
 import type { GradeDraftSaveState } from "@/components/grade/useGradeDraft";
 
 /*
- * Blind grading of ONE clip. Deliberately shows NOTHING from the AI judges —
- * no scores, no verdicts, no violations — so the human read is un-anchored.
- * The same v2/final helpers used by the results view pick the delivered cut;
- * automated comparisons appear only after this blind grade is saved.
+ * Independent grading of ONE clip. Final AI evidence is hidden by default so
+ * the human read can stay un-anchored, but the grader may explicitly reveal
+ * the already-saved result. That read stays local to this component and never
+ * starts provider work or writes the evidence into the global run cache.
  */
 
 /** Rows where the check is about sound or timing get a how-to-look hint. */
@@ -33,6 +40,8 @@ interface Answer {
   points: HumanCheckGrade["points"];
   note: string;
 }
+
+type AiRevealState = "hidden" | "loading" | "shown" | "error";
 
 function ScaleRow({
   answer,
@@ -118,14 +127,82 @@ export function ClipGrader({
   const overallNote = draft.overallNote;
   const [submitting, setSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [aiRevealState, setAiRevealState] = useState<AiRevealState>("hidden");
+  const [revealedFinal, setRevealedFinal] = useState<Iteration | null>(null);
+  const [aiRevealError, setAiRevealError] = useState<string | null>(null);
+  const revealRequest = useRef<AbortController | null>(null);
 
   const shipped = finalLampIteration(run);
   const relit = finalLampVideo(run);
+  const lampRun =
+    run.workflowMode === "lamp" ||
+    run.workflowId === "lamp-v1" ||
+    run.serverExecution?.executionId.startsWith("lamp:") === true;
+  const aiHeadingId = `final-ai-heading-${run.id}`;
+  const aiPanelId = `final-ai-panel-${run.id}`;
   const answeredCount = useMemo(
     () => EVAL_DEFS.filter((d) => answers[d.id]).length,
     [answers]
   );
   const complete = answeredCount === EVAL_DEFS.length && shipIt !== undefined;
+
+  useEffect(
+    () => () => {
+      revealRequest.current?.abort();
+    },
+    []
+  );
+
+  const toggleAiEvaluation = async (): Promise<void> => {
+    if (aiRevealState === "loading") return;
+    if (aiRevealState === "shown") {
+      setAiRevealState("hidden");
+      setAiRevealError(null);
+      return;
+    }
+    if (revealedFinal) {
+      setAiRevealState("shown");
+      setAiRevealError(null);
+      return;
+    }
+
+    revealRequest.current?.abort();
+    const controller = new AbortController();
+    revealRequest.current = controller;
+    setAiRevealState("loading");
+    setAiRevealError(null);
+    try {
+      const response = await fetch(
+        `/api/runs?id=${encodeURIComponent(run.id)}&revealFinalEvaluation=1`,
+        { cache: "no-store", signal: controller.signal }
+      );
+      const payload = (await response.json().catch(() => null)) as
+        | { run?: Run; error?: string }
+        | null;
+      if (!response.ok || !payload?.run) {
+        throw new Error(
+          payload?.error ?? `Final AI evaluation could not be read (${response.status}).`
+        );
+      }
+      const final = finalLampIteration(payload.run);
+      if (final?.index !== 2 || final.evalResults.length === 0) {
+        throw new Error("The saved Final AI evaluation is not available yet.");
+      }
+      if (controller.signal.aborted) return;
+      setRevealedFinal(final);
+      setAiRevealState("shown");
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setAiRevealState("error");
+      setAiRevealError(
+        error instanceof Error
+          ? error.message
+          : "The saved Final AI evaluation could not be read."
+      );
+    } finally {
+      if (revealRequest.current === controller) revealRequest.current = null;
+    }
+  };
 
   const save = async (): Promise<void> => {
     if (!complete || shipIt === undefined || submitting) return;
@@ -248,6 +325,67 @@ export function ClipGrader({
           }
         />
       </div>
+
+      {lampRun ? (
+        <section
+          aria-busy={aiRevealState === "loading"}
+          className="mt-4 rounded-xl bg-surface px-4 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.16)]"
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="min-w-0 flex-1">
+              <span
+                id={aiHeadingId}
+                className="block text-sm font-medium text-ink"
+              >
+                {aiRevealState === "shown"
+                  ? "Final AI evaluation is visible"
+                  : "Final AI evaluation is ready"}
+              </span>
+              <span className="mt-0.5 block text-pretty text-2xs leading-relaxed text-muted">
+                {aiRevealState === "shown"
+                  ? "These are the stored results for Final. Hiding them does not change your grading draft."
+                  : "Hidden by default so you can grade independently. Showing it only reads the saved result — no AI call runs again."}
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => void toggleAiEvaluation()}
+              disabled={aiRevealState === "loading"}
+              aria-expanded={aiRevealState === "shown"}
+              aria-controls={aiPanelId}
+              className="min-h-10 shrink-0 rounded-lg border border-edge bg-raised px-3.5 py-1.5 text-sm text-ink transition-[transform,color,background-color,border-color] duration-150 ease-out hover:border-faint disabled:cursor-wait disabled:text-faint active:scale-[0.96]"
+            >
+              {aiRevealState === "loading"
+                ? "Loading saved evaluation…"
+                : aiRevealState === "shown"
+                  ? "Hide AI evaluation"
+                  : aiRevealState === "error"
+                    ? "Try reveal again"
+                    : "Show AI evaluation"}
+            </button>
+          </div>
+          {aiRevealState === "loading" ? (
+            <span className="sr-only" role="status" aria-live="polite">
+              Loading the saved Final AI evaluation.
+            </span>
+          ) : null}
+          {aiRevealError ? (
+            <p className="mt-2 text-pretty text-2xs text-fail" role="alert">
+              {aiRevealError}
+            </p>
+          ) : null}
+          {aiRevealState === "shown" && revealedFinal ? (
+            <div
+              id={aiPanelId}
+              role="region"
+              aria-labelledby={aiHeadingId}
+              className="mt-4 border-t border-edge pt-4"
+            >
+              <EvalList iteration={revealedFinal} />
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       {/* The 11 checks — flat rows, same order as everywhere else in the app */}
       <section className="mt-6 divide-y divide-edge border-b border-t border-edge">

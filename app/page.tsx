@@ -1337,7 +1337,7 @@ export default function DashboardPage() {
                   `Estimated provider cost: ${formatUsd(estimateLampRun(pendingLaunch.video.durationSec).totalUsd)}`,
                   `Hard authorization: exactly two video generations and two holistic evaluation calls, up to ${formatUsd(estimateLampRun(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd)} including the 50ms-per-generation container allowance above the 10-second model cap. There is no open-ended retry loop.`,
                   "For both Initial and Final, Lamp restores and verifies source audio before the whole-video evaluation. The fixed two-pass run continues on the server if this tab closes.",
-                  "Final enters blind human grading. The AI evaluation is revealed only after your grade is saved.",
+                  "Final enters per-video human grading. Its completed AI evaluation stays hidden by default and can be revealed whenever you choose.",
                   ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
                 ]
               : [
@@ -1400,7 +1400,7 @@ export default function DashboardPage() {
               )
             )}`,
             pendingBatch.workflowMode === "lamp"
-              ? "Every Lamp clip uses exactly two generations and two holistic evaluations, then waits for a blind human grade."
+              ? "Every Lamp clip uses exactly two generations and two holistic evaluations, then waits for its own human grade."
               : "Every Flora clip uses one generation and lands in the established human review queue.",
             mode === "live"
               ? `Hard batch authorization: up to ${formatUsd(

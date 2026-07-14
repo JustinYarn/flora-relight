@@ -484,7 +484,7 @@ export interface RunLogEntry {
   message: string;
 }
 
-/** One human verdict on one check, recorded in the blind grading flow (/grade). */
+/** One human verdict on one check, recorded in the grading flow (/grade). */
 export interface HumanCheckGrade {
   /** 5-point scale: 5 perfect · 4 minor issues · 3 noticeable · 2 clear problems · 1 badly wrong. */
   points: 1 | 2 | 3 | 4 | 5;
@@ -496,10 +496,10 @@ export interface HumanCheckGrade {
 }
 
 /**
- * A human's blind grade of one run's shipped cut — the same 11 checks the AI
- * judges scored, graded WITHOUT seeing the AI's verdicts (that's the point:
- * no anchoring). Compared against Lamp Final's evalResults on the
- * /grade "Compare with AI" view to calibrate the judge rubrics.
+ * A human grade of one run's shipped cut across the same 11 rubric rows. Lamp
+ * starts with AI evidence hidden so the grader can avoid anchoring, while an
+ * explicit reveal remains available. Results compares the saved human grade
+ * against Lamp Final's evalResults to calibrate the judge rubrics.
  */
 export interface HumanGrade {
   gradedAt: number;
@@ -597,7 +597,7 @@ export interface SpendApproval {
   maxIterations: number;
 }
 
-/** One in-progress answer in the blind grading workspace. */
+/** One in-progress answer in the grading workspace. */
 export interface GradeDraftAnswer {
   points: HumanCheckGrade["points"];
   /** Kept untrimmed while editing so autosave never changes what was typed. */
@@ -612,7 +612,7 @@ export interface GradeClipDraft {
 }
 
 /**
- * Durable working memory for the whole blind-grading workspace.
+ * Durable working memory for the whole grading workspace.
  *
  * One revisioned document keeps partial clip answers and queue position in a
  * single compare-and-swap write. `revision` and `updatedAt` are server-owned;
@@ -671,7 +671,7 @@ export interface Run {
     reviewedAt: number;
   };
   /**
-   * Blind human grade from /grade (see HumanGrade). Persists automatically
+   * Human grade from /grade (see HumanGrade). Persists automatically
    * through the normal run sync — fs and cloud drivers alike — because it
    * rides inside run.json like every other Run field.
    */

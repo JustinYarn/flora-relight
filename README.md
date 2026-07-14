@@ -19,8 +19,9 @@ Each live Lamp run has one fixed, auditable path:
    same fail-closed source-audio finalization.
 5. Evaluate the finalized Final video holistically with the same eight visual
    checks and record its deterministic audio result.
-6. Blind-grade the final video as a human, then reveal a per-check comparison
-   between the human grade and the final AI evaluation.
+6. Grade the final video as a human. The completed final AI evaluation stays
+   hidden by default, can be revealed explicitly at any time in Grade, and is
+   compared per check after the human grade is saved.
 
 `temporal-alignment` is currently unavailable because its deterministic live
 correlation metric is not implemented. `lighting-match-to-anchor` is inapplicable
@@ -48,7 +49,7 @@ Prerequisites:
 - **API keys** for live mode: copy `.env.local.example` to `.env.local` and add your
   own keys (Google AI Studio needs a paid-tier project for image/video models).
   Without keys the app boots in a provider-free mock rehearsal and spends nothing;
-  only server-verified live artifacts enter the blind grading queue.
+  only server-verified live artifacts enter the grading queue.
 
 ```bash
 npm install
@@ -156,13 +157,14 @@ The hosted app now has several independent persistence boundaries:
   alter its budget, or erase it. A deleted run id is permanently tombstoned. Normal deletion
   is refused while an execution, Batch membership, or provider journal is active or
   needs reconciliation; a prepared upload with no paid work remains deletable.
-- **Blind grading:** `/grade` restores and autosaves a revisioned grading draft through
+- **Human grading:** `/grade` restores and autosaves a revisioned grading draft through
   `/api/grade-drafts`. Compare-and-swap revisions prevent an older tab from silently
   overwriting a newer draft. Final submission also uses compare-and-swap, so a stale grader
   receives a conflict instead of replacing the latest grade. Before that save, normal run
-  projections clear Final's AI scores and the Review/Journey surfaces keep its evidence
-  sealed; the successful grade response materializes the canonical final evaluation for
-  comparison. A completed video reconstructed
+  projections clear Final's AI scores. Grade offers a deliberate, read-only reveal of the
+  already-journaled evaluation without rerunning a provider; otherwise it remains hidden.
+  The successful grade response materializes the canonical final evaluation for comparison
+  across Results, Review, and Journey. A completed video reconstructed
   from the server provider journal remains gradeable even if later browser-side frame/judge
   work failed; the displayed URL and accepted grade refer to that exact journaled artifact.
 - **Potentially paid calls:** each selected method receives a server-issued spend approval
@@ -330,7 +332,7 @@ the technical vocabulary. Same concepts, one mapping:
 | --- | --- |
 | `/` | Create — select Flora or Lamp, then upload one clip or prepare a batch |
 | `/library` | The Library — browse every past generation with progressive disclosure |
-| `/grade` | Grade — blind-grade final cuts on the full human rubric, then compare each available score with the final AI evaluation |
+| `/grade` | Grade — select any finished final cut, score the full human rubric, and optionally reveal its already-saved AI evaluation |
 | `/pipeline` | The selected Flora/Lamp Method graph and live run status |
 | `/batch` | Flora and Lamp batch progress, spend settlement, and recovery |
 | `/prompts` | Prompt library — the base prompt, manifest extractor, all 11 eval rubrics, mega-prompt compiler |
@@ -393,7 +395,7 @@ Create accepts multiple clips for either method. The server freezes one immutabl
 cost, and runs at most two children concurrently. Flora reserves its one-cut amount.
 Lamp separately reserves two generations plus two holistic evaluations per member;
 it never reuses Flora's smaller reservation. Each Lamp member keeps its own Initial,
-Final, evaluation journals, blind human grade, and per-check AI comparison. Closing
+Final, evaluation journals, human grade, and per-check AI comparison. Closing
 the browser does not pause the queue, and a lost response may enqueue only a
 non-paid contender—not duplicate provider work.
 
@@ -445,9 +447,10 @@ media plumbing stay on server routes:
    approval and atomically claim a stable operation id. Ambiguous outcomes are sealed for
    reconciliation; the app never assumes that an HTTP error means a paid request is safe to
    repeat.
-5. **Human calibration:** the grader scores the final video blind. Only after submission does
-   the server reveal the journaled final AI evidence, and the Results view compares the human
-   scores with it per video and per check; unavailable AI rows stay unavailable.
+5. **Human calibration:** the grader scores the final video with the journaled AI evidence
+   hidden by default. An explicit control can reveal that saved evidence without a new
+   provider call. After submission, Results compares the human scores with it per video and
+   per check; unavailable AI rows stay unavailable.
 6. `/api/live/health` selects live mode when the generation provider is configured and
    reports the broader evaluation capability separately. That selection is a configuration
    fact, not proof that any provider/model is functional in the current deployment.

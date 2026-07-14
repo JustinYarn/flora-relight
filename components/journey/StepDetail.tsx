@@ -212,7 +212,7 @@ function AttemptDetail({
     ? results.length > 0
       ? iteration.index === 1
         ? "whole-video critique complete — every actionable finding feeds Final"
-        : "final AI evaluation saved — ready for your blind human grade"
+        : "final AI evaluation saved — ready for your human grade"
       : iteration.generatedVideo
         ? "video finalized — waiting for its whole-video evaluation"
         : "generating and finalizing…"

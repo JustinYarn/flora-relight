@@ -256,7 +256,7 @@ export function EvalList({
    * runs behave exactly as before.
    */
   evalsUnderway?: boolean;
-  /** Preserve blind grading: final evidence is revealed only after save. */
+  /** Keep ordinary Review reads hidden; Grade owns the explicit reveal control. */
   hiddenUntilHumanGrade?: boolean;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
@@ -274,12 +274,12 @@ export function EvalList({
     return (
       <section className="border-y border-edge py-6">
         <h2 className="text-balance text-sm font-medium text-ink">
-          Final AI evaluation is sealed
+          Final AI evaluation is hidden
         </h2>
         <p className="mt-1 max-w-2xl text-pretty text-xs leading-relaxed text-muted">
-          Grade Final from the Grade workspace first. Lamp reveals its final AI
-          scores, verdicts, confidence, and findings only after your human grade
-          is durably saved.
+          Grade Final without opening it, or use Show AI evaluation in the Grade
+          workspace if you want to inspect the saved scores first. Revealing it
+          reads the existing result and does not run another AI evaluation.
         </p>
       </section>
     );

@@ -21,6 +21,7 @@ import {
   collectComparisons,
   aiPassRatePct,
   finalLampIteration,
+  isGradeable,
   isLampBlindGradeLocked,
 } from "../components/grade/derive.ts";
 import type { BatchExecution, Run, VideoAsset } from "../lib/types.ts";
@@ -158,7 +159,7 @@ test("Lamp accepts exactly eight visual results and appends verified audio", () 
   assert.ok(artifact.evalResults.every((result) => result.iteration === 1));
 });
 
-test("Lamp seals final AI evidence until the human grade reveal boundary", () => {
+test("Lamp seals ordinary reads while allowing an explicit Grade reveal", () => {
   const initialArtifact = buildLampEvaluationArtifact({
     raw: { results: rawVisualResults() },
     iteration: 1,
@@ -188,12 +189,20 @@ test("Lamp seals final AI evidence until the human grade reveal boundary", () =>
     artifact: finalArtifact,
     humanGradeSaved: true,
   });
+  const explicitlyRevealedFinal = projectLampEvaluationForRead({
+    iteration: 2,
+    artifact: finalArtifact,
+    humanGradeSaved: false,
+    revealFinalEvaluation: true,
+  });
 
   assert.equal(visibleInitial.evalResults.length, 9);
   assert.ok(visibleInitial.composite);
   assert.deepEqual(sealedFinal, { evalResults: [] });
   assert.equal(revealedFinal.evalResults.length, 9);
   assert.ok(revealedFinal.composite);
+  assert.equal(explicitlyRevealedFinal.evalResults.length, 9);
+  assert.ok(explicitlyRevealedFinal.composite);
 });
 
 test("the first holistic evaluation compiles one v2 prompt with every correction", () => {
@@ -445,6 +454,56 @@ test("human comparison always pairs with Lamp v2 rather than a better-looking v1
   assert.equal(comparisons.length, 1);
   assert.equal(comparisons[0].ai.iteration, 2);
   assert.equal(comparisons[0].ai.score, 81);
+});
+
+test("Lamp enters Grade only with a provider-backed v2 final", () => {
+  const runId = "run_gradeable_lamp_fixture";
+  const video: VideoAsset = {
+    id: "video_gradeable_lamp_fixture",
+    runId,
+    kind: "generated",
+    url: "/api/media/run_gradeable_lamp_fixture/final.mp4",
+    label: "Lamp Final fixture",
+    durationSec: 7.5,
+    width: 1920,
+    height: 1080,
+    hasAudio: true,
+  };
+  const execution = {
+    runId,
+    executionId: `lamp:${runId}`,
+    source: "single",
+    status: "awaiting_review",
+  } as RunExecution;
+  const initialOnly = {
+    workflowMode: "lamp",
+    serverExecution: execution,
+    iterations: [
+      {
+        index: 1,
+        evalResults: [],
+        generatedVideo: video,
+        recoveredFromProviderOperation: true,
+      },
+    ],
+  } as unknown as Run;
+  const finished = {
+    ...initialOnly,
+    iterations: [
+      ...initialOnly.iterations,
+      {
+        index: 2,
+        evalResults: [],
+        generatedVideo: video,
+        recoveredFromProviderOperation: true,
+      },
+    ],
+  } as unknown as Run;
+
+  assert.equal(finalLampIteration(initialOnly), undefined);
+  assert.equal(isGradeable(initialOnly), false);
+  assert.equal(finalLampIteration(finished)?.index, 2);
+  assert.equal(isGradeable(finished), true);
 });
 
 test("blind lock trusts canonical Lamp execution instead of presentation status", () => {

@@ -1279,14 +1279,15 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
       const serialized = JSON.stringify(result);
       if (serialized === undefined) throw new Error("Paid operation result must be JSON serializable");
       const now = Date.now();
+      const serializedPatch = JSON.stringify({
+        status: "completed",
+        updatedAt: now,
+        result,
+      });
       const rows = (await sql`
         UPDATE paid_operations
         SET status = 'completed',
-            data = (data - 'error') || jsonb_build_object(
-              'status', 'completed',
-              'updatedAt', ${now},
-              'result', ${serialized}::jsonb
-            )
+            data = (data - 'error') || ${serializedPatch}::jsonb
         WHERE run_id = ${id}
           AND operation_id = ${opId}
           AND input_hash = ${inputHash}
@@ -1305,14 +1306,15 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
       if (!SHA256_RE.test(inputHash)) throw new Error("Invalid paid operation inputHash");
       const now = Date.now();
       const safeError = error.slice(0, 500);
+      const serializedPatch = JSON.stringify({
+        status: "reconcile_required",
+        updatedAt: now,
+        error: safeError,
+      });
       const rows = (await sql`
         UPDATE paid_operations
         SET status = 'reconcile_required',
-            data = data || jsonb_build_object(
-              'status', 'reconcile_required',
-              'updatedAt', ${now},
-              'error', ${safeError}
-            )
+            data = data || ${serializedPatch}::jsonb
         WHERE run_id = ${id}
           AND operation_id = ${opId}
           AND input_hash = ${inputHash}

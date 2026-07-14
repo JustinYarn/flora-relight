@@ -149,7 +149,7 @@ interface AppStore {
   resumeBatch(batchId: string): Promise<BatchResumeResult>;
   submitReview(runId: string, decision: "approved" | "needs-changes", notes: string): void;
   /**
-   * Record the blind human grade for one run (the /grade flow). Plain
+   * Record the human grade for one run (the /grade flow). Plain
    * immutable update — the persistence subscriber pushes the changed run to
    * /api/runs like every other mutation, so the grade lands in run.json.
    */

@@ -198,7 +198,7 @@ export function BatchRunCard({
         </Link>
         {status === "awaiting-review" && member ? (
           <Link
-            href="/grade"
+            href={`/grade?run=${encodeURIComponent(run.id)}`}
             className="inline-flex min-h-10 items-center rounded-lg bg-pass px-3.5 py-1.5 text-sm font-medium text-canvas transition-transform active:scale-[0.96]"
           >
             Grade in workspace

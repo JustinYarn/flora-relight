@@ -44,9 +44,10 @@ export function VerdictLine({
   if (hideAutomated) {
     return (
       <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 border-y border-edge py-5">
-        <span className="text-sm font-medium text-ink">Final is ready for your blind grade</span>
+        <span className="text-sm font-medium text-ink">Final is ready for your grade</span>
         <span className="text-pretty text-2xs text-faint">
-          AI scores, verdicts, and findings unlock after your human grade is saved.
+          Its AI scores are ready and hidden by default; reveal them from Grade only
+          when you want to see them.
         </span>
         <span className="ml-auto text-2xs text-muted">Initial + Final generated</span>
       </div>

@@ -38,11 +38,11 @@ export function ReviewActions({
     return (
       <div className="flex flex-wrap items-center justify-end gap-3 py-4">
         <span className="text-pretty text-2xs text-faint">
-          The final video is ready. Grade it blind; available final AI results
-          stay hidden until your grade is saved.
+          The final video and AI evaluation are ready. The AI results stay hidden
+          by default, with an optional reveal inside Grade.
         </span>
         <Link
-          href="/grade"
+          href={`/grade?run=${encodeURIComponent(run.id)}`}
           className="inline-flex min-h-10 items-center rounded-lg bg-pass px-3.5 py-1.5 text-sm font-medium text-canvas transition-transform active:scale-[0.96]"
         >
           Grade in workspace

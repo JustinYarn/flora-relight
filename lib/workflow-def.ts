@@ -206,7 +206,7 @@ export const LAMP_WORKFLOW: WorkflowDefinition = {
   id: "lamp-v1",
   name: "Lamp two-pass relight",
   description:
-    "Generate Initial from the mega prompt, restore and verify its source audio, critique the whole video once, then repeat that fixed finalization and evaluation sequence for Final before blind human grading.",
+    "Generate Initial from the mega prompt, restore and verify its source audio, critique the whole video once, then repeat that fixed finalization and evaluation sequence for Final before per-video human grading.",
   nodes,
   edges,
   config: {

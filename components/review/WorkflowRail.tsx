@@ -40,7 +40,7 @@ function availableEvalCount(iteration: Iteration | undefined): number {
 
 /**
  * Lamp's compact progress rail. It intentionally mirrors the product method,
- * not every engine node: v1, one holistic critique, v2, then blind human grade.
+ * not every engine node: v1, one holistic critique, v2, then human grade.
  */
 export function WorkflowRail({ run }: { run: Run }) {
   const initial =

@@ -4,8 +4,8 @@
  * here is a plain function over persisted Runs so both modes of the Grade
  * page (and any future export) compute identical numbers.
  *
- * The AI side of every Lamp comparison is v2's evalResults. The blind grader
- * shows the delivered final video, so the human and AI compare the same cut.
+ * The AI side of every Lamp comparison is v2's evalResults. The grader shows
+ * the delivered final video, so the human and AI compare the same cut.
  */
 
 import type {
@@ -74,12 +74,20 @@ export function isGradeable(run: Run): boolean {
   );
 }
 
-/** Lamp's human grade and comparison target is always v2 when it exists. */
-export function finalLampIteration(run: Run): Iteration | undefined {
+function isLampRun(run: Run): boolean {
   return (
-    run.iterations.find((iteration) => iteration.index === 2) ??
-    run.iterations.at(-1)
+    run.workflowMode === "lamp" ||
+    run.workflowId === "lamp-v1" ||
+    run.serverExecution?.executionId.startsWith("lamp:") === true
   );
+}
+
+/** Lamp's human grade and comparison target is strictly v2. */
+export function finalLampIteration(run: Run): Iteration | undefined {
+  const second = run.iterations.find((iteration) => iteration.index === 2);
+  if (isLampRun(run)) return second;
+  // Legacy Flora records keep their historical fallback behavior.
+  return second ?? run.iterations.at(-1);
 }
 
 /** The delivered remux when present, otherwise Lamp's generated v2 artifact. */

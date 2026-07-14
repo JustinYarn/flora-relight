@@ -44,8 +44,9 @@ Every new live Lamp run follows the same fixed sequence:
    prompt, then restore and verify the original audio again.
 7. Run one final holistic Gemini evaluation across the same eight applicable
    visual checks and record deterministic audio integrity.
-8. Present Final for blind human grading. After the grade is submitted, compare
-   the human score with the **final** AI evaluation for that video, per check.
+8. Present Final for human grading with the completed AI evaluation hidden by
+   default. The grader may explicitly reveal that saved evaluation at any time;
+   after submission, compare it with the human score for that video, per check.
 
 Final is always the grading target; Lamp does not choose a best-scoring attempt or
 loop again. It does not create a manifest or Look Anchor, run a Claude second
@@ -87,13 +88,14 @@ missing results to zero or presenting invented agreement.
   holistic evaluations, prompt correction, settlement, and transition to review.
   Closing the browser does not stop an admitted run. Recovery polling may continue
   for up to seven days.
-- **Blind grading:** `/grade` restores and autosaves a revisioned draft through
+- **Human grading:** `/grade` restores and autosaves a revisioned draft through
   `/api/grade-drafts`. Draft and final submission use compare-and-swap revisions,
   so a stale tab receives a conflict instead of overwriting newer work. The
   journaled Final artifact and final AI evaluation are the comparison target.
-  Normal run reads explicitly clear Final's AI projection until `humanGrade` is
-  saved; that successful save response is the reveal boundary for Review,
-  Journey, Results, and share/read surfaces.
+  Normal run reads explicitly clear Final's AI projection. An exact-run,
+  no-store reveal request can expose that already-saved evidence inside Grade
+  without rerunning a provider. A successful human-grade save remains the reveal
+  boundary for Review, Journey, Results, and share/read surfaces.
 - **Deletion:** deleted run ids are tombstoned. Normal deletion is refused while
   an execution, batch membership, or provider journal is active or needs
   reconciliation.
@@ -178,18 +180,19 @@ Neither readiness nor the Workflow smoke proves Lamp's paid provider path.
 
 1. Finish local automated validation with Node 22: tests, lint, typecheck, and a
    production build. Exercise the UI with mock/provider-free data, including
-   Initial/Final switching, blind grading, final-AI comparison, and the two missing
+   Initial/Final switching, hidden-by-default grading, optional AI reveal,
+   final-AI comparison, and the two missing
    AI rows.
 2. Deploy the exact branch SHA to a protected environment and run readiness plus
    the provider-free Workflow smoke. Record the source SHA and results.
 3. Only with explicit authorization, run one non-sensitive short clip through the
    live two-pass path. Confirm exactly two generations and two holistic evaluations,
    original-audio verification both times, reload recovery, durable Final selection,
-   blind grading, final-AI comparison, and journaled cost.
+   independent grading, optional AI reveal, final-AI comparison, and journaled cost.
 4. Calibrate the eight visual rubrics using accumulated human-versus-final-AI
    disagreements. Do not hide missing temporal-alignment or anchor-match evidence.
 5. Run an explicitly approved small Lamp batch after the single-video round trip.
-   Confirm per-member two-pass journals, blind-grade sealing, bounded concurrency,
+   Confirm per-member two-pass journals, hidden-by-default AI evidence, bounded concurrency,
    budget skips, reload recovery, and final batch settlement.
 
 ## Cost and approval truth

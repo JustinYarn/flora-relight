@@ -208,7 +208,7 @@ export function BatchSummary({
             value={ready}
             sub={
               <span className="text-2xs text-faint">
-                {lamp ? "blind Lamp Finals" : "canonical Flora cuts"}
+                {lamp ? "finished Lamp Finals" : "canonical Flora cuts"}
               </span>
             }
           />
@@ -242,8 +242,14 @@ export function BatchSummary({
           />
           <Stat
             label="Quality checks"
-            value="—"
-            sub={<span className="text-2xs text-faint">human grading only</span>}
+            value={lamp ? "2 / clip" : "—"}
+            sub={
+              <span className="text-2xs text-faint">
+                {lamp
+                  ? "AI evaluations plus human grade"
+                  : "human review only"}
+              </span>
+            }
           />
         </div>
       </Card>

@@ -74,7 +74,7 @@ export default function BatchPage() {
           <p className="mt-1 max-w-xl text-2xs leading-relaxed text-faint">
             Send many clips through a bounded server queue. Flora delivers one
             review-ready cut per source; Lamp completes its exact two-pass method
-            before each Final enters blind grading.
+            before each Final enters per-video grading.
           </p>
         </div>
       </header>

@@ -508,7 +508,7 @@ async function runLampMockWorkflow(input: {
       "info",
       iteration === 1
         ? "Lamp critiqued the complete initial video once and compiled every finding into the final mega prompt."
-        : "Lamp completed the final whole-video evaluation. This is the AI evidence used after blind human grading.",
+        : "Lamp completed the final whole-video evaluation. It starts hidden in Grade and remains available for comparison.",
       "ledger"
     );
     previousPrompt = megaPrompt;
@@ -528,7 +528,7 @@ async function runLampMockWorkflow(input: {
   };
   setNode(runId, "remux", "succeeded", "original audio restored");
   setNode(runId, "eval-audio", "succeeded", "100 · pass");
-  setNode(runId, "review", "running", "awaiting your blind grade");
+  setNode(runId, "review", "running", "awaiting your human grade");
   mutateRun(runId, (run) => {
     delete run.bestIterationIndex;
     run.finalVideo = finalVideo;

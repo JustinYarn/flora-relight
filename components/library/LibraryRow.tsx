@@ -172,10 +172,10 @@ function RowBody({ run }: { run: Run }) {
 
       {blindGradeLocked ? (
         <div className="rounded-xl bg-raised px-4 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-          <p className="text-sm font-medium text-ink">Final AI evaluation is sealed</p>
+          <p className="text-sm font-medium text-ink">Final AI evaluation is ready</p>
           <p className="mt-1 text-pretty text-2xs leading-relaxed text-muted">
-            Grade Final first. Initial findings, Final scores, and correction details
-            unlock together after your human grade is saved.
+            It stays hidden by default in Grade. You can reveal it there when you
+            want, or grade the Final without looking.
           </p>
         </div>
       ) : ordered.length > 0 ? (
@@ -227,7 +227,7 @@ function RowBody({ run }: { run: Run }) {
         <span className="ml-auto flex items-center gap-2">
           {blindGradeLocked ? (
             <Link
-              href="/grade"
+              href={`/grade?run=${encodeURIComponent(run.id)}`}
               className="inline-flex min-h-10 items-center rounded-lg bg-pass px-3.5 py-1.5 text-sm font-medium text-canvas transition-transform active:scale-[0.96]"
             >
               Grade Final

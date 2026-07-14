@@ -26,7 +26,7 @@ export function RunTabs({
       {journeyLocked ? (
         <span
           className="inline-flex min-h-10 cursor-not-allowed items-center rounded-md px-3 py-1 text-sm text-faint"
-          title="Journey unlocks after the blind human grade is saved"
+          title="Journey unlocks after the human grade is saved"
         >
           Journey
         </span>

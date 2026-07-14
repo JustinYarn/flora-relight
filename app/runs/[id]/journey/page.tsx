@@ -66,11 +66,11 @@ export default function RunJourneyPage() {
     return (
       <main className="mx-auto max-w-5xl px-6 py-10">
         <EmptyState
-          title="Journey unlocks after your blind grade"
-          hint="Lamp has sealed the final AI evaluation and its prompt-to-result trace. Save your human grade first, then return here to inspect the complete run story."
+          title="Journey unlocks after your grade"
+          hint="Save your human grade first, then return here for the complete prompt-to-result trace. Inside Grade, the finished AI evaluation stays hidden by default and can be revealed whenever you choose."
           action={
             <Link
-              href="/grade"
+              href={`/grade?run=${encodeURIComponent(run.id)}`}
               className="mt-1 inline-flex min-h-10 items-center rounded-lg bg-pass px-3.5 py-1.5 text-sm font-medium text-canvas transition-transform active:scale-[0.96]"
             >
               Grade Final
