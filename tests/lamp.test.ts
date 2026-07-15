@@ -119,19 +119,69 @@ test("Lamp rejects a holistic evaluation with a duplicate visual check", () => {
   );
 });
 
-test("Lamp rejects a non-passing check without an actionable correction", () => {
+test("Lamp accepts a non-passing check without an actionable correction", () => {
   const results = rawVisualResults();
   results[0] = { ...results[0], score: 40, violations: [] };
 
-  assert.throws(
-    () =>
-      buildLampEvaluationArtifact({
-        raw: { results },
-        iteration: 1,
-        audioVerified: true,
-        costUsd: 0.02,
-      }),
-    /non-passing checks without actionable corrections: identity-preservation/
+  const artifact = buildLampEvaluationArtifact({
+    raw: { results },
+    iteration: 1,
+    audioVerified: true,
+    costUsd: 0.02,
+  });
+
+  const unactionable = artifact.evalResults.find(
+    (result) => result.evalId === "identity-preservation"
+  );
+  assert.equal(unactionable?.verdict, "fail");
+  assert.equal(unactionable?.score, 40);
+  assert.deepEqual(unactionable?.violations, []);
+
+  // The violationless fail contributes no correction; every other fixture
+  // correction still compiles into the one v2 prompt.
+  const finalPrompt = compileLampFinalPrompt(
+    initialMegaPrompt().rendered,
+    artifact
+  );
+  assert.equal(
+    finalPrompt.corrections.filter((correction) => !correction.resolved).length,
+    EXPECTED_VISUAL_EVAL_IDS.length - 1
+  );
+  assert.doesNotMatch(finalPrompt.rendered, /Apply fixture correction 1\./);
+});
+
+test("Lamp compiles a valid v2 prompt when no check yields any correction", () => {
+  const results = rawVisualResults().map((result) => ({
+    ...result,
+    score: 40,
+    violations: [],
+  }));
+
+  const artifact = buildLampEvaluationArtifact({
+    raw: { results },
+    iteration: 1,
+    audioVerified: true,
+    costUsd: 0.02,
+  });
+  assert.ok(
+    artifact.evalResults
+      .filter((result) => result.evalId !== "audio-integrity")
+      .every((result) => result.verdict === "fail")
+  );
+
+  const finalPrompt = compileLampFinalPrompt(
+    initialMegaPrompt().rendered,
+    artifact
+  );
+  assert.equal(finalPrompt.version, 2);
+  assert.match(finalPrompt.rendered, /LAMP RELIGHT MEGA PROMPT v2/);
+  assert.match(
+    finalPrompt.rendered,
+    /\(none — first iteration or all prior findings resolved\)/
+  );
+  assert.equal(
+    finalPrompt.corrections.filter((correction) => !correction.resolved).length,
+    0
   );
 });
 

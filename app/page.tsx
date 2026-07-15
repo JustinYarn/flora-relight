@@ -1157,8 +1157,9 @@ export default function DashboardPage() {
           />
           <p className="mt-2 text-pretty text-2xs leading-relaxed text-faint">
             ~10s webcam clips work best · longer clips are auto-trimmed to the
-            10s model cap · local media stays in data/; hosted media must use
-            durable cloud storage
+            10s model cap · sources above 1080p are downscaled to fit it ·
+            local media stays in data/; hosted media must use durable cloud
+            storage
           </p>
         </Card>
       </div>

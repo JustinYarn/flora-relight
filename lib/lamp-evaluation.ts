@@ -297,16 +297,14 @@ export function buildLampEvaluationArtifact(input: {
       .join(", ") || "unknown result"}.`
     );
   }
-  const unactionable = Array.from(byId.values()).filter(
-    (result) => result.verdict !== "pass" && result.violations.length === 0
-  );
-  if (unactionable.length > 0) {
-    throw new Error(
-      `Lamp evaluator returned non-passing checks without actionable corrections: ${unactionable
-        .map((result) => result.evalId)
-        .join(", ")}.`
-    );
-  }
+  // A non-passing check with zero violations is a valid judge outcome (a low
+  // score whose cause the model could not localize), not a malformed response.
+  // The correction compiler reads only violations — nextMegaPrompt skips
+  // entries with nothing usable to compile and renderPersistedLampV2 renders
+  // an explicit "(none — …)" block for an empty ledger — so the artifact is
+  // accepted as-is: the check stays recorded as fail/borderline with its
+  // reasoning, the Final generation still runs, and the human grades blind.
+  // Rejecting it here would crash a billed run after the provider call.
   const ordered = LAMP_VISUAL_EVAL_DEFS.map(
     (definition) => byId.get(definition.id)!
   );

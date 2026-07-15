@@ -24,6 +24,7 @@ import {
   MAX_GEN_SECONDS,
   TRIM_TARGET_SECONDS,
   demuxAudio,
+  needsIngestDownscale,
   probe,
   reencodeToMp4,
   remuxToMp4,
@@ -389,6 +390,7 @@ export async function runIngestPipeline(
 
     const originalDurationSec = probed.durationSec;
     const needsTrim = originalDurationSec > MAX_GEN_SECONDS;
+    const downscale = needsIngestDownscale(probed.width, probed.height);
 
     // Local write destination (fs driver → canonical data/ path; blob driver
     // → scratch path uploaded by putMediaFromFile below).
@@ -396,9 +398,14 @@ export async function runIngestPipeline(
 
     let trimmed = false;
     if (needsTrim) {
-      // Re-encode trim to just under the Omni cap (frame-accurate).
-      await trimTo(tmpPath, destPath, TRIM_TARGET_SECONDS);
+      // Re-encode trim to just under the Omni cap (frame-accurate); oversized
+      // sources downscale to the provider-safe resolution in the same pass.
+      await trimTo(tmpPath, destPath, TRIM_TARGET_SECONDS, { downscale });
       trimmed = true;
+    } else if (downscale) {
+      // A byte-copy would keep the provider-rejected 4K frame size, so
+      // oversized sources re-encode down even when no trim is needed.
+      await reencodeToMp4(tmpPath, destPath, { downscale: true });
     } else if (MP4_FAMILY_EXT_RE.test(ext)) {
       await moveFile(tmpPath, destPath);
     } else {

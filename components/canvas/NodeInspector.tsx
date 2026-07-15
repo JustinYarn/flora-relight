@@ -471,7 +471,9 @@ function EvalSection({
             : "Final result · no later brief compiled"
           : transitionParts.length > 0
             ? `${transitionParts.join(" · ")} in brief v${nextIteration.megaPrompt.version}`
-            : `Passed · no prompt change in brief v${nextIteration.megaPrompt.version}`;
+            : focusResult.verdict === "pass"
+              ? `Passed · no prompt change in brief v${nextIteration.megaPrompt.version}`
+              : `No actionable correction recorded · no prompt change in brief v${nextIteration.megaPrompt.version}`;
 
   const decisionValue: ReactNode = focusResult ? (
     <span className="inline-flex items-center gap-2">
@@ -803,9 +805,13 @@ function EvalSection({
           </ul>
         ) : focusResult.violations.length === 0 ? (
           <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-            {nextIteration
-              ? "This check passed with no active correction to remove, so the next generation brief was unchanged by this check."
-              : "This final check passed, so no later generation brief was needed or compiled."}
+            {focusResult.verdict === "pass"
+              ? nextIteration
+                ? "This check passed with no active correction to remove, so the next generation brief was unchanged by this check."
+                : "This final check passed, so no later generation brief was needed or compiled."
+              : nextIteration
+                ? "This check did not pass, but the critique recorded no actionable correction, so the next generation brief was unchanged by this check."
+                : "This final check did not pass; the critique recorded no actionable correction, and no later brief was compiled."}
           </p>
         ) : null}
       </section>

@@ -25,6 +25,41 @@ export const MAX_GEN_SECONDS = 10;
 /** Trim target: just under the cap so re-encode rounding never tips us over. */
 export const TRIM_TARGET_SECONDS = 9.9;
 
+/**
+ * Ingest resolution cap. Omni rejects oversized inputs: observed live
+ * 2026-07-15, a 3840x2160 source's generation died server-side ("response
+ * exceeds the maximum allowed size limit"), after which its interaction became
+ * permanently unreadable and the run sealed as reconcile_required. 1080p
+ * sources complete reliably, and generations output 720p regardless, so
+ * anything larger is downscaled at ingest with aspect ratio preserved.
+ */
+export const MAX_INGEST_WIDTH = 1920;
+export const MAX_INGEST_HEIGHT = 1080;
+
+/** True when a probed source exceeds the provider-safe ingest resolution. */
+export function needsIngestDownscale(width: number, height: number): boolean {
+  return width > MAX_INGEST_WIDTH || height > MAX_INGEST_HEIGHT;
+}
+
+/**
+ * Scale filter fitting a frame within the ingest cap: aspect preserved,
+ * dimensions forced even for yuv420p, sources already within the cap pass
+ * through unchanged (min() keeps their native size).
+ */
+const INGEST_DOWNSCALE_FILTER =
+  `scale=w='min(iw,${MAX_INGEST_WIDTH})':h='min(ih,${MAX_INGEST_HEIGHT})'` +
+  ":force_original_aspect_ratio=decrease:force_divisible_by=2";
+
+/** Optional re-encode behavior shared by trimTo / reencodeToMp4. */
+export interface ReencodeOpts {
+  /** Downscale to the provider-safe ingest resolution during the encode. */
+  downscale?: boolean;
+}
+
+function reencodeVfArgs(opts?: ReencodeOpts): string[] {
+  return opts?.downscale ? ["-vf", INGEST_DOWNSCALE_FILTER] : [];
+}
+
 export interface ProbeResult {
   durationSec: number;
   width: number;
@@ -522,7 +557,8 @@ export async function extractJpegFrame(
 export async function trimTo(
   srcPath: string,
   outPath: string,
-  maxSec: number
+  maxSec: number,
+  opts?: ReencodeOpts
 ): Promise<number> {
   const tools = await getTools();
   await runOrThrow(tools.ffmpeg, [
@@ -530,6 +566,7 @@ export async function trimTo(
     "-ss", "0",
     "-i", srcPath,
     "-t", String(maxSec),
+    ...reencodeVfArgs(opts),
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "18",
@@ -696,11 +733,16 @@ export async function remuxToMp4(srcPath: string, outPath: string): Promise<void
 }
 
 /** Full re-encode to h264/aac mp4, no trim (ingest fallback for odd codecs). */
-export async function reencodeToMp4(srcPath: string, outPath: string): Promise<void> {
+export async function reencodeToMp4(
+  srcPath: string,
+  outPath: string,
+  opts?: ReencodeOpts
+): Promise<void> {
   const tools = await getTools();
   await runOrThrow(tools.ffmpeg, [
     "-y",
     "-i", srcPath,
+    ...reencodeVfArgs(opts),
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "18",

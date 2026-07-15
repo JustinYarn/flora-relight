@@ -295,10 +295,10 @@ function progressForExecution(execution: BatchExecution): BatchProgress {
   return {
     owner: true,
     allTerminal: queued + running + reconcile + approvalRequired === 0,
-    stalledOnReconciliation:
-      reconcile > 0 &&
-      running === 0 &&
-      (queued === 0 || reconcile >= DURABLE_BATCH_CONCURRENCY),
+    // Reconciliation stalls the batch only once the queue has fully drained:
+    // members needing a human stop the batch from finishing "done", but they
+    // must never abort clips that have not yet had their provider call.
+    stalledOnReconciliation: reconcile > 0 && running === 0 && queued === 0,
     readyForApproval:
       approvalRequired > 0 && queued + running + reconcile === 0,
   };
@@ -370,7 +370,7 @@ export async function durableRelightBatch(
       }
       if (progress.stalledOnReconciliation) {
         throw new Error(
-          "Unresolved provider work exhausted the safe batch concurrency."
+          "Every remaining member needs provider reconciliation; the batch cannot settle further on its own."
         );
       }
 
@@ -512,9 +512,14 @@ async function claimDispatchSlots(
     if (current.status !== "running") {
       return { owner: true, runningRunIds: [] };
     }
+    // Only live children hold dispatch slots. A reconcile_required member is
+    // a sealed journal awaiting a human — its child workflow is dead and its
+    // reservation stays held in accountingForMembers, so letting it also pin
+    // a concurrency slot turned one stuck member into a frozen queue (and,
+    // once reconcile members reached the concurrency cap, a dead batch that
+    // zero-failed every still-queued clip).
     const activeCount = current.members.filter(
-      (member) =>
-        member.state === "running" || member.state === "reconcile_required"
+      (member) => member.state === "running"
     ).length;
     // The persisted value is an invariant check, not an input. Keep this
     // runtime clamp so a browser or legacy Batch record can never widen paid

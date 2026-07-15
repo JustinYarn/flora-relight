@@ -111,12 +111,50 @@ function evaluatorPrompt(): string {
     "Compare the complete original and candidate videos once, then return exactly one result for every listed check.",
     "Judge source fidelity over the entire timeline, including the worst frame. Do not infer a Look Anchor; Lamp has none.",
     "For every violation, write a concise imperative correction that can be inserted directly into the next video-generation prompt.",
+    "Any check you score below its pass threshold must include at least one violation naming what failed, with a concrete correction; do not return a below-pass score with an empty violations array.",
     "confidence is 0 to 1 and must describe how strongly the attached evidence supports this single-judge result. Do not treat it as multi-judge agreement.",
     "Do not include audio-integrity; the server verifies audio separately. Do not include temporal-alignment; its local correlation metric is not yet available in Lamp.",
     "Return one JSON object with a results array matching the supplied response schema. Do not emit a separate JSON object for each check.",
     "",
     rubrics,
   ].join("\n");
+}
+
+/**
+ * Retry the evaluation call only on a spend/rate 429 rejection. A 429 never
+ * bills and returns no content, so re-asking under the same durable claim
+ * cannot double-charge or fork the journal — unlike other provider errors,
+ * which still seal the operation for reconciliation on the first failure.
+ * Observed live 2026-07-15: a batch's generation cadence tripped the
+ * account's spend-based rate limit on a judge call and stranded an otherwise
+ * healthy run in reconcile_required over a $0.02 call.
+ */
+const RATE_LIMIT_RETRY_DELAYS_MS = [30_000, 60_000, 120_000];
+
+function isRateLimitRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('"code":429') ||
+    (message.includes("429") && message.toLowerCase().includes("rate limit")) ||
+    message.includes("RESOURCE_EXHAUSTED")
+  );
+}
+
+async function generateEvaluationWithRateLimitRetry<T>(
+  call: () => Promise<T>
+): Promise<T> {
+  for (const delayMs of RATE_LIMIT_RETRY_DELAYS_MS) {
+    try {
+      return await call();
+    } catch (error) {
+      if (!isRateLimitRejection(error)) throw error;
+      console.warn(
+        `[lamp-evaluator] provider rate limit rejected the judge call; retrying in ${Math.round(delayMs / 1000)}s`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  return call();
 }
 
 export async function runLampHolisticEvaluation(input: {
@@ -181,26 +219,28 @@ export async function runLampHolisticEvaluation(input: {
       uploadVideoCached(sourcePath),
       uploadVideoCached(candidatePath),
     ]);
-    const response = await getGemini().models.generateContent({
-      model: GEMINI_PRO_MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { text: prompt },
-            { text: "ORIGINAL video:" },
-            { fileData: { fileUri: source.uri, mimeType: "video/mp4" } },
-            { text: "CANDIDATE video:" },
-            { fileData: { fileUri: candidate.uri, mimeType: "video/mp4" } },
-          ],
+    const response = await generateEvaluationWithRateLimitRetry(() =>
+      getGemini().models.generateContent({
+        model: GEMINI_PRO_MODEL,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: prompt },
+              { text: "ORIGINAL video:" },
+              { fileData: { fileUri: source.uri, mimeType: "video/mp4" } },
+              { text: "CANDIDATE video:" },
+              { fileData: { fileUri: candidate.uri, mimeType: "video/mp4" } },
+            ],
+          },
+        ],
+        config: {
+          httpOptions: { retryOptions: { attempts: 1 } },
+          responseMimeType: "application/json",
+          responseJsonSchema: RESPONSE_SCHEMA,
         },
-      ],
-      config: {
-        httpOptions: { retryOptions: { attempts: 1 } },
-        responseMimeType: "application/json",
-        responseJsonSchema: RESPONSE_SCHEMA,
-      },
-    });
+      })
+    );
     if (!response.text) {
       throw new Error("Lamp evaluator returned no content.");
     }
