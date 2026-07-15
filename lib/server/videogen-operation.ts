@@ -24,6 +24,9 @@ import { getStorage, scratchMediaPath, type StorageDriver } from "@/lib/server/s
 import { authorizedRawOutputCostUsd } from "@/lib/server/video-generation-cost";
 import {
   automaticVideoGenerationStopReason,
+  classifyVideoGenerationPollError,
+  permanentPollFailuresExhausted,
+  providerLostInteractionError,
   videoGenerationWorkflowErrorMessage,
 } from "@/lib/server/run-execution-failure";
 import { assertVideoGenerationAuthorized } from "@/lib/server/spend-approval";
@@ -226,18 +229,15 @@ export async function startVideoGeneration(
   }
   assertVideoGenerationAuthorized(run, input.iteration);
 
-  // Iteration presentation state is browser-writable. Chaining may use only
-  // the canonical completed provider journal for the preceding generation.
-  const previousInteractionId = run.providerOperations?.find(
-    (item) =>
-      item.kind === "video_generation" &&
-      item.iteration === input.iteration - 1 &&
-      item.status === "completed" &&
-      item.result
-  )?.providerInteractionId;
   const uploadUri =
     input.preparedUploadUri ?? (await prepareVideoGenerationStart(input.runId));
   const startedAt = existing?.startedAt ?? Date.now();
+  // Every generation conditions on the ORIGINAL source only (ARCHITECTURE
+  // §3.2): corrections travel inside the compiled prompt, never as chained
+  // interaction state. previous_interaction_id must never be combined with a
+  // fresh video part — the provider documents them as separate patterns, and
+  // the combination produced a provider-lost interaction in production
+  // (2026-07-14: every interactions.get on the chained Final returned 400).
   const interaction = await getGemini().interactions.create(
     {
       model: OMNI_VIDEO_MODEL,
@@ -248,9 +248,6 @@ export async function startVideoGeneration(
       response_format: { type: "video", delivery: "uri" },
       background: true,
       store: true,
-      ...(previousInteractionId
-        ? { previous_interaction_id: previousInteractionId }
-        : {}),
     },
     // A transport retry can create a second billed interaction when the first
     // response is ambiguous. The durable application claim owns all retry
@@ -287,6 +284,71 @@ export type PollVideoGenerationResult =
   | ({ done: true; status: "completed"; interactionId: string } &
       VideoGenerationOperationResult);
 
+/**
+ * Journal one failed provider read. Transient faults (429/5xx/network) break
+ * any streak and keep the existing free retry path. Positively identified
+ * permanent rejections (400/404) accumulate on the durable journal; once the
+ * bounded streak is exhausted the journal seals itself as reconcile_required
+ * so a provider-lost interaction stops the run instead of spinning for seven
+ * days. Streak bookkeeping is best-effort — a storage hiccup must surface the
+ * provider error, not replace it — but the seal write is authoritative and
+ * throws the sealed reason.
+ */
+async function recordVideoGenerationPollFailure(
+  input: PollVideoGenerationInput,
+  existing: Pick<
+    ProviderOperation,
+    "startedAt" | "permanentPollFailureCount" | "permanentPollFailureFirstAt"
+  >,
+  pollError: unknown
+): Promise<void> {
+  const now = Date.now();
+  const base = {
+    id: videoGenerationOperationId(input.iteration),
+    provider: "gemini" as const,
+    kind: "video_generation" as const,
+    iteration: input.iteration,
+    providerInteractionId: input.interactionId,
+    startedAt: existing.startedAt ?? now,
+    updatedAt: now,
+  };
+  if (classifyVideoGenerationPollError(pollError) === "transient") {
+    if ((existing.permanentPollFailureCount ?? 0) > 0) {
+      await writeVideoGenerationOperation(input.runId, {
+        ...base,
+        status: "in_progress",
+        permanentPollFailureCount: 0,
+        permanentPollFailureFirstAt: 0,
+      }).catch(() => undefined);
+    }
+    return;
+  }
+  const count = (existing.permanentPollFailureCount ?? 0) + 1;
+  const firstAt = existing.permanentPollFailureFirstAt || now;
+  if (!permanentPollFailuresExhausted(count, firstAt, now)) {
+    await writeVideoGenerationOperation(input.runId, {
+      ...base,
+      status: "in_progress",
+      permanentPollFailureCount: count,
+      permanentPollFailureFirstAt: firstAt,
+    }).catch(() => undefined);
+    return;
+  }
+  const sealedReason = providerLostInteractionError(
+    input.interactionId,
+    count,
+    now - firstAt
+  );
+  await writeVideoGenerationOperation(input.runId, {
+    ...base,
+    status: "reconcile_required",
+    permanentPollFailureCount: count,
+    permanentPollFailureFirstAt: firstAt,
+    error: sealedReason,
+  });
+  throw new Error(sealedReason);
+}
+
 export async function pollVideoGeneration(
   input: PollVideoGenerationInput
 ): Promise<PollVideoGenerationResult> {
@@ -317,7 +379,13 @@ export async function pollVideoGeneration(
   const automaticStopReason = automaticVideoGenerationStopReason(existing);
   if (automaticStopReason !== null) throw new Error(automaticStopReason);
 
-  const interaction = await getGemini().interactions.get(input.interactionId);
+  let interaction;
+  try {
+    interaction = await getGemini().interactions.get(input.interactionId);
+  } catch (pollError) {
+    await recordVideoGenerationPollFailure(input, existing, pollError);
+    throw pollError;
+  }
   const status = safeStatus(interaction.status);
   const startedAt = existing?.startedAt ?? Date.now();
   if (TERMINAL_FAILURES.has(status)) {
@@ -344,6 +412,9 @@ export async function pollVideoGeneration(
       status: "in_progress",
       startedAt,
       updatedAt: Date.now(),
+      // A successful provider read ends any permanent-failure streak.
+      permanentPollFailureCount: 0,
+      permanentPollFailureFirstAt: 0,
     });
     return { done: false, status: "in_progress" };
   }

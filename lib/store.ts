@@ -160,7 +160,7 @@ interface AppStore {
    * folder). On failure the run is restored and the error rethrown — the
    * caller owns both the confirmation step and the failure message.
    */
-  removeRun(runId: string): Promise<void>;
+  removeRun(runId: string, options?: { force?: boolean }): Promise<void>;
 }
 
 /** Append an info entry to one run's log (used by the batch worker queue). */
@@ -794,7 +794,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     return batch.id;
   },
 
-  removeRun: async (runId) => {
+  removeRun: async (runId, options) => {
     const removed = get().runs.find((r) => r.id === runId);
     // Optimistic removal; restored below if the server says no. Order is
     // preserved by re-sorting on createdAt (runs are kept newest first).
@@ -813,9 +813,12 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     };
     let res: Response;
     try {
-      res = await fetch(`/api/runs?id=${encodeURIComponent(runId)}`, {
-        method: "DELETE",
-      });
+      res = await fetch(
+        `/api/runs?id=${encodeURIComponent(runId)}${
+          options?.force ? "&force=1" : ""
+        }`,
+        { method: "DELETE" }
+      );
     } catch (err) {
       restore();
       throw err;

@@ -11,6 +11,7 @@ import type {
 import { assertRunId } from "@/lib/server/runstore";
 import {
   isLampApprovalReplayTransition,
+  isLampLostGenerationAcknowledgeTransition,
   LAMP_USER_ACTION_REQUIRED_PREFIX,
 } from "@/lib/server/run-execution-resume";
 import { createHash } from "node:crypto";
@@ -247,7 +248,14 @@ export function assertRunExecutionTransition(
   ) {
     throw new Error("Run execution phase cannot move backwards");
   }
-  if (!STATUS_TRANSITIONS[current.status].has(candidate.status)) {
+  if (
+    !STATUS_TRANSITIONS[current.status].has(candidate.status) &&
+    // A human acknowledging a provider-lost generation is the single guarded
+    // exit from reconcile_required into the paused-for-approval state. The
+    // replacement generation still fails closed until a fresh exact approval
+    // is confirmed, so this cannot re-bill anything by itself.
+    !isLampLostGenerationAcknowledgeTransition(current, candidate)
+  ) {
     throw new Error(
       `Run execution status cannot move from ${current.status} to ${candidate.status}`
     );

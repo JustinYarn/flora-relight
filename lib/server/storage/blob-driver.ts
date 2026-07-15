@@ -101,6 +101,7 @@ import {
   assertRunExecutionTransition,
 } from "./run-execution";
 import { ActiveRunDeletionError } from "./run-deletion";
+import { PROVIDER_LOST_INTERACTION_MARKER } from "@/lib/server/run-execution-failure";
 import { scratchMediaPath, scratchUploadsDir } from "./scratch";
 import type {
   DurableStorageVerification,
@@ -1080,6 +1081,73 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
       return rows[0] ? projectRunMedia(rows[0].data) : null;
     },
 
+    async supersedeLostVideoGeneration(runId, input) {
+      await ensureSchema();
+      const id = assertRunId(runId);
+      const operationId = assertPaidOperationId(input.operationId);
+      const archivedId = assertPaidOperationId(input.archivedOperationId);
+      const now = Date.now();
+      // One statement renames the sealed entry to its archived id and drops
+      // the spend approval, guarded so it only ever touches a journal entry
+      // sealed with the provider-lost marker for this exact interaction.
+      const rows = (await sql`
+        UPDATE runs
+        SET data = (data - 'spendApproval') || jsonb_build_object(
+          'providerOperations',
+          (
+            SELECT jsonb_agg(
+              CASE
+                WHEN item->>'id' = ${operationId}
+                  THEN item || jsonb_build_object(
+                    'id', ${archivedId},
+                    'updatedAt', ${now}::bigint
+                  )
+                ELSE item
+              END
+              ORDER BY ordinal
+            )
+            FROM jsonb_array_elements(
+              COALESCE(data->'providerOperations', '[]'::jsonb)
+            ) WITH ORDINALITY AS entries(item, ordinal)
+          )
+        )
+        WHERE id = ${id}
+          AND data IS NOT NULL
+          AND deleted_at IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+              COALESCE(data->'providerOperations', '[]'::jsonb)
+            ) AS item
+            WHERE item->>'id' = ${operationId}
+              AND item->>'status' = 'reconcile_required'
+              AND item->>'providerInteractionId' = ${input.providerInteractionId}
+              AND item->>'error' LIKE ${`${PROVIDER_LOST_INTERACTION_MARKER}%`}
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+              COALESCE(data->'providerOperations', '[]'::jsonb)
+            ) AS item
+            WHERE item->>'id' = ${archivedId}
+          )
+        RETURNING data
+      `) as Array<{ data: Run }>;
+      if (rows[0]) {
+        return {
+          superseded: true as const,
+          run: await projectRunMedia(rows[0].data),
+        };
+      }
+      const run = await this.getRun(runId);
+      // A lost response after a completed supersession retries here.
+      const alreadyArchived = Boolean(
+        run?.providerOperations?.some((item) => item.id === archivedId) &&
+          !run?.providerOperations?.some((item) => item.id === operationId)
+      );
+      return { superseded: alreadyArchived, run };
+    },
+
     async claimProviderWorkflow(runId, operationId, claimToken) {
       await ensureSchema();
       const id = assertRunId(runId);
@@ -1326,7 +1394,10 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
         : this.getPaidOperation(id, opId);
     },
 
-    async deleteRun(runId: string): Promise<boolean> {
+    async deleteRun(
+      runId: string,
+      options?: { force?: boolean }
+    ): Promise<boolean> {
       await ensureSchema();
       const id = assertRunId(runId);
       const now = Date.now();
@@ -1373,7 +1444,21 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
             WHERE id = ${id}
             FOR UPDATE
           `,
-          transactionSql`
+          // The operator force override tombstones unconditionally; the
+          // caller (DELETE /api/runs) refuses it while a live Workflow still
+          // writes to this run.
+          options?.force === true
+            ? transactionSql`
+                INSERT INTO runs (id, deleted_at)
+                VALUES (${id}, ${now})
+                ON CONFLICT (id) DO UPDATE SET
+                  status = NULL,
+                  label = NULL,
+                  data = NULL,
+                  deleted_at = COALESCE(runs.deleted_at, EXCLUDED.deleted_at)
+                RETURNING media
+              `
+            : transactionSql`
             INSERT INTO runs (id, deleted_at)
             VALUES (${id}, ${now})
             ON CONFLICT (id) DO UPDATE SET

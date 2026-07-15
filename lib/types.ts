@@ -399,9 +399,10 @@ export interface Iteration {
   index: number; // 1-based
   megaPrompt: MegaPrompt;
   /**
-   * Live mode: interaction id of THIS iteration's video generation. The next
-   * iteration passes it as previous_interaction_id so corrections run as
-   * multi-turn refinements (the Stage-A anchor chain is tracked separately).
+   * Live mode: interaction id of THIS iteration's video generation, kept for
+   * provenance display. Generations never chain provider interaction state —
+   * every iteration regenerates from the original source and corrections
+   * carry forward in the compiled prompt (ARCHITECTURE §3.2).
    */
   interactionId?: string;
   /** Stage A artifact: the approved relit keyframe for this iteration. */
@@ -538,6 +539,15 @@ export interface ProviderOperation {
   workflowClaimedAt?: number;
   /** Provider handle persisted immediately after the one billed start call. */
   providerInteractionId?: string;
+  /**
+   * Consecutive permanent (400/404) provider read failures while polling.
+   * Any successful provider read resets both fields to 0; a bounded streak
+   * seals the journal as reconcile_required ("provider lost the interaction")
+   * instead of spinning to the seven-day reconciliation cap. Flat zeroable
+   * numbers on purpose: both storage drivers merge journal writes shallowly.
+   */
+  permanentPollFailureCount?: number;
+  permanentPollFailureFirstAt?: number;
   status:
     | "in_progress"
     | "completed"

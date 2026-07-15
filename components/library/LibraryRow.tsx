@@ -312,7 +312,9 @@ export function LibraryRow({
     setDeleting(true);
     setDeleteError(null);
     try {
-      await removeRun(run.id);
+      // Blocked runs delete only through the explicit operator override; the
+      // server still refuses it while a live workflow owns the run.
+      await removeRun(run.id, stillRunning ? { force: true } : undefined);
       onDeleted?.();
     } catch (error) {
       setDeleteError(
@@ -418,14 +420,16 @@ export function LibraryRow({
           {confirmingDelete ? (
             <span className="flex items-center gap-2">
               <span className="max-w-[190px] text-right text-2xs leading-tight text-muted">
-                Delete forever? This removes the videos too.
+                {stillRunning
+                  ? "Force delete? This abandons unresolved provider work and its billing evidence, and removes the videos."
+                  : "Delete forever? This removes the videos too."}
               </span>
               <button
                 onClick={() => void confirmDelete()}
                 disabled={deleting}
                 className="rounded-md border border-[color-mix(in_srgb,var(--fail)_40%,transparent)] bg-[color-mix(in_srgb,var(--fail)_14%,transparent)] px-2 py-1 text-xs text-fail transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {deleting ? "Deleting…" : "Delete"}
+                {deleting ? "Deleting…" : stillRunning ? "Force delete" : "Delete"}
               </button>
               <button
                 onClick={() => setConfirmingDelete(false)}
@@ -440,10 +444,13 @@ export function LibraryRow({
               <DownloadSideBySide run={run} variant="compact" />
               <button
                 onClick={() => setConfirmingDelete(true)}
-                disabled={stillRunning}
-                title={stillRunning ? "still running" : "Delete run"}
+                title={
+                  stillRunning
+                    ? "Force delete (work is unresolved — the confirm step explains)"
+                    : "Delete run"
+                }
                 aria-label="Delete run"
-                className="rounded-md border border-edge px-2 py-1 text-xs text-faint transition hover:border-faint hover:text-fail disabled:cursor-not-allowed disabled:opacity-40"
+                className="rounded-md border border-edge px-2 py-1 text-xs text-faint transition hover:border-faint hover:text-fail"
               >
                 ✕
               </button>

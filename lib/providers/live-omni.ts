@@ -83,9 +83,9 @@ export class LiveOmniProvider implements VideoGenProvider {
       }
     }
 
-    // Bookkeeping the engine folds into the run: the interaction id chains
-    // the NEXT iteration's correction turn; audioVerified drives the
-    // deterministic audio-integrity gate.
+    // Bookkeeping the engine folds into the run: the interaction id is kept
+    // for provenance display only (generations never chain interaction
+    // state); audioVerified drives the deterministic audio-integrity gate.
     this.ctx.videoInteractionId = res.interactionId;
     this.ctx.lastVideogen = {
       interactionId: res.interactionId,

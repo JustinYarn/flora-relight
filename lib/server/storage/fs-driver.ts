@@ -65,6 +65,7 @@ import {
   hasDeletionBlockingBatchWork,
   hasDeletionBlockingRunWork,
 } from "./run-deletion";
+import { isProviderLostInteraction } from "@/lib/server/run-execution-failure";
 import type { MediaRange, MediaStat, RunPageCursor, StorageDriver } from "./types";
 
 const PAID_OPERATION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
@@ -384,6 +385,46 @@ export function createFsDriver(): StorageDriver {
         return updated;
       });
     },
+    async supersedeLostVideoGeneration(runId, input) {
+      const operationId = assertPaidOperationId(input.operationId);
+      const archivedId = assertPaidOperationId(input.archivedOperationId);
+      return withRunLock(async () => {
+        if (await isRunTombstoned(runId)) {
+          return { superseded: false as const, run: null };
+        }
+        const run = await readRun(runId);
+        if (!run) return { superseded: false as const, run: null };
+        const operations = [...(run.providerOperations ?? [])];
+        const index = operations.findIndex((item) => item.id === operationId);
+        const alreadyArchived = operations.some(
+          (item) => item.id === archivedId
+        );
+        if (index < 0) {
+          // A lost response after a completed supersession retries here.
+          return { superseded: alreadyArchived, run };
+        }
+        const operation = operations[index];
+        if (
+          alreadyArchived ||
+          operation.providerInteractionId !== input.providerInteractionId ||
+          !isProviderLostInteraction(operation)
+        ) {
+          return { superseded: false as const, run };
+        }
+        operations[index] = {
+          ...operation,
+          id: archivedId,
+          updatedAt: Date.now(),
+        };
+        const updated: Run = { ...run, providerOperations: operations };
+        // The old grant covered exactly one attempt at this generation.
+        // Withdrawing it forces the replacement through a fresh explicit
+        // confirmation instead of silently reusing a still-valid approval.
+        delete updated.spendApproval;
+        await writeRun(updated);
+        return { superseded: true as const, run: updated };
+      });
+    },
     async claimProviderWorkflow(runId, operationId, claimToken) {
       if (!/^[a-f0-9]{32}$/.test(claimToken)) {
         throw new Error("Invalid provider Workflow claim token");
@@ -533,7 +574,7 @@ export function createFsDriver(): StorageDriver {
         return reconciled;
       });
     },
-    async deleteRun(runId: string) {
+    async deleteRun(runId: string, options?: { force?: boolean }) {
       const id = assertRunId(runId);
       return withBatchLock(() =>
         withPaidOperationLock(() =>
@@ -559,6 +600,7 @@ export function createFsDriver(): StorageDriver {
               ]);
             if (
               !alreadyTombstoned &&
+              options?.force !== true &&
               (hasDeletionBlockingRunWork(run, execution, paidOperations) ||
                 hasDeletionBlockingBatchWork(id, batchExecutions))
             ) {

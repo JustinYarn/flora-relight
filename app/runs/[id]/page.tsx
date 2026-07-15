@@ -19,6 +19,7 @@ import { VerdictLine } from "@/components/review/VerdictLine";
 import { AttemptSwitcher } from "@/components/review/AttemptSwitcher";
 import { EvalList } from "@/components/review/EvalList";
 import { ReviewActions } from "@/components/review/ReviewActions";
+import { LostGenerationRecovery } from "@/components/review/LostGenerationRecovery";
 import { WorkflowRail } from "@/components/review/WorkflowRail";
 import { isLampBlindGradeLocked } from "@/components/grade/derive";
 
@@ -158,6 +159,11 @@ export default function RunReviewPage() {
               run.status === "running" ? <GenerationTheater run={run} /> : undefined
             }
           />
+
+          {/* RECOVERY — only for a durable execution stopped in
+              reconcile_required; the provider-lost case gets a safe re-run
+              action, anything else renders as read-only evidence. */}
+          <LostGenerationRecovery run={run} />
 
           {/* VERDICT LINE */}
           <div className="mt-8">

@@ -13,6 +13,7 @@ import { EVAL_DEFS, getEvalDef } from "@/lib/prompts/eval-defs";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { MANIFEST_PROMPT } from "@/lib/prompts/manifest";
 import { formatTime } from "@/lib/util";
+import { isArchivedLostGenerationId } from "@/lib/lost-interaction";
 import {
   Badge,
   ScoreMeter,
@@ -291,7 +292,10 @@ function promptViewFor(
     run?.workflowMode ?? (run?.workflowId === "lamp-v1" ? "lamp" : "flora");
   const attempt = iteration?.index ?? Math.max(1, run?.serverExecution?.iteration ?? 1);
   const operation = run?.providerOperations?.find(
-    (item) => item.kind === "video_generation" && item.iteration === attempt
+    (item) =>
+      item.kind === "video_generation" &&
+      item.iteration === attempt &&
+      !isArchivedLostGenerationId(item.id)
   );
   const executionPrompt =
     attempt === 1 ? run?.serverExecution?.renderedPrompt : undefined;

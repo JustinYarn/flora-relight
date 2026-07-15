@@ -864,7 +864,7 @@ export async function runWorkflow(
         runId,
         "info",
         live
-          ? `Omni Flash generating iteration ${i} LIVE — regenerating from the ORIGINAL video${liveCtx?.videoInteractionId ? `, chained to the previous generation turn (${liveCtx.videoInteractionId.slice(0, 12)}…)` : ""}. This blocks for 1-7 minutes.`
+          ? `Omni Flash generating iteration ${i} LIVE — regenerating from the ORIGINAL video with the corrected prompt. This blocks for 1-7 minutes.`
           : `Omni (mock) generating iteration ${i} — regenerating from the ORIGINAL video, seed ${seed} pinned${anchorDataUrl ? ", anchor as first-frame conditioning" : ""}`,
         "videogen"
       );
@@ -882,8 +882,9 @@ export async function runWorkflow(
         : { ...gen.video, label: `Omni generation v${i}` };
       patchIteration(runId, i, (it) => {
         it.generatedVideo = genVideo;
-        // Live: THIS iteration's videogen interaction id — the next
-        // iteration's correction turn chains on it (anchor chain is separate).
+        // Live: THIS iteration's videogen interaction id, kept for
+        // provenance display only — generations never chain interaction
+        // state (corrections travel in the prompt, ARCHITECTURE §3.2).
         if (live && liveCtx?.lastVideogen) {
           it.interactionId = liveCtx.lastVideogen.interactionId;
         }

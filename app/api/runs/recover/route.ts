@@ -18,6 +18,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { isValidRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
 import { enqueueRunExecution } from "@/lib/server/run-execution-coordinator";
+import { reconcileDeadWorkflowExecution } from "@/lib/server/dead-workflow-recovery";
 import {
   hasReusableFirstCutApproval,
   hasReusableLampApproval,
@@ -75,6 +76,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 409 }
     );
   }
+  // A "running" record whose Workflow run died from outside (operator
+  // cancellation, engine loss) can never advance itself: recordExecutionFailure
+  // only runs inside the workflow. Reconcile it here before the outbox logic,
+  // which otherwise returns it unchanged forever.
+  if (current?.status === "running") {
+    try {
+      const reconciled = await reconcileDeadWorkflowExecution(current, run);
+      if (reconciled) {
+        return NextResponse.json(
+          { ok: true, execution: reconciled, enqueued: false },
+          { headers: { "Cache-Control": "private, no-store, max-age=0" } }
+        );
+      }
+    } catch (error) {
+      // Best-effort adoption: a storage/API hiccup here must not break the
+      // normal outbox path below. The next poll retries after the lease.
+      console.error(
+        "[runs/recover] dead-workflow reconciliation failed:",
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+
   if (
     (!current || current.status === "queued") &&
     !(

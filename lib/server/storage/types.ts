@@ -244,6 +244,24 @@ export interface StorageDriver {
     operation: ProviderOperation
   ): Promise<Run | null>;
 
+  /**
+   * Archive a provider-lost video-generation journal entry under a stable
+   * superseded id and withdraw the run's spend approval in the same atomic
+   * write. The archived entry keeps status reconcile_required forever as the
+   * durable evidence of a possibly unknown upstream charge; freeing the
+   * canonical operation id lets exactly one fresh, newly approved claim
+   * re-run the generation. Refuses any journal entry that is not sealed with
+   * the provider-lost marker, so this can never erase billing evidence.
+   */
+  supersedeLostVideoGeneration(
+    runId: string,
+    input: {
+      operationId: string;
+      archivedOperationId: string;
+      providerInteractionId: string;
+    }
+  ): Promise<{ superseded: boolean; run: Run | null }>;
+
   /** Claim the single right to enqueue a poll Workflow for a provider handle. */
   claimProviderWorkflow(
     runId: string,
@@ -295,7 +313,13 @@ export interface StorageDriver {
    * tombstoning so its only durable billing/recovery journal remains intact.
    * Returns whether anything existed. Irreversible by design.
    */
-  deleteRun(runId: string): Promise<boolean>;
+  /**
+   * Permanently remove one run. Fails closed on active or unreconciled work
+   * unless `force` is set — the explicit operator override that abandons
+   * unresolved provider evidence (the caller owns refusing it while a live
+   * Workflow still writes to this run).
+   */
+  deleteRun(runId: string, options?: { force?: boolean }): Promise<boolean>;
 
   /** All persisted runs, newest first. */
   listRuns(): Promise<Run[]>;

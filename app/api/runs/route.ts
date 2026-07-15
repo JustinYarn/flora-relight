@@ -49,6 +49,8 @@ import {
 import { readCanonicalIngestByRunId } from "@/lib/server/ingest";
 import { hasGeminiKey } from "@/lib/server/gemini";
 import { enqueueRunExecution } from "@/lib/server/run-execution-coordinator";
+import { workflowRunLiveness } from "@/lib/server/dead-workflow-recovery";
+import { isArchivedLostGenerationId } from "@/lib/lost-interaction";
 import { summarizeBatchExecution } from "@/lib/server/batch-execution-view";
 import { runExecutionInputHash } from "@/lib/server/run-execution-input";
 import {
@@ -346,7 +348,9 @@ function mergeServerGeneratedVideos(
 function firstCutProviderOperation(run: Run): ProviderOperation | undefined {
   return run.providerOperations?.find(
     (operation) =>
-      operation.kind === "video_generation" && operation.iteration === 1
+      operation.kind === "video_generation" &&
+      operation.iteration === 1 &&
+      !isArchivedLostGenerationId(operation.id)
   );
 }
 
@@ -516,7 +520,9 @@ function materializeServerResults(
   const firstCutOperation = firstCutProviderOperation(materialized);
   const secondCutOperation = materialized.providerOperations?.find(
     (operation) =>
-      operation.kind === "video_generation" && operation.iteration === 2
+      operation.kind === "video_generation" &&
+      operation.iteration === 2 &&
+      !isArchivedLostGenerationId(operation.id)
   );
   const executionBindingMismatch = Boolean(
     execution &&
@@ -1577,8 +1583,37 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
       { status: 400 }
     );
   }
+  const force = req.nextUrl.searchParams.get("force") === "1";
   try {
-    const existed = await getStorage().deleteRun(id);
+    if (force) {
+      // The operator override abandons unresolved provider evidence, which
+      // is the owner's call — but never while a live Workflow still writes
+      // to this run. Cancel the workflow first, then force.
+      const execution = await getStorage().getRunExecution(id);
+      const liveness =
+        execution?.workflowRunId &&
+        (execution.status === "queued" || execution.status === "running")
+          ? await workflowRunLiveness(execution.workflowRunId)
+          : null;
+      if (liveness === "alive" || liveness === "unknown") {
+        return NextResponse.json(
+          {
+            code: "WORKFLOW_ALIVE",
+            error:
+              "A durable workflow still owns this run. Cancel that workflow first, then force-delete.",
+          },
+          {
+            status: 409,
+            headers: { "Cache-Control": "private, no-store, max-age=0" },
+          }
+        );
+      }
+      console.warn(`[runs/delete] operator force-delete of ${id}`);
+    }
+    const existed = await getStorage().deleteRun(
+      id,
+      force ? { force: true } : undefined
+    );
     return NextResponse.json({ ok: true, id, existed });
   } catch (err) {
     if (err instanceof ActiveRunDeletionError) {
