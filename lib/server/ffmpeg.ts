@@ -578,6 +578,23 @@ export async function demuxAudio(
   return { sha256: await sha256File(outPath) };
 }
 
+/** Convert the canonical source audio into the WAV input required by Lipsync-2-Pro. */
+export async function transcodeAudioToWav(
+  srcPath: string,
+  outPath: string
+): Promise<void> {
+  const tools = await getTools();
+  await runOrThrow(tools.ffmpeg, [
+    "-y",
+    "-i", srcPath,
+    "-vn",
+    "-c:a", "pcm_s16le",
+    "-ar", "48000",
+    "-ac", "1",
+    outPath,
+  ]);
+}
+
 /**
  * Remux: copy the video stream from `videoPath` and the audio stream from
  * `audioPath` into one file, no re-encode. `-shortest` trims to the shorter
@@ -598,6 +615,56 @@ export async function remuxAudio(
     "-map", "0:v:0",
     "-map", "1:a:0",
     "-shortest",
+    outPath,
+  ]);
+}
+
+/**
+ * Conform a repaired video to the canonical source timeline. The final frame
+ * is cloned only when the repaired output is short; `-t` trims when it is
+ * long. Re-encoding is required because stream-copy cannot create frames.
+ */
+export async function conformVideoDuration(
+  videoPath: string,
+  outPath: string,
+  durationSec: number
+): Promise<void> {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    throw new Error("Video conform requires a positive finite duration.");
+  }
+  const tools = await getTools();
+  await runOrThrow(tools.ffmpeg, [
+    "-y",
+    "-i", videoPath,
+    "-vf", "tpad=stop_mode=clone:stop_duration=1",
+    "-t", String(durationSec),
+    "-map", "0:v:0",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "18",
+    "-pix_fmt", "yuv420p",
+    "-an",
+    "-movflags", "+faststart",
+    outPath,
+  ]);
+}
+
+/** Attach the complete canonical audio stream without shortening either input. */
+export async function remuxFullAudio(
+  videoPath: string,
+  audioPath: string,
+  outPath: string
+): Promise<void> {
+  const tools = await getTools();
+  await runOrThrow(tools.ffmpeg, [
+    "-y",
+    "-i", videoPath,
+    "-i", audioPath,
+    "-map", "0:v:0",
+    "-map", "1:a:0",
+    "-c:v", "copy",
+    "-c:a", "copy",
+    "-movflags", "+faststart",
     outPath,
   ]);
 }

@@ -581,14 +581,16 @@ export interface PaidOperation {
   /** Stable application id, unique within a run. */
   id: string;
   runId: string;
-  provider: "gemini" | "claude";
-  kind: "manifest" | "anchor" | "judge";
+  provider: "gemini" | "claude" | "replicate";
+  kind: "manifest" | "anchor" | "judge" | "lipsync";
   /** Anchor version or generated-video iteration, when applicable. */
   iteration?: number;
   /** Canonical eval id for judge operations. */
   evalId?: string;
   /** SHA-256 of the canonical server-validated request. */
   inputHash: string;
+  /** Durable provider handle for an asynchronous paid operation. */
+  providerOperationId?: string;
   status: "in_progress" | "completed" | "reconcile_required";
   startedAt: number;
   updatedAt: number;

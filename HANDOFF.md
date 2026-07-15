@@ -157,6 +157,8 @@ Keep the established environment-variable names:
 - `BLOB_READ_WRITE_TOKEN`
 - `DATABASE_URL`
 - `GEMINI_API_KEY`
+- `SYNCNET_BASE_URL`
+- `REPLICATE_API_TOKEN`
 - `ANTHROPIC_API_KEY` (legacy/other evaluation paths; Lamp's holistic evaluator is
   Gemini-only)
 - `FLORA_WORKFLOW_SMOKE_ENABLED` (temporary provider-free probe flag)

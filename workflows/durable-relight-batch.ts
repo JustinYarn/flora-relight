@@ -40,6 +40,11 @@ import type {
   Run,
   RunExecution,
 } from "@/lib/types";
+import {
+  isLipsyncOperationResult,
+  LIPSYNC_OPERATION_ID,
+  v2SyncPasses,
+} from "@/lib/v2-sync";
 
 export interface DurableRelightBatchInput {
   batchId: string;
@@ -109,17 +114,19 @@ function generationOperation(
 interface LampPaidOperations {
   first: PaidOperation | null;
   final: PaidOperation | null;
+  lipsync: PaidOperation | null;
 }
 
 async function readLampPaidOperations(
   storage: StorageDriver,
   runId: string
 ): Promise<LampPaidOperations> {
-  const [first, final] = await Promise.all([
+  const [first, final, lipsync] = await Promise.all([
     storage.getPaidOperation(runId, lampEvaluationOperationId(1)),
     storage.getPaidOperation(runId, lampEvaluationOperationId(2)),
+    storage.getPaidOperation(runId, LIPSYNC_OPERATION_ID),
   ]);
-  return { first, final };
+  return { first, final, lipsync };
 }
 
 async function paidOperationsForBatch(
@@ -137,7 +144,10 @@ function hasAnyProviderEvidence(
   paid: LampPaidOperations | null
 ): boolean {
   return Boolean(
-    (run?.providerOperations?.length ?? 0) > 0 || paid?.first || paid?.final
+    (run?.providerOperations?.length ?? 0) > 0 ||
+      paid?.first ||
+      paid?.final ||
+      paid?.lipsync
   );
 }
 
@@ -175,7 +185,11 @@ function completedLampArtifacts(input: {
     !finalGeneration.result?.audioVerified ||
     finalGeneration.renderedPrompt !== finalPrompt ||
     input.paid.final?.status !== "completed" ||
-    !isLampEvaluationArtifact(input.paid.final.result, 2)
+    !isLampEvaluationArtifact(input.paid.final.result, 2) ||
+    (input.paid.lipsync !== null &&
+      (input.paid.lipsync.status !== "completed" ||
+        !isLipsyncOperationResult(input.paid.lipsync.result) ||
+        !v2SyncPasses(input.paid.lipsync.result.postSync)))
   ) {
     return null;
   }
@@ -200,11 +214,20 @@ function confirmedLampActualMicros(input: {
   ) {
     throw new Error("Lamp spend is not completely journaled.");
   }
+  const lipsyncRepairUsd = input.paid.lipsync
+    ? isLipsyncOperationResult(input.paid.lipsync.result)
+      ? input.paid.lipsync.result.costUsd
+      : null
+    : 0;
+  if (lipsyncRepairUsd === null) {
+    throw new Error("Lamp Lipsync spend is not completely journaled.");
+  }
   return confirmedLampBatchActualMicros({
     initialGenerationUsd: firstGeneration.costUsd,
     initialEvaluationUsd: input.paid.first.result.costUsd,
     finalGenerationUsd: finalGeneration.costUsd,
     finalEvaluationUsd: input.paid.final.result.costUsd,
+    lipsyncRepairUsd,
   });
 }
 

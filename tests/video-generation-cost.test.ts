@@ -49,14 +49,14 @@ test("generation authorization admits the 10.05s ceiling and rejects any longer 
   );
 });
 
-test("Lamp reserves both bounded generations plus both evaluations", () => {
+test("Lamp reserves both generations, evaluations, and one possible repair", () => {
   assert.equal(firstCutOutputAuthorizationMicros(), 1_018_668);
   assert.equal(firstCutMaximumMicros(), 1_800_492);
   assert.ok(
     firstCutMaximumMicros() >
       usdToMicros(estimateLampRun(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd / 2)
   );
-  assert.equal(lampMaximumMicros(), 5_301_848);
+  assert.equal(lampMaximumMicros(), 6_138_511);
 });
 
 test("Omni actual cost comes from input and output modality usage", () => {

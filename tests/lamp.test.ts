@@ -44,10 +44,12 @@ import {
   planBatchBudget,
 } from "../lib/server/batch-budget.ts";
 import {
+  assertPaidOperationAuthorized,
   createSpendApproval,
   hasReusableLampApproval,
   lampMaximumMicros,
 } from "../lib/server/spend-approval.ts";
+import { LIPSYNC_OPERATION_ID } from "../lib/v2-sync.ts";
 import {
   assertBatchExecutionTransition,
   assertNewBatchExecution,
@@ -276,16 +278,22 @@ test("a persisted Lamp v1 keeps v2 stable across a later base-template deploy", 
   }
 });
 
-test("Lamp cost is exactly two generations plus two holistic evaluations", () => {
+test("Lamp cost includes two generations, two evaluations, and one possible repair", () => {
   const durationSec = 7.5;
   const estimate = estimateLampRun(durationSec);
 
   assert.equal(LAMP_GENERATION_COUNT, 2);
   assert.equal(LAMP_EVALUATION_COUNT, 2);
-  assert.equal(estimate.items.length, 5);
+  assert.equal(estimate.items.length, 6);
 
-  const [generation, generationInput, evaluationInput, evaluationOutput, localAudio] =
-    estimate.items;
+  const [
+    generation,
+    generationInput,
+    evaluationInput,
+    evaluationOutput,
+    lipsync,
+    localAudio,
+  ] = estimate.items;
   assert.equal(generation.units, durationSec * 2);
   assert.equal(
     generation.usd,
@@ -297,6 +305,12 @@ test("Lamp cost is exactly two generations plus two holistic evaluations", () =>
   assert.ok(generationInput.usd > 0);
   assert.ok(evaluationInput.usd > 0);
   assert.ok(evaluationOutput.usd > 0);
+  assert.equal(lipsync.provider, "replicate");
+  assert.equal(lipsync.units, durationSec);
+  assert.equal(
+    lipsync.usd,
+    durationSec * PRICE_TABLE.lipsync2ProPerOutputSecond.usd
+  );
   assert.equal(localAudio.units, 2);
   assert.equal(localAudio.usd, 0);
   assert.equal(
@@ -304,7 +318,8 @@ test("Lamp cost is exactly two generations plus two holistic evaluations", () =>
     durationSec * 2 * PRICE_TABLE.omniFlashPerOutputSecond.usd +
       generationInput.usd +
       evaluationInput.usd +
-      evaluationOutput.usd
+      evaluationOutput.usd +
+      lipsync.usd
   );
 });
 
@@ -370,6 +385,28 @@ test("Lamp batch admission reserves and authorizes one exact two-pass run", () =
   assert.equal(approval.maxUsd, microsToUsd(reservation));
   assert.equal(hasReusableLampApproval(run, "batch", batchId, now + 1), true);
   assert.equal(hasReusableLampApproval(run, "single", undefined, now + 1), false);
+  assert.doesNotThrow(() =>
+    assertPaidOperationAuthorized(
+      run,
+      "lipsync",
+      2,
+      undefined,
+      LIPSYNC_OPERATION_ID,
+      now + 1
+    )
+  );
+  assert.throws(
+    () =>
+      assertPaidOperationAuthorized(
+        run,
+        "lipsync",
+        1,
+        undefined,
+        LIPSYNC_OPERATION_ID,
+        now + 1
+      ),
+    /at most one Lipsync-2-Pro repair/
+  );
   assert.equal(
     hasReusableLampApproval(run, "batch", "batch_wrong_fixture", now + 1),
     false
@@ -434,6 +471,16 @@ test("Lamp batch settlement counts both generations and both holistic evaluation
   });
   assert.equal(actualMicros, 1_540_000);
   assert.equal(actualMicros <= lampMaximumMicros(), true);
+  assert.equal(
+    confirmedLampBatchActualMicros({
+      initialGenerationUsd: 0.75,
+      initialEvaluationUsd: 0.02,
+      finalGenerationUsd: 0.75,
+      finalEvaluationUsd: 0.02,
+      lipsyncRepairUsd: 0.44,
+    }),
+    1_980_000
+  );
   assert.throws(
     () =>
       confirmedLampBatchActualMicros({

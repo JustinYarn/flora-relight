@@ -414,6 +414,9 @@ function paidCostLabel(entry: PaidOperationCostEntry): string {
   if (entry.id === lampEvaluationOperationId(2)) {
     return "Lamp final whole-video evaluation (Gemini)";
   }
+  if (entry.kind === "lipsync") {
+    return "Lamp Final Lipsync-2-Pro repair (Replicate)";
+  }
   if (entry.kind === "manifest") return "Scene manifest extraction (Gemini)";
   if (entry.kind === "anchor") {
     return `Look Anchor relight v${entry.iteration ?? 1} (Gemini image edit)`;

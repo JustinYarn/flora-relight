@@ -159,6 +159,26 @@ export async function completePaidOperation<T>(
   return completed.result as T;
 }
 
+/** Persist an asynchronous provider id before any polling or artifact work. */
+export async function persistPaidOperationProviderId(
+  operation: PaidOperation,
+  providerOperationId: string
+): Promise<PaidOperation> {
+  const updated = await getStorage().setPaidOperationProviderId(
+    operation.runId,
+    operation.id,
+    operation.inputHash,
+    providerOperationId
+  );
+  if (
+    updated?.status !== "in_progress" ||
+    updated.providerOperationId !== providerOperationId
+  ) {
+    throw new Error("Paid provider operation id could not be committed safely.");
+  }
+  return updated;
+}
+
 /** Seal an uncertain call so no automatic or manual retry can re-bill it. */
 export async function markPaidOperationReconcileRequired(
   operation: PaidOperation,

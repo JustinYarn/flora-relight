@@ -66,7 +66,8 @@ const LAMP_FLOW = [
   },
   {
     title: "Final video",
-    description: "Apply the critique in one final regeneration — no open-ended loop.",
+    description:
+      "Apply the critique once, then repair lip sync only if the final SyncNet check fails.",
   },
   {
     title: "Your grade",
@@ -1348,8 +1349,8 @@ export default function DashboardPage() {
               ? [
                   `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
                   `Estimated provider cost: ${formatUsd(estimateLampRun(pendingLaunch.video.durationSec).totalUsd)}`,
-                  `Spend authorization: the server reserves ${formatReservationUsd(workflowReservationUsd("lamp"))} for exactly two video generations and two holistic evaluation calls, including input and thinking usage plus the 50ms-per-generation container allowance. Actual cost is settled from provider usage; there is no open-ended retry loop.`,
-                  "For both Initial and Final, Lamp restores and verifies source audio before the whole-video evaluation. The fixed two-pass run continues on the server if this tab closes.",
+                  `Spend authorization: the server reserves ${formatReservationUsd(workflowReservationUsd("lamp"))} for exactly two video generations, two holistic evaluation calls, and at most one Lipsync-2-Pro repair. Actual cost is settled from provider usage and repaired output duration; there is no open-ended retry loop.`,
+                  "For both Initial and Final, Lamp restores and verifies source audio. Final also runs through SyncNet before evaluation and is repaired once only when confidence is below 4 or distance is above 10.",
                   "Final enters per-video human grading. Its completed AI evaluation stays hidden by default and can be revealed whenever you choose.",
                   ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
                 ]
@@ -1413,7 +1414,7 @@ export default function DashboardPage() {
               )
             )}`,
             pendingBatch.workflowMode === "lamp"
-              ? "Every Lamp clip uses exactly two generations and two holistic evaluations, then waits for its own human grade."
+              ? "Every Lamp clip uses exactly two generations and two holistic evaluations, with at most one SyncNet-triggered Lipsync-2-Pro repair, then waits for its own human grade."
               : "Every Flora clip uses one generation and lands in the established human review queue.",
             mode === "live"
               ? `Batch spend authorization: the server reserves ${formatReservationUsd(

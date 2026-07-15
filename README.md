@@ -60,7 +60,8 @@ npm run dev
 ```
 
 Costs money when live: Flora authorizes one generation per clip; Lamp authorizes two
-video generations and two holistic Gemini evaluation calls per clip. Single and batch
+video generations, two holistic Gemini evaluation calls, and at most one
+SyncNet-triggered Lipsync-2-Pro repair per clip. Single and batch
 confirmations show the selected method's complete estimate before starting, and the top
 bar tracks journaled actual spend. In local development, videos, evaluations, prompts,
 execution state, and grading drafts persist under the gitignored `data/` store.
@@ -104,7 +105,8 @@ Prerequisites and setup:
      store. Both environments also need their private-store token and database URL from the
      scoped integrations.
    - **Production only by default:** `GEMINI_API_KEY` (Google AI Studio, paid tier for
-     image/video models) and `ANTHROPIC_API_KEY` (Claude judge). Keep these out of Preview
+     image/video models), `SYNCNET_BASE_URL`, `REPLICATE_API_TOKEN`, and
+     `ANTHROPIC_API_KEY` (Claude judge). Keep these out of Preview
      during provider-free deployment validation; add them to another environment only for
      an explicitly approved provider test.
    With the CLI, add a value separately for each intended scope, for example

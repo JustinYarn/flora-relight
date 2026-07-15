@@ -6,6 +6,7 @@ import {
   type LampEvaluationArtifact,
 } from "@/lib/lamp-evaluation";
 import { runLampHolisticEvaluation } from "@/lib/server/lamp-evaluator";
+import type { PreparedLipsyncInputs } from "@/lib/server/replicate-lipsync";
 import { getStorage } from "@/lib/server/storage";
 import { runExecutionInputHash } from "@/lib/server/run-execution-input";
 import {
@@ -25,6 +26,17 @@ import {
 } from "@/lib/server/video-generation-start";
 import { PaidOperationAuthorizationError } from "@/lib/server/paid-operation";
 import {
+  analyzeV2Candidate,
+  finalizeV2Lipsync,
+  pollV2LipsyncPrediction,
+  prepareV2LipsyncInputs,
+  readV2LipsyncCheckpoint,
+  startV2LipsyncPrediction,
+  type V2CandidateSyncCheck,
+  type V2LipsyncCheckpoint,
+  type V2LipsyncPollResult,
+} from "@/lib/server/v2-sync-finalization";
+import {
   assertVideoGenerationAuthorized,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
@@ -37,6 +49,13 @@ import {
   type PollVideoGenerationResult,
 } from "@/lib/server/videogen-operation";
 import type { RunExecution, VideoGenerationOperationResult } from "@/lib/types";
+import {
+  isLipsyncOperationResult,
+  LIPSYNC_OPERATION_ID,
+  v2SyncPasses,
+  type LipsyncOperationResult,
+  type SyncNetMetrics,
+} from "@/lib/v2-sync";
 
 export interface DurableRelightRunInput {
   runId: string;
@@ -63,6 +82,7 @@ const MAX_RETRY_SAFE_GAP_ATTEMPTS = 7 * 24 * 12;
  *
  *   original + mega prompt v1 -> generation 1 -> holistic critique
  *   -> corrected mega prompt v2 -> generation 2 from original
+ *   -> SyncNet check and at most one Lipsync-2-Pro repair
  *   -> final holistic evaluation -> blind human grading
  *
  * Existing Flora batch children and pre-Lamp single executions retain their
@@ -111,12 +131,13 @@ export async function durableRelightRun(
       firstEvaluation
     );
 
-    const final = await runGenerationAttempt(
+    await runGenerationAttempt(
       input,
       workflowRunId,
       2,
       finalPrompt.rendered
     );
+    const effectiveFinal = await finalizeV2WithSync(input, workflowRunId);
     await enterEvaluationPhaseWithRecovery(input, workflowRunId, 2);
     await evaluateAttemptWithRecovery(
       input,
@@ -129,8 +150,8 @@ export async function durableRelightRun(
       runId: input.runId,
       executionId: input.executionId,
       status: "awaiting_review",
-      videoUrl: final.videoUrl,
-      audioVerified: final.audioVerified,
+      videoUrl: effectiveFinal.videoUrl,
+      audioVerified: effectiveFinal.audioVerified,
     };
   } catch (error) {
     const safeError =
@@ -164,6 +185,76 @@ export async function durableRelightRun(
         : "Durable Lamp execution stopped before a gradeable final artifact was confirmed."
     );
   }
+}
+
+interface EffectiveV2 {
+  videoUrl: string;
+  audioVerified: true;
+}
+
+async function finalizeV2WithSync(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<EffectiveV2> {
+  let checkpoint = await readV2SyncCheckpointStep(input, workflowRunId);
+  if (checkpoint.state === "blocked") throw new Error(checkpoint.reason);
+  if (checkpoint.state === "completed") {
+    if (!v2SyncPasses(checkpoint.result.postSync)) {
+      throw new Error("The completed Lipsync repair still fails SyncNet.");
+    }
+    return {
+      videoUrl: checkpoint.result.videoUrl,
+      audioVerified: true,
+    };
+  }
+
+  const candidate = await analyzeV2CandidateStep(input, workflowRunId);
+  if (candidate.skipped) {
+    if (checkpoint.state === "started") {
+      throw new Error("A started Lipsync repair no longer has source audio.");
+    }
+    return { videoUrl: candidate.videoUrl, audioVerified: true };
+  }
+  if (checkpoint.state === "unclaimed") {
+    if (v2SyncPasses(candidate.metrics)) {
+      return { videoUrl: candidate.videoUrl, audioVerified: true };
+    }
+    const prepared = await prepareV2LipsyncInputsStep(input, workflowRunId);
+    checkpoint = {
+      state: "started",
+      predictionId: await startV2LipsyncPredictionStep(
+        input,
+        workflowRunId,
+        prepared,
+        candidate.metrics
+      ),
+    };
+  }
+
+  if (checkpoint.state !== "started") {
+    throw new Error("V2 Lipsync repair has no durable prediction id.");
+  }
+  for (let poll = 0; poll < MAX_POLLS; poll += 1) {
+    await sleep("8s");
+    const result = await pollV2LipsyncPredictionStep(
+      input,
+      workflowRunId,
+      checkpoint.predictionId
+    );
+    if (!result.done) continue;
+    const finalized = await finalizeV2LipsyncStep(
+      input,
+      workflowRunId,
+      checkpoint.predictionId,
+      result.outputUrl,
+      candidate.metrics
+    );
+    if (!v2SyncPasses(finalized.postSync)) {
+      throw new Error("Lipsync-2-Pro output still fails SyncNet.");
+    }
+    return { videoUrl: finalized.videoUrl, audioVerified: true };
+  }
+  throw new Error("Lipsync-2-Pro remained unresolved after 20 minutes.");
 }
 
 async function runGenerationAttempt(
@@ -762,6 +853,94 @@ async function assertGenerationOwner(
   }
 }
 
+async function readV2SyncCheckpointStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<V2LipsyncCheckpoint> {
+  "use step";
+  await assertGenerationOwner(input, workflowRunId, 2);
+  return readV2LipsyncCheckpoint(input.runId);
+}
+
+readV2SyncCheckpointStep.maxRetries = 2;
+
+async function analyzeV2CandidateStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<V2CandidateSyncCheck> {
+  "use step";
+  await assertGenerationOwner(input, workflowRunId, 2);
+  return analyzeV2Candidate(input.runId);
+}
+
+analyzeV2CandidateStep.maxRetries = 2;
+
+async function prepareV2LipsyncInputsStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<PreparedLipsyncInputs> {
+  "use step";
+  await assertGenerationOwner(input, workflowRunId, 2);
+  return prepareV2LipsyncInputs(input.runId);
+}
+
+prepareV2LipsyncInputsStep.maxRetries = 2;
+
+async function startV2LipsyncPredictionStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  prepared: PreparedLipsyncInputs,
+  preSync: SyncNetMetrics
+): Promise<string> {
+  "use step";
+  await assertGenerationOwner(input, workflowRunId, 2);
+  try {
+    return await startV2LipsyncPrediction({
+      runId: input.runId,
+      prepared,
+      preSync,
+    });
+  } catch (error) {
+    if (error instanceof PaidOperationAuthorizationError) {
+      throw new Error(`${LAMP_USER_ACTION_REQUIRED_PREFIX}${error.message}`);
+    }
+    throw error;
+  }
+}
+
+startV2LipsyncPredictionStep.maxRetries = 0;
+
+async function pollV2LipsyncPredictionStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  predictionId: string
+): Promise<V2LipsyncPollResult> {
+  "use step";
+  await assertGenerationOwner(input, workflowRunId, 2);
+  return pollV2LipsyncPrediction({ runId: input.runId, predictionId });
+}
+
+pollV2LipsyncPredictionStep.maxRetries = 2;
+
+async function finalizeV2LipsyncStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  predictionId: string,
+  outputUrl: string,
+  preSync: SyncNetMetrics
+): Promise<LipsyncOperationResult> {
+  "use step";
+  await assertGenerationOwner(input, workflowRunId, 2);
+  return finalizeV2Lipsync({
+    runId: input.runId,
+    predictionId,
+    outputUrl,
+    preSync,
+  });
+}
+
+finalizeV2LipsyncStep.maxRetries = 2;
+
 async function evaluateAttempt(
   input: DurableRelightRunInput,
   workflowRunId: string,
@@ -1109,10 +1288,11 @@ async function settleLampExecution(
 ): Promise<void> {
   "use step";
   const storage = getStorage();
-  const [execution, run, finalEvaluation] = await Promise.all([
+  const [execution, run, finalEvaluation, lipsync] = await Promise.all([
     storage.getRunExecution(input.runId),
     storage.getRun(input.runId),
     storage.getPaidOperation(input.runId, lampEvaluationOperationId(2)),
+    storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
   ]);
   const operation = run?.providerOperations?.find(
     (item) => item.id === videoGenerationOperationId(2)
@@ -1129,7 +1309,11 @@ async function settleLampExecution(
     !operation.result.audioVerified ||
     operation.renderedPrompt !== finalRenderedPrompt ||
     finalEvaluation?.status !== "completed" ||
-    !isLampEvaluationArtifact(finalEvaluation.result, 2)
+    !isLampEvaluationArtifact(finalEvaluation.result, 2) ||
+    (lipsync !== null &&
+      (lipsync.status !== "completed" ||
+        !isLipsyncOperationResult(lipsync.result) ||
+        !v2SyncPasses(lipsync.result.postSync)))
   ) {
     throw new Error(
       "Lamp's final artifact and final evaluation are not durably journaled against this execution."
@@ -1267,17 +1451,21 @@ async function recordExecutionFailure(
   const final = run?.providerOperations?.find(
     (operation) => operation.id === videoGenerationOperationId(2)
   );
-  const finalEvaluation = await storage.getPaidOperation(
-    input.runId,
-    lampEvaluationOperationId(2)
-  );
+  const [finalEvaluation, lipsync] = await Promise.all([
+    storage.getPaidOperation(input.runId, lampEvaluationOperationId(2)),
+    storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+  ]);
   if (
     lamp &&
     final?.status === "completed" &&
     final.result &&
     final.result.audioVerified &&
     finalEvaluation?.status === "completed" &&
-    isLampEvaluationArtifact(finalEvaluation.result, 2)
+    isLampEvaluationArtifact(finalEvaluation.result, 2) &&
+    (lipsync === null ||
+      (lipsync.status === "completed" &&
+        isLipsyncOperationResult(lipsync.result) &&
+        v2SyncPasses(lipsync.result.postSync)))
   ) {
     return "lamp_completed";
   }
@@ -1290,7 +1478,8 @@ async function recordExecutionFailure(
         )
       : null;
   const evaluationAmbiguous = Boolean(
-    currentEvaluation && currentEvaluation.status !== "completed"
+    (currentEvaluation && currentEvaluation.status !== "completed") ||
+      (lipsync && lipsync.status !== "completed")
   );
   const status = runExecutionFailureStatus({
     evaluationAmbiguous,

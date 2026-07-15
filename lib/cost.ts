@@ -61,7 +61,7 @@ export const LAMP_EVALUATOR_OUTPUT_AND_THINKING_RESERVATION_TOKENS =
 
 export interface CostItem {
   label: string;
-  provider: "gemini" | "omni" | "claude" | "local";
+  provider: "gemini" | "omni" | "claude" | "replicate" | "local";
   units: number;
   unitLabel: string;
   usd: number;
@@ -162,6 +162,13 @@ export const PRICE_TABLE = {
     usd: 0.12,
     provider: "claude",
     unitLabel: "call",
+    verified: true,
+  },
+  /** VERIFIED 2026-07-15 — sync/lipsync-2-pro official Replicate model page. */
+  lipsync2ProPerOutputSecond: {
+    usd: 0.08325,
+    provider: "replicate",
+    unitLabel: "output second",
     verified: true,
   },
   /** PLACEHOLDER — update from primary docs before live mode. Local ffmpeg: $0 by construction. */
@@ -297,8 +304,17 @@ export function lampRunReservationUsd(durationSec: number): number {
   });
   return (
     omniGenerationReservationUsd(durationSec) * LAMP_GENERATION_COUNT +
-    (evaluatorInputUsd + evaluatorOutputUsd) * LAMP_EVALUATION_COUNT
+    (evaluatorInputUsd + evaluatorOutputUsd) * LAMP_EVALUATION_COUNT +
+    durationSec * PRICE_TABLE.lipsync2ProPerOutputSecond.usd
   );
+}
+
+/** Price a completed Lipsync-2-Pro repair from its actual output duration. */
+export function lipsync2ProCostFromDuration(durationSec: number): number {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    throw new Error("Lipsync output duration must be positive and finite.");
+  }
+  return durationSec * PRICE_TABLE.lipsync2ProPerOutputSecond.usd;
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +491,13 @@ export function estimateLampRun(durationSec: number): CostEstimate {
         LAMP_EVALUATION_COUNT,
       unitLabel: "output/thinking tokens",
       usd: evaluatorOutputEstimate * LAMP_EVALUATION_COUNT,
+    },
+    {
+      label: "One possible Lipsync-2-Pro repair",
+      provider: PRICE_TABLE.lipsync2ProPerOutputSecond.provider,
+      units: durationSec,
+      unitLabel: PRICE_TABLE.lipsync2ProPerOutputSecond.unitLabel,
+      usd: durationSec * PRICE_TABLE.lipsync2ProPerOutputSecond.usd,
     },
     {
       label: "Original-audio remux and verification (both cuts)",
