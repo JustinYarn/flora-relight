@@ -29,6 +29,7 @@ import {
   PRICE_TABLE,
 } from "@/lib/cost";
 import {
+  getLampEvalDef,
   lampCompositeForResults,
   LAMP_VISUAL_EVAL_DEFS,
 } from "@/lib/lamp-evaluation";
@@ -316,7 +317,7 @@ function mockLampEvalResult(
   scenarioIteration: number,
   previousResults: EvalResult[]
 ): EvalResult {
-  const definition = getEvalDef(evalId);
+  const definition = getLampEvalDef(evalId);
   const outcome = getScenarioOutcome(scenarioIteration, evalId);
   const score = outcome?.score ?? 100;
   const verdict = verdictFor(
@@ -393,8 +394,6 @@ async function runLampMockWorkflow(input: {
     "anchor-gate",
     "conform",
     "sample",
-    "eval-align",
-    "eval-lighting-anchor",
     "gate",
     "fallback",
   ]) {
@@ -402,11 +401,7 @@ async function runLampMockWorkflow(input: {
       runId,
       nodeId,
       "skipped",
-      nodeId === "eval-align"
-        ? "not available in Lamp"
-        : nodeId === "eval-lighting-anchor"
-          ? "not applicable without a Look Anchor"
-          : "not part of Lamp's fixed two-pass method"
+      "not part of Lamp's fixed two-pass method"
     );
   }
 

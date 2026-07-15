@@ -34,7 +34,7 @@ Every new live Lamp run follows the same fixed sequence:
    original source video.
 2. Restore and verify the original audio.
 3. Send the generated video to one holistic Gemini evaluation call covering all
-   eight applicable visual checks:
+   eight Lamp visual checks:
    `identity-preservation`, `skin-texture-age`, `appearance-fidelity`,
    `background-fidelity`, `lighting-quality-delta`, `motion-lipsync`,
    `temporal-stability`, and `hallucination-artifacts`.
@@ -42,8 +42,8 @@ Every new live Lamp run follows the same fixed sequence:
 5. Compile exactly one correction mega prompt from the Initial critique.
 6. Generate **Final** (iteration 2) from the original source video and corrected
    prompt, then restore and verify the original audio again.
-7. Run one final holistic Gemini evaluation across the same eight applicable
-   visual checks and record deterministic audio integrity.
+7. Run one final holistic Gemini evaluation across the same eight Lamp visual
+   checks and record deterministic audio integrity.
 8. Present Final for human grading with the completed AI evaluation hidden by
    default. The grader may explicitly reveal that saved evaluation at any time;
    after submission, compare it with the human score for that video, per check.
@@ -52,15 +52,12 @@ Final is always the grading target; Lamp does not choose a best-scoring attempt 
 loop again. It does not create a manifest or Look Anchor, run a Claude second
 judge, gate on a pass threshold, or invoke a fallback.
 
-The canonical human rubric still has 11 rows. Two AI rows intentionally have no
-score:
-
-- `temporal-alignment` is **unavailable** because the deterministic live
-  correlation metric is not implemented.
-- `lighting-match-to-anchor` is **inapplicable** because Lamp has no Look Anchor.
-
-The Grade Results view must preserve those truth boundaries instead of converting
-missing results to zero or presenting invented agreement.
+Lamp's human and AI rubric has exactly nine checks: eight holistic visual checks
+plus deterministic `audio-integrity`. `temporal-alignment` and
+`lighting-match-to-anchor` are Flora-only checks; they are entirely absent from
+Lamp's evaluator, human grader, results, library, and share surfaces. Grade Results
+compares only those nine Lamp checks and never fabricates Flora-only rows or
+agreement.
 
 ## Durability and recovery boundary
 
@@ -111,7 +108,7 @@ missing results to zero or presenting invented agreement.
 | --- | --- |
 | Repo (local) | `~/Desktop/claude test flora/flora-relight` |
 | Core contract | `lib/types.ts` |
-| Canonical 11 eval rubrics | `lib/prompts/eval-defs.ts` |
+| Canonical Flora 11-check rubric registry | `lib/prompts/eval-defs.ts` |
 | Lamp eval set + correction compiler | `lib/lamp-evaluation.ts` |
 | Lamp server evaluator | `lib/server/lamp-evaluator.ts` |
 | Lamp mega prompts | `lib/prompts/mega-prompt.ts` |
@@ -181,16 +178,16 @@ Neither readiness nor the Workflow smoke proves Lamp's paid provider path.
 1. Finish local automated validation with Node 22: tests, lint, typecheck, and a
    production build. Exercise the UI with mock/provider-free data, including
    Initial/Final switching, hidden-by-default grading, optional AI reveal,
-   final-AI comparison, and the two missing
-   AI rows.
+   final-AI comparison across Lamp's exact nine checks.
 2. Deploy the exact branch SHA to a protected environment and run readiness plus
    the provider-free Workflow smoke. Record the source SHA and results.
 3. Only with explicit authorization, run one non-sensitive short clip through the
    live two-pass path. Confirm exactly two generations and two holistic evaluations,
    original-audio verification both times, reload recovery, durable Final selection,
    independent grading, optional AI reveal, final-AI comparison, and journaled cost.
-4. Calibrate the eight visual rubrics using accumulated human-versus-final-AI
-   disagreements. Do not hide missing temporal-alignment or anchor-match evidence.
+4. Calibrate the eight Lamp visual rubrics using accumulated
+   human-versus-final-AI disagreements. Keep Flora-only `temporal-alignment` and
+   `lighting-match-to-anchor` checks outside every Lamp surface.
 5. Run an explicitly approved small Lamp batch after the single-video round trip.
    Confirm per-member two-pass journals, hidden-by-default AI evidence, bounded concurrency,
    budget skips, reload recovery, and final batch settlement.

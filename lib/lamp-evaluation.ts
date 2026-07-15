@@ -5,10 +5,12 @@ import {
 } from "./prompts/mega-prompt.ts";
 import type {
   Correction,
+  EvalDefinition,
   EvalResult,
   IterationComposite,
   JudgeVerdict,
   MegaPrompt,
+  Run,
   Verdict,
   Violation,
   ViolationSeverity,
@@ -16,43 +18,135 @@ import type {
 import { clamp, verdictFor } from "./util.ts";
 
 /**
- * Lamp deliberately evaluates only checks it can truthfully perform in one
- * whole-video pass. Temporal alignment still lacks its documented local
- * correlation metric, and anchor matching is inapplicable because Lamp has no
- * Look Anchor stage. Human grading keeps all 11 rows so those gaps remain
- * visible instead of being manufactured as passes.
+ * Lamp's complete evaluation and human-grading contract. This positive list is
+ * intentionally independent from Flora's wider registry so a Flora-only check
+ * cannot leak into Lamp as an empty or "not applicable" row.
  */
-export const LAMP_VISUAL_EVAL_DEFS = EVAL_DEFS.filter(
-  (definition) =>
-    definition.method !== "deterministic" &&
-    definition.id !== "lighting-match-to-anchor"
-);
-
-export const LAMP_UNAVAILABLE_EVAL_IDS = [
-  "temporal-alignment",
-  "lighting-match-to-anchor",
-] as const;
-
-export const LAMP_EVALUATOR_VERSION = "lamp-holistic-v1";
-export const LAMP_MAX_ITERATIONS = 2;
-export const LAMP_COMPOSITE_PASS_THRESHOLD = 75;
-
-const LAMP_APPLICABLE_EVAL_IDS = [
-  ...LAMP_VISUAL_EVAL_DEFS.map((definition) => definition.id),
+export const LAMP_EVAL_IDS = [
+  "identity-preservation",
+  "skin-texture-age",
+  "appearance-fidelity",
+  "background-fidelity",
+  "lighting-quality-delta",
+  "motion-lipsync",
+  "temporal-stability",
+  "hallucination-artifacts",
   "audio-integrity",
 ] as const;
 
+const LAMP_SKIN_PROMPT = `Protocol: whole-video comparison across corresponding moments in the complete source and candidate.
+
+ROLE
+You are the skin-rendering examiner for Lamp's video relighting pipeline. The candidate may change illumination and color response. Judge whether the underlying skin still belongs to the same untreated person at the same apparent age, while allowing only extremely subtle cosmetic softening that is detectable through close A/B inspection rather than normal playback.
+
+FACTOR OUT THE RELIGHT FIRST
+Do not punish exposure, contrast, white balance, shadow placement, highlight placement, catchlights, or other plausible lighting effects. Brighter or lower-contrast skin, warmer or cooler tone, and texture that is fainter but still present are permitted. Judge the PRESENCE and POSITION of real structures after accounting for the new light, not whether every pore has identical contrast strength.
+
+WHAT TO INSPECT
+Across the full timeline, inspect the forehead, cheeks, nose, under-eyes, mouth area, chin, jaw, ears, neck, and hairline. Compare pores, fine lines, freckles, moles, scars, blemishes, facial hair, complexion variation, highlight roll-off, and apparent age. Marks and age cues must remain substantially present and correctly positioned. Skin must continue to look natural rather than plastic, waxy, foundation-like, or airbrushed.
+
+ALLOWED SUBTLETY
+Extremely subtle, localized beautification may pass only when it is detectable through deliberate close A/B inspection, does not read as a beauty filter at normal viewing size, preserves the person's marks and age cues, and does not create a perceptible age shift. This allowance is narrow: obvious smoothing, broad texture removal, cleanup of marks, plastic rendering, or visible de-aging fails.
+
+NO ARTIFICIAL AGING
+Never add age detail. Any wrinkle, crease, or age line that is not present at the corresponding source moment is a violation and must score below the borderline threshold after ruling out a shadow or contrast explanation. Use the exact violation aspect \`added_wrinkles\` whenever this occurs.
+
+SCORING ANCHORS
+- 95–100: No cosmetic alteration beyond lighting; real structures, marks, and age cues remain intact.
+- 85–94 PASS: At most extremely subtle localized softening detectable only in close A/B inspection. Texture and marks remain substantially present, apparent age is unchanged, and no wrinkle or crease is added.
+- 70–84 BORDERLINE: Localized texture thinning or softening is noticeable under deliberate comparison, but it is not an obvious beauty-filter or de-aging effect at normal playback. No wrinkle is added and there is no clear age shift.
+- 0–69 FAIL: Obvious smoothing or airbrushing, broad pore/line or mark removal, plastic or waxy skin, perceptible de-aging, or any added wrinkle, crease, or age line.
+
+Thresholds for this Lamp eval: pass ≥ 85, borderline ≥ 70, else fail.
+
+CORRECTIONS
+Write region-scoped restore/stop imperatives. For excessive smoothing, restore the source's natural structures and marks without sharpening or inventing detail. For artificial aging, remove the invented wrinkle or crease and restore the source's apparent age. Do not prescribe a new complexion or beauty treatment.`;
+
+const LAMP_SKIN_OVERRIDE: Partial<EvalDefinition> = {
+  description:
+    "Preserves natural skin and apparent age; only extremely subtle close-inspection softening may pass, and added wrinkles never do.",
+  passThreshold: 85,
+  borderlineThreshold: 70,
+  promptTemplate: LAMP_SKIN_PROMPT,
+};
+
+export const LAMP_EVAL_DEFS: EvalDefinition[] = LAMP_EVAL_IDS.map((evalId) => {
+  const definition = getEvalDef(evalId);
+  return evalId === "skin-texture-age"
+    ? { ...definition, ...LAMP_SKIN_OVERRIDE }
+    : definition;
+});
+
+export const LAMP_VISUAL_EVAL_DEFS = LAMP_EVAL_DEFS.filter(
+  (definition) => definition.method !== "deterministic"
+);
+
+/** Strip Flora's sampled-frame envelope before a rubric enters Lamp's one video call. */
+export function lampWholeVideoRubric(definition: EvalDefinition): string {
+  return definition.promptTemplate
+    .replace(
+      /^Protocol:[^\n]*\n\n/m,
+      "Protocol: compare both complete videos over their full timelines.\n\n"
+    )
+    .replace(
+      /INPUTS\n[\s\S]*?Inspect the event-picked frames hardest — failures concentrate where motion and expression peak\.\n*/,
+      ""
+    )
+    .replace(/\nOUTPUT\n[\s\S]*$/, "")
+    .split("{{BEFORE_FRAMES}}")
+    .join("the complete ORIGINAL video attached first")
+    .split("{{AFTER_FRAMES}}")
+    .join("the complete CANDIDATE video attached second")
+    .split("index-locked pair")
+    .join("corresponding moment")
+    .split("frame-pair by frame-pair")
+    .join("across corresponding moments")
+    .split("event-picked frames")
+    .join("challenging motion and speech moments");
+}
+
+export function getLampEvalDef(id: string): EvalDefinition {
+  const definition = LAMP_EVAL_DEFS.find((candidate) => candidate.id === id);
+  if (!definition) {
+    throw new Error(
+      `Unknown Lamp eval id "${id}". Known ids: ${LAMP_EVAL_IDS.join(", ")}`
+    );
+  }
+  return definition;
+}
+
+type RunEvalScope = Pick<Run, "workflowId" | "workflowMode" | "serverExecution">;
+
+/** Durable execution identity wins over browser-authored presentation fields. */
+export function isLampRun(run: RunEvalScope): boolean {
+  if (run.serverExecution?.executionId) {
+    return run.serverExecution.executionId.startsWith("lamp:");
+  }
+  return run.workflowMode === "lamp" || run.workflowId === "lamp-v1";
+}
+
+export function evalDefsForRun(run: RunEvalScope): EvalDefinition[] {
+  return isLampRun(run) ? LAMP_EVAL_DEFS : EVAL_DEFS;
+}
+
+export const LAMP_EVALUATOR_VERSION = "lamp-holistic-v2";
+export const LAMP_LEGACY_EVALUATOR_VERSION = "lamp-holistic-v1";
+export const LAMP_MAX_ITERATIONS = 2;
+export const LAMP_COMPOSITE_PASS_THRESHOLD = 75;
+
 /**
- * Build Lamp's aggregate only when every applicable check is present exactly
- * once. The score is normalized over the applicable weights, so unavailable
- * temporal alignment and inapplicable anchor matching are never fabricated or
- * silently counted as passes.
+ * Build Lamp's aggregate only when every Lamp check is present exactly once.
+ * The score is normalized over Lamp's weights; Flora-only checks never enter
+ * the calculation.
  */
 export function lampCompositeForResults(
   results: EvalResult[]
 ): IterationComposite | undefined {
-  const applicable = LAMP_APPLICABLE_EVAL_IDS.map((evalId) => {
-    const matches = results.filter((result) => result.evalId === evalId);
+  const normalizedResults = normalizeLampResultsForCurrentPolicy(results);
+  const applicable = LAMP_EVAL_DEFS.map((definition) => {
+    const matches = normalizedResults.filter(
+      (result) => result.evalId === definition.id
+    );
     return matches.length === 1 ? matches[0] : undefined;
   });
   if (
@@ -70,7 +164,7 @@ export function lampCompositeForResults(
   let totalWeight = 0;
   const hardGateFailures: string[] = [];
   for (const result of applicable as EvalResult[]) {
-    const definition = getEvalDef(result.evalId);
+    const definition = getLampEvalDef(result.evalId);
     weightedScore += definition.weight * result.score;
     totalWeight += definition.weight;
     if (definition.hardGate && result.verdict !== "pass") {
@@ -109,9 +203,12 @@ export function projectLampEvaluationForRead(input: {
   ) {
     return { evalResults: [] };
   }
+  const evalResults = normalizeLampResultsForCurrentPolicy(
+    input.artifact.evalResults
+  );
   return {
-    evalResults: input.artifact.evalResults,
-    composite: lampCompositeForResults(input.artifact.evalResults),
+    evalResults,
+    composite: lampCompositeForResults(evalResults),
   };
 }
 
@@ -129,7 +226,9 @@ export interface LampModelEval {
 }
 
 export interface LampEvaluationArtifact {
-  version: typeof LAMP_EVALUATOR_VERSION;
+  version:
+    | typeof LAMP_EVALUATOR_VERSION
+    | typeof LAMP_LEGACY_EVALUATOR_VERSION;
   iteration: number;
   evalResults: EvalResult[];
   /** Fixed provider estimate recorded by the paid-operation journal. */
@@ -172,6 +271,65 @@ function coerceViolations(value: unknown): Violation[] {
   });
 }
 
+function isAddedWrinkleViolation(violation: Violation): boolean {
+  const aspect = violation.aspect
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, " ");
+  const describesAgeDetail =
+    /\bwrinkles?\b/.test(aspect) ||
+    /\bcreases?\b/.test(aspect) ||
+    /\bage lines?\b/.test(aspect);
+  const describesAddition = /\b(added|new|invented|artificial|extra)\b/.test(
+    aspect
+  );
+  return aspect.includes("artificial aging") ||
+    (describesAgeDetail && describesAddition);
+}
+
+/**
+ * Read old Lamp artifacts through today's nine-check policy without changing
+ * their provider score or reasoning. Retired Flora-only rows are removed, and
+ * deterministic verdict labels are recalculated from the active thresholds.
+ */
+export function normalizeLampResultsForCurrentPolicy(
+  results: EvalResult[]
+): EvalResult[] {
+  return LAMP_EVAL_DEFS.flatMap((definition): EvalResult[] => {
+    const result = results.find((candidate) => candidate.evalId === definition.id);
+    if (!result) return [];
+    let score = clamp(result.score, 0, 100);
+    if (
+      definition.id === "skin-texture-age" &&
+      result.violations.some(isAddedWrinkleViolation)
+    ) {
+      score = Math.min(score, definition.borderlineThreshold - 1);
+    }
+    const verdict = verdictFor(
+      score,
+      definition.passThreshold,
+      definition.borderlineThreshold
+    );
+    const scoreChanged = score !== result.score;
+    const { deltaFromPrevious, ...stable } = result;
+    return [
+      {
+        ...stable,
+        score,
+        verdict,
+        verdicts: result.verdicts.map((judgeVerdict) => ({
+          ...judgeVerdict,
+          score,
+          verdict,
+        })),
+        ...(!scoreChanged && deltaFromPrevious !== undefined
+          ? { deltaFromPrevious }
+          : {}),
+      },
+    ];
+  });
+}
+
 function coerceModelEval(
   value: unknown,
   iteration: number,
@@ -186,7 +344,7 @@ function coerceModelEval(
   const rawScore =
     typeof value.score === "number" ? value.score : Number(value.score);
   if (!Number.isFinite(rawScore)) return null;
-  const score = clamp(rawScore, 0, 100);
+  let score = clamp(rawScore, 0, 100);
   const confidence = clamp(
     typeof value.confidence === "number"
       ? value.confidence
@@ -195,12 +353,21 @@ function coerceModelEval(
     1
   );
   if (!Number.isFinite(confidence)) return null;
+  const violations = coerceViolations(value.violations);
+  if (
+    definition.id === "skin-texture-age" &&
+    violations.some(isAddedWrinkleViolation)
+  ) {
+    // Lamp's approved skin contract makes invented age detail an unconditional
+    // fail. The server caps a self-inconsistent model score instead of allowing
+    // a reported added wrinkle to pass through as borderline or pass.
+    score = Math.min(score, definition.borderlineThreshold - 1);
+  }
   const verdict = verdictFor(
     score,
     definition.passThreshold,
     definition.borderlineThreshold
   );
-  const violations = coerceViolations(value.violations);
   const judgeVerdict: JudgeVerdict = {
     judge: "gemini",
     score,
@@ -226,7 +393,7 @@ function audioIntegrityResult(
   audioVerified: boolean,
   previousResults: EvalResult[]
 ): EvalResult {
-  const definition = getEvalDef("audio-integrity");
+  const definition = getLampEvalDef("audio-integrity");
   const score = audioVerified ? 100 : 0;
   const previous = previousResults.find(
     (result) => result.evalId === definition.id
@@ -329,7 +496,8 @@ export function isLampEvaluationArtifact(
 ): value is LampEvaluationArtifact {
   if (!isRecord(value)) return false;
   if (
-    value.version !== LAMP_EVALUATOR_VERSION ||
+    (value.version !== LAMP_EVALUATOR_VERSION &&
+      value.version !== LAMP_LEGACY_EVALUATOR_VERSION) ||
     !Number.isSafeInteger(value.iteration) ||
     !Array.isArray(value.evalResults) ||
     typeof value.costUsd !== "number" ||

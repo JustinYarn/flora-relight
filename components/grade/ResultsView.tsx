@@ -3,14 +3,15 @@
 import { useMemo } from "react";
 import Link from "next/link";
 import type { Run } from "@/lib/types";
-import { EVAL_DEFS, getEvalDef } from "@/lib/prompts/eval-defs";
-import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
+import { getEvalDef } from "@/lib/prompts/eval-defs";
+import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { SectionTitle, verdictColor } from "@/components/ui";
 import {
   aiPassRatePct,
   biggestDisagreements,
   biggestDivergence,
   collectComparisons,
+  evalDefsForRuns,
   finalLampIteration,
   humanVerdictWord,
   overallAgreementPct,
@@ -59,21 +60,14 @@ function fmtGap(gap: number): string {
   return rounded > 0 ? `+${rounded}` : `−${Math.abs(rounded)}`;
 }
 
-function isUnavailable(evalId: string): boolean {
-  return LAMP_UNAVAILABLE_EVAL_IDS.includes(
-    evalId as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
-  );
-}
-
-function unavailableLabel(evalId: string): string {
-  return evalId === "lighting-match-to-anchor" ? "Not applicable" : "Unavailable";
-}
-
 function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean }) {
   const final = finalLampIteration(run);
   const aiResults = final?.evalResults ?? [];
-  const applicableCount = EVAL_DEFS.length - LAMP_UNAVAILABLE_EVAL_IDS.length;
-  const availableCount = aiResults.filter((result) => !isUnavailable(result.evalId)).length;
+  const definitions = evalDefsForRun(run);
+  const definitionIds = new Set(definitions.map((definition) => definition.id));
+  const availableCount = aiResults.filter((result) =>
+    definitionIds.has(result.evalId)
+  ).length;
 
   return (
     <details
@@ -88,7 +82,7 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
           {run.originalVideo.label}
         </span>
         <span className="text-2xs tabular-nums text-muted">
-          Final v{final?.index ?? 2} · {availableCount} of {applicableCount} applicable AI
+          Final v{final?.index ?? 2} · {availableCount} of {definitions.length} AI
           results
         </span>
         <span
@@ -111,13 +105,11 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
           <span className="text-right">gap</span>
         </div>
           <div className="divide-y divide-edge">
-            {EVAL_DEFS.map((def) => {
+            {definitions.map((def) => {
             const human = run.humanGrade?.scores[def.id];
             const ai = aiResults.find((result) => result.evalId === def.id);
             const gap =
-              human && ai && !isUnavailable(def.id)
-                ? human.score - ai.score
-                : undefined;
+              human && ai ? human.score - ai.score : undefined;
             return (
               <div
                 key={def.id}
@@ -136,18 +128,7 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
                   )}
                 </span>
                 <span className="tabular-nums">
-                  {isUnavailable(def.id) ? (
-                    <span
-                      className="text-faint"
-                      title={
-                        def.id === "temporal-alignment"
-                          ? "Lamp does not yet implement the documented local temporal-correlation metric."
-                          : "Lamp has no Look Anchor, so this rubric does not apply."
-                      }
-                    >
-                      {unavailableLabel(def.id)}
-                    </span>
-                  ) : ai ? (
+                  {ai ? (
                     <span style={{ color: verdictColor(ai.verdict) }}>
                       {Math.round(ai.score)} · {ai.verdict}{" "}
                       <span className="text-faint">
@@ -181,7 +162,11 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
 
 export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
   const comps = useMemo(() => collectComparisons(gradedRuns), [gradedRuns]);
-  const stats = useMemo(() => perCheckStats(comps), [comps]);
+  const definitions = useMemo(() => evalDefsForRuns(gradedRuns), [gradedRuns]);
+  const stats = useMemo(
+    () => perCheckStats(comps, definitions),
+    [comps, definitions]
+  );
   const overall = overallAgreementPct(comps);
   const divergence = biggestDivergence(stats);
   const shipRate = shipRatePct(gradedRuns);
@@ -208,7 +193,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         <Stat
           value={pct(aiPassRate)}
           label="final AI pass rate"
-          title="among videos with all nine applicable final v2 results, the share that passed the complete automated gate"
+          title="among videos with a complete delivered evaluation, the share that passed their method's automated gate"
         />
       </div>
 
@@ -230,10 +215,9 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
           By video
         </SectionTitle>
         <p className="mb-4 max-w-3xl text-pretty text-xs leading-relaxed text-muted">
-          Open a video to compare every one of your saved grades with the AI
-          evaluation made after the final regeneration. Lamp has nine applicable
-          automated results; timing correlation remains unavailable and Look
-          Anchor matching does not apply.
+          Open a video to compare every saved grade with the AI evaluation made
+          after the final regeneration. Each Lamp video has nine active rows;
+          Flora videos retain their eleven-row method.
         </p>
         <div className="space-y-2">
           {gradedRuns.map((run, index) => (
@@ -246,7 +230,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         <SectionTitle>Aggregate calibration</SectionTitle>
         <p className="text-pretty text-xs text-muted">
           These summaries combine only human/AI pairs that actually exist.
-          Missing and inapplicable checks never count as agreement.
+          Missing checks never count as agreement.
         </p>
       </div>
 
@@ -254,7 +238,8 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         <p className="border-b border-edge py-4 text-sm text-ink">
           You disagree with the AI most on:{" "}
           <span className="font-semibold">
-            {getEvalDef(divergence.evalId).name}
+            {definitions.find((definition) => definition.id === divergence.evalId)
+              ?.name ?? getEvalDef(divergence.evalId).name}
           </span>{" "}
           <span className="text-2xs text-faint">
             ({Math.round(divergence.agreementPct)}% agreement over{" "}
@@ -264,7 +249,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         </p>
       ) : null}
 
-      {/* PER-CHECK TABLE — 11 flat rows */}
+      {/* PER-CHECK TABLE — workflow-scoped flat rows */}
       <section className="pt-6">
         <SectionTitle>Check by check</SectionTitle>
         <div className="flex items-center gap-x-5 border-b border-edge pb-2 text-2xs uppercase tracking-[0.14em] text-faint">
@@ -280,7 +265,9 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         </div>
         <div className="divide-y divide-edge border-b border-edge">
           {stats.map((s) => {
-            const def = getEvalDef(s.evalId);
+            const def =
+              definitions.find((definition) => definition.id === s.evalId) ??
+              getEvalDef(s.evalId);
             if (s.compared === 0) {
               return (
                 <div
@@ -291,11 +278,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
                     {def.name}
                   </span>
                   <span className="flex-1 text-2xs text-faint">
-                    {isUnavailable(s.evalId)
-                      ? s.evalId === "temporal-alignment"
-                        ? "unavailable in Lamp — temporal correlation is not implemented yet"
-                        : "not applicable in Lamp — there is no Look Anchor"
-                      : "no final AI result was returned for a graded video"}
+                    no final AI result was returned for a graded video
                   </span>
                 </div>
               );

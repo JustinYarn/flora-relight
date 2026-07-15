@@ -14,7 +14,7 @@ import { STATUS_META, shippedComposite } from "@/components/library/derive";
 /*
  * The Library: a reader over the on-disk run store. Every past generation,
  * newest first, with progressive disclosure — collapsed rows → side-by-side
- * players + the 11 checks → per-check judge details.
+ * players + workflow-scoped checks → per-check judge details.
  *
  * Data: the store's runs (persistence hydration already pulls data/runs/ on
  * boot) merged with a fresh GET /api/runs on mount, so runs finished by other

@@ -12,7 +12,7 @@ Each live Lamp run has one fixed, auditable path:
 
 1. Generate an initial video from the complete mega prompt, discard provider
    sound, then restore (or preserve source silence) and verify source audio.
-2. Critique that finalized video once, holistically, across the eight applicable
+2. Critique that finalized video once, holistically, across the eight Lamp visual
    visual checks, and record the deterministic audio result alongside them.
 3. Compile one correction mega prompt from that critique.
 4. Generate exactly one final video from the corrected prompt, then repeat the
@@ -23,11 +23,10 @@ Each live Lamp run has one fixed, auditable path:
    hidden by default, can be revealed explicitly at any time in Grade, and is
    compared per check after the human grade is saved.
 
-`temporal-alignment` is currently unavailable because its deterministic live
-correlation metric is not implemented. `lighting-match-to-anchor` is inapplicable
-because Lamp does not create or condition on a Look Anchor. Those rows remain visible
-to the human grader as unavailable/inapplicable rather than receiving invented AI
-scores. Lamp supports both single runs and server-owned batches; every admitted
+Lamp's rubric is exactly those eight visual checks plus deterministic audio.
+Flora's `temporal-alignment` and `lighting-match-to-anchor` checks are not part of
+Lamp and do not appear in its evaluator, human grader, results, library, or share
+views. Lamp supports both single runs and server-owned batches; every admitted
 batch member executes this same two-generation/two-evaluation contract and enters
 the same blind per-video grading flow.
 
@@ -193,10 +192,11 @@ The hosted app now has several independent persistence boundaries:
   enters reconciliation instead of being repeated.
 
 Lamp deliberately replaces the older open-ended graph with a fixed two-pass method. The
-initial and final artifacts each receive one holistic AI evaluation across eight applicable
+initial and final artifacts each receive one holistic AI evaluation across eight Lamp
 visual checks plus deterministic audio verification. Only the final artifact is presented as
-the shipped grading target. No manifest, Look Anchor, anchor-match score, temporal-alignment
-score, Claude second judge, pass-gate loop, best-of selection, or fallback is implied. A live
+the shipped grading target. Flora-only `temporal-alignment` and
+`lighting-match-to-anchor` checks are entirely absent. No manifest, Look Anchor, Claude
+second judge, pass-gate loop, best-of selection, or fallback is implied. A live
 single run no longer depends on an open tab; its durable result is ready for grading, safely
 failed before spend, or explicitly waiting for reconciliation.
 
@@ -332,10 +332,10 @@ the technical vocabulary. Same concepts, one mapping:
 | --- | --- |
 | `/` | Create — select Flora or Lamp, then upload one clip or prepare a batch |
 | `/library` | The Library — browse every past generation with progressive disclosure |
-| `/grade` | Grade — select any finished final cut, score the full human rubric, and optionally reveal its already-saved AI evaluation |
+| `/grade` | Grade — select any finished final cut, score its method-specific human rubric, and optionally reveal its already-saved AI evaluation |
 | `/pipeline` | The selected Flora/Lamp Method graph and live run status |
 | `/batch` | Flora and Lamp batch progress, spend settlement, and recovery |
-| `/prompts` | Prompt library — the base prompt, manifest extractor, all 11 eval rubrics, mega-prompt compiler |
+| `/prompts` | Lamp prompt library — the base prompt, nine active checks, and mega-prompt compiler |
 | `/runs/[id]` | Initial/final review — both videos, holistic evals, prompt diff, and review actions |
 
 ## Repo map
@@ -345,8 +345,8 @@ the technical vocabulary. Same concepts, one mapping:
 | `lib/types.ts` | **The contract.** Every module is written against these types; read this first |
 | `lib/util.ts` | Small shared helpers (ids, clamps, formatting, verdict math) |
 | `lib/cost.ts` | Cost governance: placeholder `PRICE_TABLE`, est.-live-cost estimators, `formatUsd` |
-| `lib/prompts/` | Base prompt, the 11 canonical eval definitions, and the mega-prompt compiler |
-| `lib/lamp-evaluation.ts` | Lamp's applicable-eval set, holistic result validation, and correction-prompt compilation |
+| `lib/prompts/` | Base prompts, the canonical Flora 11-check definitions, and the mega-prompt compiler |
+| `lib/lamp-evaluation.ts` | Lamp's exact nine-check set, holistic result validation, and correction-prompt compilation |
 | `lib/providers/` | Client-safe live/mock adapters for video generation, image generation, and judges |
 | `lib/mock/` | The scripted no-keys fallback scenario: per-iteration outcomes, synthetic sample video, mock scene manifest (no UI entry points) |
 | `lib/engine.ts` | Browser mock workflow support; live Lamp execution is server-owned |
@@ -368,8 +368,8 @@ Postgres when deployed. It shows every persisted generation, newest first, with 
 one-line stats strip (total generations, review counts, final AI scores, actual + estimated
 spend) and filters (clip search, status chips, live-vs-simulated toggle, sort). Lamp rows
 disclose the initial and final videos, the correction prompt derived from the initial
-critique, and the available final evaluation results. The temporal-alignment row is marked
-unavailable and anchor-match is marked inapplicable; neither receives a synthetic score.
+critique, and the nine active final evaluation results. Flora-only checks are omitted rather
+than displayed as empty rows.
 Simulated runs are always badged, older Flora records remain readable, and records missing
 relit files fall back to the original thumbnail.
 
@@ -436,10 +436,11 @@ media plumbing stay on server routes:
 1. **Generation:** the Omni video model receives the original video and the exact Lamp mega
    prompt. Iteration 1 uses the initial prompt; iteration 2 uses the one correction prompt
    compiled from the first holistic evaluation. No Look Anchor is created or supplied.
-2. **Holistic evaluation:** one Gemini call evaluates all eight applicable visual rubrics for
-   each generated video. The server validates that the response contains the complete
-   applicable set. Original-audio integrity is recorded separately from deterministic media
-   verification. Temporal alignment remains unavailable and anchor match is inapplicable.
+2. **Holistic evaluation:** one Gemini call evaluates all eight Lamp visual rubrics for each
+   generated video. The server validates that the response contains the complete Lamp visual
+   set. Original-audio integrity is recorded separately from deterministic media verification.
+   Flora's `temporal-alignment` and `lighting-match-to-anchor` checks are entirely absent from
+   Lamp.
 3. **Server media service:** ffmpeg handles ingest probing/trimming, audio demux/remux,
    generated-video inspection, verification, and exports. `ffmpeg-static` is traced into
    hosted functions; local development may use the installed binary.
@@ -450,7 +451,7 @@ media plumbing stay on server routes:
 5. **Human calibration:** the grader scores the final video with the journaled AI evidence
    hidden by default. An explicit control can reveal that saved evidence without a new
    provider call. After submission, Results compares the human scores with it per video and
-   per check; unavailable AI rows stay unavailable.
+   per active check; missing AI results stay missing rather than being fabricated.
 6. `/api/live/health` selects live mode when the generation provider is configured and
    reports the broader evaluation capability separately. That selection is a configuration
    fact, not proof that any provider/model is functional in the current deployment.
@@ -464,8 +465,8 @@ engine is mock-only.
 This is an internal, still-hardening tool. The *methodology* (eval design, prompt
 compilation, fixed two-pass correction, and human calibration) is production thinking; the
 *measurements* in mock mode are scripted. Any guarantee shown while mock mode is active depicts what the real checks should
-enforce, not a pixel measurement. Lamp does not currently produce an AI temporal-alignment
-score or anchor-match score, and it does not use a second judge, iterative pass gate, best-of
-selection, or fallback. This implementation session did not run a
+enforce, not a pixel measurement. Lamp's nine-check contract excludes Flora's
+`temporal-alignment` and `lighting-match-to-anchor` checks, and it does not use a second
+judge, iterative pass gate, best-of selection, or fallback. This implementation session did not run a
 paid provider artifact round trip. A configured key, passing build, or provider-free Workflow
 smoke must not be described as proof that the live two-pass path works end to end.

@@ -8,8 +8,14 @@ import type {
   Run,
   RunConfig,
   ViolationSeverity,
+  WorkflowMode,
 } from "@/lib/types";
 import { EVAL_DEFS, getEvalDef } from "@/lib/prompts/eval-defs";
+import {
+  LAMP_EVAL_DEFS,
+  getLampEvalDef,
+  isLampRun,
+} from "@/lib/lamp-evaluation";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { MANIFEST_PROMPT } from "@/lib/prompts/manifest";
 import { formatTime } from "@/lib/util";
@@ -374,13 +380,16 @@ function EvalSection({
   nodeId,
   run,
   mode,
+  workflowMode,
 }: {
   evalId: string;
   nodeId: string;
   run?: Run;
   mode: Mode;
+  workflowMode: WorkflowMode;
 }) {
-  const definition = getEvalDef(evalId);
+  const lamp = run ? isLampRun(run) : workflowMode === "lamp";
+  const definition = lamp ? getLampEvalDef(evalId) : getEvalDef(evalId);
   const attempts =
     run?.iterations.flatMap((iteration) => {
       const result = iteration.evalResults.find((item) => item.evalId === evalId);
@@ -658,10 +667,16 @@ function EvalSection({
         }
         note={
           isRubric
-            ? "This is today's code-owned rubric. Lamp adapts all eight visual rubrics into one Gemini request over the complete source and candidate videos. Historical rubric text is not archived per run."
+            ? lamp
+              ? "This is today's code-owned Lamp rubric. Lamp sends all eight visual rubrics in one Gemini request over the complete source and candidate videos. Historical rubric text is not archived per run."
+              : "This is today's code-owned Flora rubric. Historical rubric text is not archived per run."
             : codeCheckSpecificationNote(evalId)
         }
-        source="lib/prompts/eval-defs.ts"
+        source={
+          lamp && evalId === "skin-texture-age"
+            ? "lib/lamp-evaluation.ts"
+            : "lib/prompts/eval-defs.ts"
+        }
         testId="rubric-prompt-disclosure"
       />
 
@@ -1142,7 +1157,10 @@ function AggregateSection({
   );
 }
 
-function generationGateSnapshot(iteration: Iteration | undefined): {
+function generationGateSnapshot(
+  iteration: Iteration | undefined,
+  definitions: typeof EVAL_DEFS
+): {
   score: number;
   hardGateFailures: string[];
 } | null {
@@ -1155,7 +1173,8 @@ function generationGateSnapshot(iteration: Iteration | undefined): {
   let totalWeight = 0;
   const hardGateFailures: string[] = [];
   for (const result of results) {
-    const definition = getEvalDef(result.evalId);
+    const definition = definitions.find((candidate) => candidate.id === result.evalId);
+    if (!definition) continue;
     weighted += definition.weight * result.score;
     totalWeight += definition.weight;
     if (definition.hardGate && result.verdict !== "pass") {
@@ -1168,8 +1187,23 @@ function generationGateSnapshot(iteration: Iteration | undefined): {
   };
 }
 
-function GateSection({ run, config }: { run?: Run; config: RunConfig }) {
-  const generationHardGates = EVAL_DEFS.filter(
+function GateSection({
+  run,
+  config,
+  workflowMode,
+}: {
+  run?: Run;
+  config: RunConfig;
+  workflowMode: WorkflowMode;
+}) {
+  const definitions = run
+    ? isLampRun(run)
+      ? LAMP_EVAL_DEFS
+      : EVAL_DEFS
+    : workflowMode === "lamp"
+      ? LAMP_EVAL_DEFS
+      : EVAL_DEFS;
+  const generationHardGates = definitions.filter(
     (definition) => definition.hardGate && definition.id !== "audio-integrity"
   );
   const skipped = run?.nodeStates.gate?.status === "skipped";
@@ -1182,7 +1216,7 @@ function GateSection({ run, config }: { run?: Run; config: RunConfig }) {
       }
     }
   }
-  const gateSnapshot = generationGateSnapshot(compositeIteration);
+  const gateSnapshot = generationGateSnapshot(compositeIteration, definitions);
   const gatePassed = gateSnapshot
     ? gateSnapshot.score >= config.compositePassThreshold &&
       gateSnapshot.hardGateFailures.length === 0
@@ -1305,6 +1339,7 @@ export function NodeInspector({
   run,
   config,
   mode,
+  workflowMode,
   onSelectNode,
   onClose,
 }: {
@@ -1312,6 +1347,7 @@ export function NodeInspector({
   run?: Run;
   config: RunConfig;
   mode: Mode;
+  workflowMode: WorkflowMode;
   onSelectNode: (nodeId: string) => void;
   onClose: () => void;
 }) {
@@ -1404,6 +1440,7 @@ export function NodeInspector({
             nodeId={node.id}
             run={run}
             mode={runMode}
+            workflowMode={workflowMode}
           />
         ) : null}
         {node.id === "manifest" ? <ManifestSection run={run} mode={runMode} /> : null}
@@ -1422,7 +1459,7 @@ export function NodeInspector({
           <AggregateSection run={run} onSelectNode={onSelectNode} />
         ) : null}
         {node.kind === "gate" && node.id === "gate" ? (
-          <GateSection run={run} config={config} />
+          <GateSection run={run} config={config} workflowMode={workflowMode} />
         ) : null}
         {node.kind === "gate" && node.id === "anchor-gate" ? (
           <AnchorGateSection run={run} mode={runMode} />

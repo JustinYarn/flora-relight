@@ -10,6 +10,7 @@ import { CheckList } from "@/components/library/CheckList";
 import { PairPlayer } from "@/components/library/PairPlayer";
 import { DownloadSideBySide } from "@/components/review/DownloadSideBySide";
 import { isLampBlindGradeLocked } from "@/components/grade/derive";
+import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import {
   STATUS_META,
   activeFixes,
@@ -23,7 +24,7 @@ import {
 /*
  * One Library entry — progressive disclosure:
  *   Level 1: the collapsed row (thumbnail pair, label, status, score, cost).
- *   Level 2: expanded — side-by-side players, per-attempt chips, the 11
+ *   Level 2: expanded — side-by-side players, per-attempt chips, workflow
  *            checks, the fix list, review actions.
  *   Level 3: lives inside CheckList — judge details per check.
  */
@@ -187,10 +188,18 @@ function RowBody({ run }: { run: Run }) {
             selected={selected?.index}
             onSelect={setSelectedIndex}
           />
-          <CheckList iteration={selected} runActive={run.status === "running"} />
+          <CheckList
+            iteration={selected}
+            runActive={run.status === "running"}
+            definitions={evalDefsForRun(run)}
+          />
         </div>
       ) : (
-        <CheckList iteration={undefined} runActive={run.status === "running"} />
+        <CheckList
+          iteration={undefined}
+          runActive={run.status === "running"}
+          definitions={evalDefsForRun(run)}
+        />
       )}
 
       {!blindGradeLocked && fixes.length > 0 ? (

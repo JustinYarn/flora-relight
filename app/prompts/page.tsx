@@ -8,9 +8,9 @@ import { MANIFEST_PROMPT } from "@/lib/prompts/manifest";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { useAppStore } from "@/lib/store";
-import type { EvalDefinition, EvalMethod } from "@/lib/types";
-import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
-import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
+import type { EvalDefinition, EvalMethod, WorkflowMode } from "@/lib/types";
+import { workflowForMode } from "@/lib/workflow-def";
+import { LAMP_EVAL_DEFS } from "@/lib/lamp-evaluation";
 
 type CheckFilter = "all" | "rubric" | "code";
 
@@ -19,22 +19,6 @@ const METHOD_COLOR: Record<EvalMethod, string> = {
   hybrid: "var(--running)",
   deterministic: "var(--muted)",
 };
-
-const EVAL_NODE_IDS = new Map(
-  RELIGHT_WORKFLOW.nodes.flatMap((node) =>
-    node.evalId ? [[node.evalId, node.id] as const] : []
-  )
-);
-const EVAL_ORDER = new Map(
-  RELIGHT_WORKFLOW.nodes.flatMap((node, index) =>
-    node.evalId ? [[node.evalId, index] as const] : []
-  )
-);
-const ORDERED_EVAL_DEFS = [...EVAL_DEFS].sort(
-  (a, b) =>
-    (EVAL_ORDER.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
-    (EVAL_ORDER.get(b.id) ?? Number.MAX_SAFE_INTEGER)
-);
 
 const FILTERS: Array<{ id: CheckFilter; label: string }> = [
   { id: "all", label: "All checks" },
@@ -54,12 +38,11 @@ function Pre({ children }: { children: string }) {
   );
 }
 
-function codeCheckCaveat(evalId: string): string {
+function codeCheckCaveat(evalId: string, workflowMode: WorkflowMode): string {
   if (evalId === "audio-integrity") {
-    return "Lamp verifies the restored original audio after each generation. This broader specification remains reference material; the selected run's node status is the operational truth.";
-  }
-  if (evalId === "temporal-alignment") {
-    return "Planned code-check specification. Lamp does not yet implement this local temporal-correlation metric, so the result is explicitly unavailable rather than guessed.";
+    return workflowMode === "lamp"
+      ? "Lamp verifies the restored original audio after each generation. This broader specification remains reference material; the selected run's node status is the operational truth."
+      : "Flora verifies the restored original audio on the selected delivery. The selected run's node status is the operational truth.";
   }
   return "Code-check specification. Open the Engine node to see whether it actually ran on the selected run.";
 }
@@ -178,19 +161,19 @@ function checkKind(def: EvalDefinition): {
 function CheckRow({
   def,
   index,
+  nodeId,
+  workflowMode,
   open,
   onToggle,
 }: {
   def: EvalDefinition;
   index: number;
+  nodeId?: string;
+  workflowMode: WorkflowMode;
   open: boolean;
   onToggle: () => void;
 }) {
   const kind = checkKind(def);
-  const nodeId = EVAL_NODE_IDS.get(def.id);
-  const unavailable = LAMP_UNAVAILABLE_EVAL_IDS.includes(
-    def.id as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
-  );
 
   return (
     <article
@@ -214,20 +197,10 @@ function CheckRow({
             <span className="flex flex-wrap items-center gap-2">
               <span className="text-sm font-semibold text-ink">{def.name}</span>
               <Badge color={kind.color}>{kind.label}</Badge>
-              {!unavailable ? (
-                def.hardGate ? (
-                  <Badge color="var(--fail)">must pass</Badge>
-                ) : (
-                  <Badge color="var(--faint)">advisory</Badge>
-                )
+              {def.hardGate ? (
+                <Badge color="var(--fail)">must pass</Badge>
               ) : null}
-              {unavailable ? (
-                <Badge color="var(--faint)">
-                  {def.id === "lighting-match-to-anchor"
-                    ? "not applicable in Lamp"
-                    : "unavailable in Lamp"}
-                </Badge>
-              ) : null}
+              {!def.hardGate ? <Badge color="var(--faint)">advisory</Badge> : null}
             </span>
             <span className="mt-1 block text-pretty text-xs leading-relaxed text-muted">
               {def.description}
@@ -290,7 +263,7 @@ function CheckRow({
                     Code-check specification
                   </SectionTitle>
                   <p className="mb-3 text-pretty text-xs leading-relaxed text-faint">
-                    {codeCheckCaveat(def.id)}
+                    {codeCheckCaveat(def.id, workflowMode)}
                   </p>
                   <div className="rounded-lg bg-raised p-4 text-pretty text-xs leading-relaxed text-muted">
                     {def.deterministicNote ?? "No code-check description is available."}
@@ -302,10 +275,9 @@ function CheckRow({
                     Current canonical rubric
                   </SectionTitle>
                   <p className="mb-3 text-pretty text-xs leading-relaxed text-faint">
-                    This is the canonical criterion library. Lamp removes the older
-                    frame-grid input/output boilerplate and composes the applicable
-                    criteria into one full-video Gemini request. It is not a snapshot
-                    of a past run.
+                    {workflowMode === "lamp"
+                      ? "This is the canonical criterion library. Lamp removes the older frame-grid input/output boilerplate and composes the applicable criteria into one full-video Gemini request. It is not a snapshot of a past run."
+                      : "This is the canonical criterion library used by Flora's full-loop evaluation path. It is current source text, not a snapshot of a past run."}
                   </p>
                   <Pre>{def.promptTemplate}</Pre>
                   {def.deterministicNote ? (
@@ -336,6 +308,26 @@ function CheckRow({
 
 export default function PromptsPage() {
   const workflowMode = useAppStore((state) => state.workflowMode);
+  const modeMap = useMemo(() => {
+    const workflow = workflowForMode(workflowMode);
+    const definitions = workflowMode === "lamp" ? LAMP_EVAL_DEFS : EVAL_DEFS;
+    const evalNodeIds = new Map(
+      workflow.nodes.flatMap((node) =>
+        node.evalId ? [[node.evalId, node.id] as const] : []
+      )
+    );
+    const evalOrder = new Map(
+      workflow.nodes.flatMap((node, index) =>
+        node.evalId ? [[node.evalId, index] as const] : []
+      )
+    );
+    const orderedEvalDefs = [...definitions].sort(
+      (a, b) =>
+        (evalOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+        (evalOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+    );
+    return { workflow, evalNodeIds, orderedEvalDefs };
+  }, [workflowMode]);
   const mega = useMemo(
     () => initialMegaPrompt(workflowMode),
     [workflowMode]
@@ -345,10 +337,15 @@ export default function PromptsPage() {
   const [openId, setOpenId] = useState<string | null>(null);
 
   const base = RELIGHT_BASE_PROMPT;
+  const isLamp = workflowMode === "lamp";
+  const rubricCount = modeMap.orderedEvalDefs.filter(
+    (definition) => definition.promptTemplate
+  ).length;
+  const codeCheckCount = modeMap.orderedEvalDefs.length - rubricCount;
 
   const filteredDefs = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return ORDERED_EVAL_DEFS.filter((def) => {
+    return modeMap.orderedEvalDefs.filter((def) => {
       const codeOnly = !def.promptTemplate;
       if (filter === "rubric" && codeOnly) return false;
       if (filter === "code" && !codeOnly) return false;
@@ -366,7 +363,7 @@ export default function PromptsPage() {
         .toLowerCase()
         .includes(needle);
     });
-  }, [filter, query]);
+  }, [filter, modeMap.orderedEvalDefs, query]);
 
   return (
     <main className="mx-auto max-w-6xl px-5 pb-16 pt-8">
@@ -378,14 +375,14 @@ export default function PromptsPage() {
           <Badge color="var(--accent)">current definition</Badge>
         </div>
         <p className="mt-2 max-w-3xl text-pretty text-sm leading-relaxed text-muted">
-          See the mega prompt and evaluation criteria behind Lamp&apos;s fixed
-          Initial → critique → Final method. Long source text stays folded away
-          until you need it.
+          {isLamp
+            ? "See the mega prompt and evaluation criteria behind Lamp's fixed Initial → critique → Final method. Long source text stays folded away until you need it."
+            : "See the mega prompt and evaluation criteria behind Flora's full iterative relight method. Long source text stays folded away until you need it."}
         </p>
         <p className="mt-2 max-w-3xl text-pretty text-2xs leading-relaxed text-faint">
-          Each generated video gets one whole-video evaluation covering eight
-          visual rubrics plus deterministic audio. Temporal correlation is
-          unavailable; Look Anchor matching does not apply because Lamp has no anchor.
+          {isLamp
+            ? "Each generated video gets one whole-video evaluation covering eight visual rubrics plus deterministic audio."
+            : "Flora's 11-row method combines nine visual rubrics with deterministic timing and audio checks."}
         </p>
       </header>
 
@@ -397,58 +394,108 @@ export default function PromptsPage() {
             </span>
           }
         >
-          <span id="workflow-map-title">How instructions move through Lamp</span>
+          <span id="workflow-map-title">
+            How instructions move through {isLamp ? "Lamp" : "Flora"}
+          </span>
         </SectionTitle>
         <div className="overflow-x-auto pb-2">
-          <div className="flex min-w-max items-center gap-2">
-            <FlowNode
-              index={1}
-              title="Compile the brief"
-              detail="Combine base instructions, lighting, and active fixes."
-              nodeId="compile"
-            />
-            <span className="text-faint" aria-hidden="true">
-              →
-            </span>
-            <FlowNode
-              index={2}
-              title="Generate a candidate"
-              detail="Send the run-bound brief with the source video."
-              nodeId="videogen"
-            />
-            <span className="text-faint" aria-hidden="true">
-              →
-            </span>
-            <FlowNode
-              index={3}
-              title="Critique the whole video"
-              detail="Eight visual results return together; audio is appended deterministically."
-              nodeId="eval-identity"
-            />
-            <span className="text-faint" aria-hidden="true">
-              →
-            </span>
-            <FlowNode
-              index={4}
-              title="Collect every fix"
-              detail="Turn all actionable findings into one correction set."
-              nodeId="ledger"
-            />
-            <span className="text-accent" aria-hidden="true">
-              ↺
-            </span>
-            <FlowNode
-              index={5}
-              title="Generate Final"
-              detail="Compile once, regenerate once, then evaluate the final."
-              nodeId="compile"
-            />
-          </div>
+          {isLamp ? (
+            <div className="flex min-w-max items-center gap-2">
+              <FlowNode
+                index={1}
+                title="Compile the brief"
+                detail="Combine base instructions, lighting, and active fixes."
+                nodeId="compile"
+              />
+              <span className="text-faint" aria-hidden="true">
+                →
+              </span>
+              <FlowNode
+                index={2}
+                title="Generate a candidate"
+                detail="Send the run-bound brief with the source video."
+                nodeId="videogen"
+              />
+              <span className="text-faint" aria-hidden="true">
+                →
+              </span>
+              <FlowNode
+                index={3}
+                title="Critique the whole video"
+                detail="Eight visual results return together; audio is appended deterministically."
+                nodeId="eval-identity"
+              />
+              <span className="text-faint" aria-hidden="true">
+                →
+              </span>
+              <FlowNode
+                index={4}
+                title="Collect every fix"
+                detail="Turn all actionable findings into one correction set."
+                nodeId="ledger"
+              />
+              <span className="text-accent" aria-hidden="true">
+                ↺
+              </span>
+              <FlowNode
+                index={5}
+                title="Generate Final"
+                detail="Compile once, regenerate once, then evaluate the final."
+                nodeId="compile"
+              />
+            </div>
+          ) : (
+            <div className="flex min-w-max items-center gap-2">
+              <FlowNode
+                index={1}
+                title="Inventory the scene"
+                detail="Extract protected people, wardrobe, room, and camera facts."
+                nodeId="manifest"
+              />
+              <span className="text-faint" aria-hidden="true">
+                →
+              </span>
+              <FlowNode
+                index={2}
+                title="Approve a Look Anchor"
+                detail="Choose the still-image lighting target before video spend."
+                nodeId="anchor"
+              />
+              <span className="text-faint" aria-hidden="true">
+                →
+              </span>
+              <FlowNode
+                index={3}
+                title="Compile and generate"
+                detail="Bind the source, approved look, locks, and active fixes."
+                nodeId="compile"
+              />
+              <span className="text-faint" aria-hidden="true">
+                →
+              </span>
+              <FlowNode
+                index={4}
+                title="Run all checks"
+                detail="Score timing, fidelity, lighting, motion, stability, and audio."
+                nodeId="eval-identity"
+              />
+              <span className="text-accent" aria-hidden="true">
+                ↺
+              </span>
+              <FlowNode
+                index={5}
+                title="Gate, fix, or deliver"
+                detail="Retry from source with corrections, then select the delivery."
+                nodeId="gate"
+              />
+            </div>
+          )}
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-2xs text-faint">
           <span>
-            Lamp evaluates the complete source and candidate directly; it does not
-            create a scene manifest or Look Anchor.
+            {isLamp
+              ? "Lamp evaluates the complete source and candidate directly; it does not create a scene manifest or Look Anchor."
+              : "Flora extracts a scene inventory, approves a Look Anchor, and retains its full 11-check evaluation loop."}
           </span>
         </div>
       </section>
@@ -459,20 +506,28 @@ export default function PromptsPage() {
         </SectionTitle>
         <div className="grid gap-3">
           <SourceDisclosure
-            title="Scene inventory reference"
-            description="Legacy full-loop extraction instructions retained for reference; Lamp does not run this stage."
-            badge="not used by Lamp"
-            badgeColor="var(--faint)"
+            title={isLamp ? "Scene inventory reference" : "Scene inventory extractor"}
+            description={
+              isLamp
+                ? "Legacy full-loop extraction instructions retained for reference; Lamp does not run this stage."
+                : "Current extraction instructions Flora runs before its Look Anchor and video loop."
+            }
+            badge={isLamp ? "not used by Lamp" : "used by Flora"}
+            badgeColor={isLamp ? "var(--faint)" : "var(--running)"}
           >
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
-                Lamp compares the complete source and candidate videos directly.
-                This older inventory definition remains readable for historical
-                runs but is not sent to generation or evaluation in Lamp.
+                {isLamp
+                  ? "Lamp compares the complete source and candidate videos directly. This older inventory definition remains readable for historical runs but is not sent to generation or evaluation in Lamp."
+                  : "Flora sends this prompt once to create the scene inventory that protects source content through its anchor and iterative video loop."}
               </p>
-              <span className="inline-flex min-h-10 items-center text-2xs text-faint">
-                Legacy reference only
-              </span>
+              {isLamp ? (
+                <span className="inline-flex min-h-10 items-center text-2xs text-faint">
+                  Legacy reference only
+                </span>
+              ) : (
+                <EngineLink nodeId="manifest" />
+              )}
             </div>
             <Pre>{MANIFEST_PROMPT}</Pre>
           </SourceDisclosure>
@@ -565,7 +620,8 @@ export default function PromptsPage() {
             </p>
           </div>
           <Badge>
-            9 applicable · 2 explicitly excluded · 8 active visual rubrics · 1 active code check
+            {modeMap.orderedEvalDefs.length} active · {rubricCount} visual rubrics ·{" "}
+            {codeCheckCount} code {codeCheckCount === 1 ? "check" : "checks"}
           </Badge>
         </div>
 
@@ -618,10 +674,12 @@ export default function PromptsPage() {
             </div>
           </div>
           <p className="mt-2 text-2xs tabular-nums text-faint" role="status">
-            Showing {filteredDefs.length} of {EVAL_DEFS.length} checks
+            Showing {filteredDefs.length} of {modeMap.orderedEvalDefs.length} checks
             {query || filter !== "all"
               ? ""
-              : " · Lamp returns 8 visual results together and appends deterministic audio · timing is unavailable · anchor match is inapplicable"}
+              : isLamp
+                ? " · Lamp returns 8 visual results together and appends deterministic audio"
+                : " · Flora retains 9 visual rubrics and 2 deterministic checks"}
           </p>
         </Card>
 
@@ -631,7 +689,9 @@ export default function PromptsPage() {
               <CheckRow
                 key={def.id}
                 def={def}
-                  index={ORDERED_EVAL_DEFS.indexOf(def)}
+                index={modeMap.orderedEvalDefs.indexOf(def)}
+                nodeId={modeMap.evalNodeIds.get(def.id)}
+                workflowMode={workflowMode}
                 open={openId === def.id}
                 onToggle={() =>
                   setOpenId((current) => (current === def.id ? null : def.id))

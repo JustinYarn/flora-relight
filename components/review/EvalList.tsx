@@ -15,23 +15,7 @@ import {
   verdictColor,
 } from "@/components/ui";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
-import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
 import { formatTime, LOW_CONFIDENCE } from "@/lib/util";
-
-const UNAVAILABLE_REASON: Record<(typeof LAMP_UNAVAILABLE_EVAL_IDS)[number], string> = {
-  "temporal-alignment":
-    "unavailable in Lamp — the documented local temporal-correlation metric is not implemented yet",
-  "lighting-match-to-anchor":
-    "not applicable in Lamp — this method does not create or approve a Look Anchor",
-};
-
-function unavailableReason(evalId: string): string | undefined {
-  return LAMP_UNAVAILABLE_EVAL_IDS.includes(
-    evalId as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
-  )
-    ? UNAVAILABLE_REASON[evalId as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]]
-    : undefined;
-}
 
 function severityColor(s: ViolationSeverity): string {
   return s === "critical"
@@ -178,17 +162,12 @@ function EvalRow({
   // Rows without a result are informational, not expandable. While the run
   // executes, the pulsing "waiting…" state only appears once the checks phase
   // has actually started — earlier stages (a 5-minute videogen) show a flat
-  // dash instead of ten pulsing rows.
+  // dash instead of every row pulsing.
   if (!result) {
-    const unavailable = unavailableReason(def.id);
     return (
       <div className="-ml-3 flex flex-wrap items-center gap-x-5 gap-y-2 border-l-2 border-transparent py-4 pl-3">
         {nameCell}
-        {unavailable ? (
-          <span className="flex-1 text-pretty text-2xs text-faint">
-            {unavailable}
-          </span>
-        ) : running && def.id !== "audio-integrity" ? (
+        {running && def.id !== "audio-integrity" ? (
           evalsUnderway ? (
             <span className="flex flex-1 items-center gap-3">
               <span className="h-1.5 w-40 animate-pulse rounded-full bg-raised" />
@@ -240,16 +219,17 @@ function EvalRow({
 }
 
 /**
- * The eleven evals as flat rows with hairline dividers — no cards. One row
- * expands at a time (single accordion); the open row stays open across
- * attempt switches so a reviewer can watch one eval change attempt to attempt.
+ * The workflow's evals as flat rows with hairline dividers — no cards. One
+ * row expands at a time; the open row stays open across attempt switches.
  */
 export function EvalList({
   iteration,
+  definitions = EVAL_DEFS,
   evalsUnderway = true,
   hiddenUntilHumanGrade = false,
 }: {
   iteration?: Iteration;
+  definitions?: readonly EvalDefinition[];
   /**
    * While the run executes: has the pipeline reached the checks phase yet?
    * (see evalPhaseReached in GenerationTheater). Defaults true so completed
@@ -260,9 +240,9 @@ export function EvalList({
   hiddenUntilHumanGrade?: boolean;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
-  const applicableCount = EVAL_DEFS.length - LAMP_UNAVAILABLE_EVAL_IDS.length;
+  const definitionIds = new Set(definitions.map((definition) => definition.id));
   const availableCount =
-    iteration?.evalResults.filter((result) => !unavailableReason(result.evalId)).length ?? 0;
+    iteration?.evalResults.filter((result) => definitionIds.has(result.evalId)).length ?? 0;
   const sectionLabel =
     iteration?.index === 1
       ? "Initial whole-video critique"
@@ -291,25 +271,19 @@ export function EvalList({
         <div>
           <h2 className="text-balance text-sm font-medium text-ink">{sectionLabel}</h2>
           <p className="mt-1 text-pretty text-2xs text-faint">
-            {LAMP_UNAVAILABLE_EVAL_IDS.length} of {EVAL_DEFS.length} rubric rows
-            stay explicitly unscored: timing correlation is unavailable and
-            anchor matching is not applicable.
+            Complete-video checks plus the server-verified source-audio result.
           </p>
         </div>
         <span className="text-2xs tabular-nums text-muted">
-          {availableCount} of {applicableCount} applicable results available
+          {availableCount} of {definitions.length} results available
         </span>
       </header>
       <div className="divide-y divide-edge border-b border-edge">
-        {EVAL_DEFS.map((def) => (
+        {definitions.map((def) => (
           <EvalRow
             key={def.id}
             def={def}
-            result={
-              unavailableReason(def.id)
-                ? undefined
-                : iteration?.evalResults.find((r) => r.evalId === def.id)
-            }
+            result={iteration?.evalResults.find((r) => r.evalId === def.id)}
             running={iteration?.status === "running"}
             evalsUnderway={evalsUnderway}
             open={openId === def.id}

@@ -41,6 +41,7 @@ export default function PipelinePage() {
   const workflow = useAppStore((s) => s.workflow);
   const runs = useAppStore((s) => s.runs);
   const mode = useAppStore((s) => s.mode);
+  const workflowMode = useAppStore((s) => s.workflowMode);
   const batches = useAppStore(
     (s) => (s as unknown as { batches?: BatchLike[] }).batches
   );
@@ -224,6 +225,7 @@ export default function PipelinePage() {
             run={activeRun}
             config={workflow.config}
             mode={mode}
+            workflowMode={workflowMode}
             onSelectNode={selectNode}
             onClose={closeInspector}
           />

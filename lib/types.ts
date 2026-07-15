@@ -497,14 +497,15 @@ export interface HumanCheckGrade {
 }
 
 /**
- * A human grade of one run's shipped cut across the same 11 rubric rows. Lamp
+ * A human grade of one run's shipped cut across its workflow rubric rows. Lamp
+ * uses nine rows while Flora retains its historical eleven. Lamp
  * starts with AI evidence hidden so the grader can avoid anchoring, while an
  * explicit reveal remains available. Results compares the saved human grade
  * against Lamp Final's evalResults to calibrate the judge rubrics.
  */
 export interface HumanGrade {
   gradedAt: number;
-  /** Keyed by evalId (EVAL_DEFS ids). */
+  /** Keyed by the active workflow's eval ids. */
   scores: Record<string, HumanCheckGrade>;
   /** The gut call: would you ship this cut as-is? */
   shipIt: boolean;

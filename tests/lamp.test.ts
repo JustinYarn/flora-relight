@@ -5,10 +5,20 @@ import test from "node:test";
 import {
   buildLampEvaluationArtifact,
   compileLampFinalPrompt,
+  evalDefsForRun,
+  getLampEvalDef,
+  isLampEvaluationArtifact,
   lampCompositeForResults,
+  lampWholeVideoRubric,
   projectLampEvaluationForRead,
+  LAMP_EVAL_DEFS,
+  LAMP_EVAL_IDS,
+  LAMP_EVALUATOR_VERSION,
+  LAMP_LEGACY_EVALUATOR_VERSION,
   LAMP_VISUAL_EVAL_DEFS,
+  type LampEvaluationArtifact,
 } from "../lib/lamp-evaluation.ts";
+import { EVAL_DEFS, getEvalDef } from "../lib/prompts/eval-defs.ts";
 import {
   estimateLampRun,
   LAMP_EVALUATION_COUNT,
@@ -207,6 +217,221 @@ test("Lamp accepts exactly eight visual results and appends verified audio", () 
   assert.equal(artifact.evalResults.at(-1)?.score, 100);
   assert.equal(artifact.evalResults.at(-1)?.verdict, "pass");
   assert.ok(artifact.evalResults.every((result) => result.iteration === 1));
+});
+
+test("Lamp owns exactly nine grading rows while Flora retains eleven", () => {
+  assert.equal(LAMP_EVAL_DEFS.length, 9);
+  assert.deepEqual(
+    LAMP_EVAL_DEFS.map((definition) => definition.id),
+    LAMP_EVAL_IDS
+  );
+  assert.equal(LAMP_EVAL_DEFS.some((definition) => definition.id === "temporal-alignment"), false);
+  assert.equal(
+    LAMP_EVAL_DEFS.some(
+      (definition) => definition.id === "lighting-match-to-anchor"
+    ),
+    false
+  );
+  assert.equal(EVAL_DEFS.length, 11);
+  assert.equal(EVAL_DEFS.some((definition) => definition.id === "temporal-alignment"), true);
+  assert.equal(
+    EVAL_DEFS.some((definition) => definition.id === "lighting-match-to-anchor"),
+    true
+  );
+});
+
+test("Lamp whole-video rubrics contain no retired Lamp checks", () => {
+  const rendered = LAMP_VISUAL_EVAL_DEFS.map(lampWholeVideoRubric).join("\n");
+  assert.doesNotMatch(rendered, /temporal-alignment/);
+  assert.doesNotMatch(rendered, /lighting-match-to-anchor/);
+  assert.doesNotMatch(rendered, /^INPUTS$/m);
+  assert.doesNotMatch(rendered, /^OUTPUT$/m);
+});
+
+test("Lamp skin allows only extremely subtle beautification at 85/70 boundaries", () => {
+  const expected = new Map([
+    [85, "pass"],
+    [84, "borderline"],
+    [70, "borderline"],
+    [69, "fail"],
+  ]);
+  for (const [score, verdict] of expected) {
+    const artifact = buildLampEvaluationArtifact({
+      raw: {
+        results: rawVisualResults().map((result) => ({
+          ...result,
+          score: result.evalId === "skin-texture-age" ? score : 100,
+          violations: [],
+        })),
+      },
+      iteration: 1,
+      audioVerified: true,
+      costUsd: 0.02,
+    });
+    const skin = artifact.evalResults.find(
+      (result) => result.evalId === "skin-texture-age"
+    );
+    assert.equal(skin?.verdict, verdict, `score ${score}`);
+    const composite = lampCompositeForResults(artifact.evalResults);
+    assert.equal(
+      composite?.hardGateFailures.includes("skin-texture-age"),
+      score < 85,
+      `score ${score}`
+    );
+  }
+
+  const skin = getLampEvalDef("skin-texture-age");
+  assert.equal(skin.passThreshold, 85);
+  assert.equal(skin.borderlineThreshold, 70);
+  assert.match(skin.promptTemplate, /PRESENCE and POSITION/);
+  assert.match(skin.promptTemplate, /Brighter or lower-contrast skin/);
+  assert.match(skin.promptTemplate, /any added wrinkle, crease, or age line/i);
+  assert.equal(getEvalDef("skin-texture-age").passThreshold, 88);
+  assert.equal(getEvalDef("skin-texture-age").borderlineThreshold, 75);
+
+  for (const aspect of [
+    "added_wrinkles",
+    "added-forehead-wrinkle",
+    "new-crease",
+    "added-age-line",
+  ]) {
+    const inconsistentAddedWrinkle = buildLampEvaluationArtifact({
+      raw: {
+        results: rawVisualResults().map((result) =>
+          result.evalId === "skin-texture-age"
+            ? {
+                ...result,
+                score: 99,
+                violations: [
+                  {
+                    aspect,
+                    severity: "major",
+                    description: "A new forehead crease appears in the candidate.",
+                    correction: "Remove the invented forehead crease.",
+                  },
+                ],
+              }
+            : { ...result, score: 100, violations: [] }
+        ),
+      },
+      iteration: 1,
+      audioVerified: true,
+      costUsd: 0.02,
+    });
+    const cappedSkin = inconsistentAddedWrinkle.evalResults.find(
+      (result) => result.evalId === "skin-texture-age"
+    );
+    assert.equal(cappedSkin?.score, 69, aspect);
+    assert.equal(cappedSkin?.verdict, "fail", aspect);
+  }
+
+  const removedWrinkle = buildLampEvaluationArtifact({
+    raw: {
+      results: rawVisualResults().map((result) =>
+        result.evalId === "skin-texture-age"
+          ? {
+              ...result,
+              score: 90,
+              violations: [
+                {
+                  aspect: "removed-wrinkles",
+                  severity: "minor",
+                  description: "A source wrinkle is slightly softened.",
+                  correction: "Restore the source wrinkle subtly.",
+                },
+              ],
+            }
+          : { ...result, score: 100, violations: [] }
+      ),
+    },
+    iteration: 1,
+    audioVerified: true,
+    costUsd: 0.02,
+  });
+  assert.equal(
+    removedWrinkle.evalResults.find(
+      (result) => result.evalId === "skin-texture-age"
+    )?.score,
+    90
+  );
+});
+
+test("Lamp v2 reads legacy v1 artifacts through the current nine-check policy", () => {
+  const current = buildLampEvaluationArtifact({
+    raw: {
+      results: rawVisualResults().map((result) => ({
+        ...result,
+        score: result.evalId === "skin-texture-age" ? 72 : 100,
+        violations: [],
+      })),
+    },
+    iteration: 2,
+    audioVerified: true,
+    costUsd: 0.02,
+  });
+  assert.equal(current.version, LAMP_EVALUATOR_VERSION);
+
+  const legacy: LampEvaluationArtifact = {
+    ...current,
+    version: LAMP_LEGACY_EVALUATOR_VERSION,
+    evalResults: [
+      ...current.evalResults.map((result) =>
+        result.evalId === "skin-texture-age"
+          ? {
+              ...result,
+              verdict: "fail" as const,
+              verdicts: result.verdicts.map((judgeVerdict) => ({
+                ...judgeVerdict,
+                verdict: "fail" as const,
+              })),
+            }
+          : result
+      ),
+      {
+        ...current.evalResults[0],
+        evalId: "temporal-alignment",
+      },
+    ],
+  };
+  assert.equal(isLampEvaluationArtifact(legacy, 2), true);
+  const projection = projectLampEvaluationForRead({
+    iteration: 2,
+    artifact: legacy,
+    humanGradeSaved: true,
+  });
+  assert.equal(projection.evalResults.length, 9);
+  assert.equal(
+    projection.evalResults.some(
+      (result) => result.evalId === "temporal-alignment"
+    ),
+    false
+  );
+  assert.equal(
+    projection.evalResults.find(
+      (result) => result.evalId === "skin-texture-age"
+    )?.verdict,
+    "borderline"
+  );
+});
+
+test("run-scoped grading definitions keep Lamp at nine and Flora at eleven", () => {
+  assert.equal(
+    evalDefsForRun({ workflowId: "lamp-v1" } as Run).length,
+    9
+  );
+  assert.equal(
+    evalDefsForRun({ workflowMode: "flora", workflowId: "flora-relight-v1" } as Run)
+      .length,
+    11
+  );
+  assert.equal(
+    evalDefsForRun({
+      workflowMode: "flora",
+      workflowId: "flora-relight-v1",
+      serverExecution: { executionId: "lamp:authoritative" },
+    } as Run).length,
+    9
+  );
 });
 
 test("Lamp seals ordinary reads while allowing an explicit Grade reveal", () => {
@@ -488,6 +713,8 @@ test("human comparison always pairs with Lamp v2 rather than a better-looking v1
     violations: [],
   });
   const run = {
+    workflowMode: "lamp",
+    workflowId: "lamp-v1",
     iterations: [
       { index: 1, evalResults: [makeResult(1, 99)] },
       { index: 2, evalResults: [makeResult(2, 81)] },
@@ -504,6 +731,77 @@ test("human comparison always pairs with Lamp v2 rather than a better-looking v1
   assert.equal(comparisons.length, 1);
   assert.equal(comparisons[0].ai.iteration, 2);
   assert.equal(comparisons[0].ai.score, 81);
+});
+
+test("comparison ignores legacy Lamp extras but retains all Flora checks", () => {
+  const humanScores = Object.fromEntries(
+    EVAL_DEFS.map((definition) => [
+      definition.id,
+      { points: 4 as const, score: 85, verdict: "pass" as const },
+    ])
+  );
+  const resultFor = (evalId: string, iteration = 2) => ({
+    evalId,
+    iteration,
+    verdicts: [],
+    score: 85,
+    confidence: 1,
+    verdict: "pass" as const,
+    violations: [],
+  });
+  const lamp = {
+    workflowMode: "lamp",
+    workflowId: "lamp-v1",
+    iterations: [
+      {
+        index: 2,
+        evalResults: LAMP_EVAL_DEFS.map((definition) =>
+          resultFor(definition.id)
+        ),
+      },
+    ],
+    humanGrade: {
+      gradedAt: 1,
+      scores: humanScores,
+      shipIt: true,
+    },
+  } as unknown as Run;
+  const flora = {
+    workflowMode: "flora",
+    workflowId: "flora-relight-v1",
+    iterations: [
+      {
+        index: 2,
+        evalResults: EVAL_DEFS.map((definition) => resultFor(definition.id)),
+      },
+    ],
+    humanGrade: {
+      gradedAt: 2,
+      scores: humanScores,
+      shipIt: true,
+    },
+  } as unknown as Run;
+
+  const lampComparisons = collectComparisons([lamp]);
+  assert.equal(lampComparisons.length, 9);
+  assert.equal(
+    lampComparisons.some((comparison) => comparison.evalId === "temporal-alignment"),
+    false
+  );
+  const floraComparisons = collectComparisons([flora]);
+  assert.equal(floraComparisons.length, 11);
+  assert.equal(
+    floraComparisons.some(
+      (comparison) => comparison.evalId === "temporal-alignment"
+    ),
+    true
+  );
+  assert.equal(
+    floraComparisons.some(
+      (comparison) => comparison.evalId === "lighting-match-to-anchor"
+    ),
+    true
+  );
 });
 
 test("Lamp enters Grade only with a provider-backed v2 final", () => {
@@ -741,6 +1039,8 @@ test("complete final applicable evals produce a coverage-aware AI pass rate", ()
     costUsd: 0.02,
   });
   const run = {
+    workflowMode: "lamp",
+    workflowId: "lamp-v1",
     iterations: [
       {
         index: 2,

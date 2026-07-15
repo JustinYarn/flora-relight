@@ -22,6 +22,7 @@ import { ReviewActions } from "@/components/review/ReviewActions";
 import { LostGenerationRecovery } from "@/components/review/LostGenerationRecovery";
 import { WorkflowRail } from "@/components/review/WorkflowRail";
 import { isLampBlindGradeLocked } from "@/components/grade/derive";
+import { evalDefsForRun } from "@/lib/lamp-evaluation";
 
 const STATUS_COLOR: Record<RunStatus, string> = {
   running: "var(--running)",
@@ -60,7 +61,7 @@ function finalIteration(run: Run): Iteration | undefined {
 }
 
 /**
- * The Review page: two videos + eleven flat rows. Everything else — prompt
+ * The Review page: two videos + workflow-scoped eval rows. Everything else — prompt
  * evolution, frames, log, pipeline detail — lives one click away in Journey.
  */
 export default function RunReviewPage() {
@@ -182,9 +183,10 @@ export default function RunReviewPage() {
             </div>
           )}
 
-          {/* EVALS — eleven flat rows */}
+          {/* EVALS — nine Lamp rows, eleven Flora rows */}
           <EvalList
             iteration={selectedIteration}
+            definitions={evalDefsForRun(run)}
             evalsUnderway={run.status !== "running" || evalPhaseReached(run)}
             hiddenUntilHumanGrade={blindGradeLocked}
           />

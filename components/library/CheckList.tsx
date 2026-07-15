@@ -18,7 +18,7 @@ import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { formatTime } from "@/lib/util";
 
 /*
- * Level 2/3 of the Library's progressive disclosure: the 11 checks as compact
+ * Level 2/3 of the Library's progressive disclosure: workflow checks as compact
  * rows; clicking one expands both judges' verdicts and the violations in
  * place. Mirrors the interaction pattern of components/review/EvalList.tsx
  * (its row internals are not exported, so the markup is mirrored, compacted).
@@ -156,14 +156,16 @@ function CheckRow({
   );
 }
 
-/** The 11 checks for one attempt, flat rows, single accordion for judge detail. */
+/** The workflow checks for one attempt, flat rows, single accordion for detail. */
 export function CheckList({
   iteration,
   runActive,
+  definitions = EVAL_DEFS,
 }: {
   iteration?: Iteration;
   /** False once the run has settled — a still-"running" attempt then reads as never finished, not in flight. */
   runActive: boolean;
+  definitions?: readonly EvalDefinition[];
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
 
@@ -177,7 +179,7 @@ export function CheckList({
 
   return (
     <div className="divide-y divide-edge">
-      {EVAL_DEFS.map((def) => (
+      {definitions.map((def) => (
         <CheckRow
           key={def.id}
           def={def}

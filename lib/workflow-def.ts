@@ -67,7 +67,7 @@ const nodes: PipelineNode[] = [
     kind: "evaluate",
     label: "Natural skin",
     description:
-      "Checks for beautification, smoothing, waxiness, texture loss, and apparent-age changes.",
+      "Allows only extremely subtle close-inspection softening while rejecting visible beautification, de-aging, and any added wrinkles.",
     evalId: "skin-texture-age",
     position: { x: COL * 4, y: 96 },
   },

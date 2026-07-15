@@ -1,5 +1,12 @@
-import type { EvalResult, Iteration, Run, RunStatus, Verdict } from "@/lib/types";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import type {
+  EvalDefinition,
+  EvalResult,
+  Iteration,
+  Run,
+  RunStatus,
+  Verdict,
+} from "@/lib/types";
+import { evalDefsForRun, isLampRun } from "@/lib/lamp-evaluation";
 import { LOW_CONFIDENCE } from "@/lib/util";
 
 /**
@@ -8,7 +15,7 @@ import { LOW_CONFIDENCE } from "@/lib/util";
  * tracking, no dependencies. The file is the product.
  *
  * Contents mirror the Review page contract: clip header, original vs relit
- * side by side, the verdict line, and the 11 eval rows — plus a pure
+ * side by side, the verdict line, and the workflow's eval rows — plus a pure
  * client-side feedback affordance (agree/disagree per eval + a note) whose
  * output is a plain-text summary copied to the clipboard, so teammates can
  * judge whether the evaluations match their expectations of the video and
@@ -72,7 +79,7 @@ function esc(s: string): string {
 /** Lamp shares v2 as Final; legacy snapshots retain best-of resolution. */
 function winningIteration(run: Run): Iteration | undefined {
   const last = run.iterations[run.iterations.length - 1];
-  if (run.workflowId === "lamp-v1") {
+  if (isLampRun(run)) {
     return run.iterations.find((iteration) => iteration.index === 2) ?? last;
   }
   const bi = run.bestIterationIndex;
@@ -140,7 +147,7 @@ interface EvalLineData {
 
 function evalRow(
   idx: number,
-  def: (typeof EVAL_DEFS)[number],
+  def: EvalDefinition,
   result: EvalResult | undefined
 ): { html: string; data: EvalLineData } {
   const sub = `${def.category}${def.hardGate ? " · hard gate" : ""}`;
@@ -194,7 +201,7 @@ export async function buildShareSnapshot(run: Run): Promise<string> {
   const winner = winningIteration(run);
   const composite = winner?.composite;
   const attempts = run.iterations.length;
-  const lamp = run.workflowId === "lamp-v1";
+  const lamp = isLampRun(run);
   const dataUri = await videoToDataUri(run.originalVideo.url);
 
   // Mock-mode comparison: the relit side replays the same embedded source
@@ -213,7 +220,9 @@ export async function buildShareSnapshot(run: Run): Promise<string> {
   const resultByEvalId = new Map<string, EvalResult>(
     (winner?.evalResults ?? []).map((r) => [r.evalId, r])
   );
-  const rows = EVAL_DEFS.map((def, i) => evalRow(i, def, resultByEvalId.get(def.id)));
+  const rows = evalDefsForRun(run).map((def, i) =>
+    evalRow(i, def, resultByEvalId.get(def.id))
+  );
 
   const compositeColor = composite
     ? composite.passed

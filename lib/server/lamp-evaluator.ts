@@ -12,6 +12,7 @@ import {
   LAMP_VISUAL_EVAL_DEFS,
   buildLampEvaluationArtifact,
   isLampEvaluationArtifact,
+  lampWholeVideoRubric,
   lampEvaluationOperationId,
   type LampEvaluationArtifact,
 } from "@/lib/lamp-evaluation";
@@ -77,27 +78,9 @@ const RESPONSE_SCHEMA = {
 
 function evaluatorPrompt(): string {
   const rubrics = LAMP_VISUAL_EVAL_DEFS.map((definition, index) => {
-    const rubric = definition.promptTemplate
-      // The canonical library is also used by the older sampled-frame loop.
-      // Lamp keeps its criteria and correction rules, but removes that loop's
-      // input claims and per-rubric output envelope before composing one
-      // truthful full-video request with one shared response schema.
-      .replace(/^Protocol:[^\n]*\n\n/m, "Protocol: compare both complete videos over their full timelines.\n\n")
-      .replace(
-        /INPUTS\n[\s\S]*?Inspect the event-picked frames hardest — failures concentrate where motion and expression peak\.\n\n/,
-        ""
-      )
-      .replace(/\nOUTPUT\n[\s\S]*$/, "")
-      .split("{{BEFORE_FRAMES}}")
-      .join("the complete ORIGINAL video attached first")
-      .split("{{AFTER_FRAMES}}")
-      .join("the complete CANDIDATE video attached second")
-      .split("index-locked pair")
-      .join("corresponding moment")
-      .split("frame-pair by frame-pair")
-      .join("across corresponding moments")
-      .split("event-picked frames")
-      .join("challenging motion and speech moments");
+    // The canonical library is also used by Flora's sampled-frame loop. Lamp
+    // keeps its criteria while removing that loop's input/output envelope.
+    const rubric = lampWholeVideoRubric(definition);
     return [
       `CHECK ${index + 1}: ${definition.id} — ${definition.name}`,
       definition.description,
@@ -113,7 +96,7 @@ function evaluatorPrompt(): string {
     "For every violation, write a concise imperative correction that can be inserted directly into the next video-generation prompt.",
     "Any check you score below its pass threshold must include at least one violation naming what failed, with a concrete correction; do not return a below-pass score with an empty violations array.",
     "confidence is 0 to 1 and must describe how strongly the attached evidence supports this single-judge result. Do not treat it as multi-judge agreement.",
-    "Do not include audio-integrity; the server verifies audio separately. Do not include temporal-alignment; its local correlation metric is not yet available in Lamp.",
+    "Return only the listed visual checks. Do not include audio-integrity; the server verifies audio separately.",
     "Return one JSON object with a results array matching the supplied response schema. Do not emit a separate JSON object for each check.",
     "",
     rubrics,

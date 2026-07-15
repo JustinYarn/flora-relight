@@ -12,6 +12,7 @@ import {
 } from "../lib/prompts/mega-prompt.ts";
 import { mergeBatch } from "../lib/server/storage/batch-merge.ts";
 import type { Batch } from "../lib/types.ts";
+import { workflowForMode } from "../lib/workflow-def.ts";
 
 test("workflow mode accepts only the two public product modes", () => {
   assert.equal(parseWorkflowMode("flora"), "flora");
@@ -24,6 +25,21 @@ test("new browser selections default to Lamp and retain product labels", () => {
   assert.equal(DEFAULT_WORKFLOW_MODE, "lamp");
   assert.equal(workflowModeLabel("flora"), "Flora");
   assert.equal(workflowModeLabel("lamp"), "Lamp");
+});
+
+test("Lamp graph has nine eval nodes while Flora retains its two additional checks", () => {
+  const lampEvalIds = workflowForMode("lamp").nodes.flatMap((node) =>
+    node.evalId ? [node.evalId] : []
+  );
+  assert.equal(lampEvalIds.length, 9);
+  assert.equal(lampEvalIds.includes("temporal-alignment"), false);
+  assert.equal(lampEvalIds.includes("lighting-match-to-anchor"), false);
+
+  const floraEvalIds = workflowForMode("flora").nodes.flatMap((node) =>
+    node.evalId ? [node.evalId] : []
+  );
+  assert.equal(floraEvalIds.includes("temporal-alignment"), true);
+  assert.equal(floraEvalIds.includes("lighting-match-to-anchor"), true);
 });
 
 test("Flora and Lamp prompts preserve method labels without changing prompt semantics", () => {

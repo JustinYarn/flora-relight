@@ -9,6 +9,7 @@
  */
 
 import type {
+  EvalDefinition,
   EvalResult,
   HumanCheckGrade,
   Iteration,
@@ -18,8 +19,10 @@ import type {
 } from "@/lib/types";
 import { EVAL_DEFS } from "../../lib/prompts/eval-defs.ts";
 import {
+  evalDefsForRun,
+  isLampRun,
   lampCompositeForResults,
-  LAMP_UNAVAILABLE_EVAL_IDS,
+  LAMP_EVAL_DEFS,
 } from "../../lib/lamp-evaluation.ts";
 
 // ---------------------------------------------------------------------------
@@ -74,14 +77,6 @@ export function isGradeable(run: Run): boolean {
   );
 }
 
-function isLampRun(run: Run): boolean {
-  return (
-    run.workflowMode === "lamp" ||
-    run.workflowId === "lamp-v1" ||
-    run.serverExecution?.executionId.startsWith("lamp:") === true
-  );
-}
-
 /** Lamp's human grade and comparison target is strictly v2. */
 export function finalLampIteration(run: Run): Iteration | undefined {
   const second = run.iterations.find((iteration) => iteration.index === 2);
@@ -125,14 +120,7 @@ export function collectComparisons(gradedRuns: Run[]): CheckComparison[] {
   const out: CheckComparison[] = [];
   for (const run of gradedRuns) {
     const aiResults = finalLampIteration(run)?.evalResults ?? [];
-    for (const def of EVAL_DEFS) {
-      if (
-        LAMP_UNAVAILABLE_EVAL_IDS.includes(
-          def.id as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
-        )
-      ) {
-        continue;
-      }
+    for (const def of evalDefsForRun(run)) {
       const human = run.humanGrade?.scores[def.id];
       const ai = aiResults.find((r) => r.evalId === def.id);
       if (human && ai) out.push({ run, evalId: def.id, human, ai });
@@ -165,9 +153,12 @@ export interface CheckStats {
   direction: Direction;
 }
 
-/** Per-check aggregate over a set of comparisons (11 entries, EVAL_DEFS order). */
-export function perCheckStats(comps: CheckComparison[]): CheckStats[] {
-  return EVAL_DEFS.map((def) => {
+/** Per-check aggregate over the selected workflow definitions, in registry order. */
+export function perCheckStats(
+  comps: CheckComparison[],
+  definitions: readonly EvalDefinition[] = EVAL_DEFS
+): CheckStats[] {
+  return definitions.map((def) => {
     const mine = comps.filter((c) => c.evalId === def.id);
     if (mine.length === 0) {
       return {
@@ -208,6 +199,11 @@ export function perCheckStats(comps: CheckComparison[]): CheckStats[] {
       direction,
     };
   });
+}
+
+/** All-Lamp results stay at nine rows; a mixed/Flora set retains Flora's 11. */
+export function evalDefsForRuns(runs: Run[]): EvalDefinition[] {
+  return runs.some((run) => !isLampRun(run)) ? EVAL_DEFS : LAMP_EVAL_DEFS;
 }
 
 /** Overall verdict-level agreement across every compared pair, 0–100. */
@@ -274,12 +270,14 @@ export function shipRatePct(gradedRuns: Run[]): number | undefined {
   return (yes / gradedRuns.length) * 100;
 }
 
-/** % of graded runs whose complete final v2 evaluation passed every applicable gate. */
+/** % of graded runs whose delivered evaluation passed its workflow's gate. */
 export function aiPassRatePct(gradedRuns: Run[]): number | undefined {
   const scored = gradedRuns
     .map((run) => {
       const final = finalLampIteration(run);
-      return lampCompositeForResults(final?.evalResults ?? []);
+      return isLampRun(run)
+        ? lampCompositeForResults(final?.evalResults ?? [])
+        : final?.composite;
     })
     .filter((composite) => composite !== undefined);
   if (scored.length === 0) return undefined;

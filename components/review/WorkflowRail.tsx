@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { Iteration, Run } from "@/lib/types";
-import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
+import { evalDefsForRun } from "@/lib/lamp-evaluation";
 
 type StageState = "idle" | "active" | "done" | "failed";
 
@@ -27,14 +27,10 @@ const LABEL_CLASS: Record<StageState, string> = {
   failed: "text-fail",
 };
 
-function availableEvalCount(iteration: Iteration | undefined): number {
+function availableEvalCount(iteration: Iteration | undefined, run: Run): number {
+  const evalIds = new Set(evalDefsForRun(run).map((definition) => definition.id));
   return (
-    iteration?.evalResults.filter(
-      (result) =>
-        !LAMP_UNAVAILABLE_EVAL_IDS.includes(
-          result.evalId as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
-        )
-    ).length ?? 0
+    iteration?.evalResults.filter((result) => evalIds.has(result.evalId)).length ?? 0
   );
 }
 
@@ -48,8 +44,8 @@ export function WorkflowRail({ run }: { run: Run }) {
   const final =
     run.iterations.find((iteration) => iteration.index === 2) ??
     (run.iterations.length > 1 ? run.iterations.at(-1) : undefined);
-  const initialCritiqueCount = availableEvalCount(initial);
-  const finalEvalCount = availableEvalCount(final);
+  const initialCritiqueCount = availableEvalCount(initial, run);
+  const finalEvalCount = availableEvalCount(final, run);
 
   const states: StageState[] = [
     initial?.generatedVideo

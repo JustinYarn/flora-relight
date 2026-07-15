@@ -14,8 +14,6 @@ import { NextRequest, NextResponse } from "next/server";
 import type {
   Batch,
   FrameSample,
-  HumanCheckGrade,
-  HumanGrade,
   PaidOperation,
   ProviderOperation,
   Run,
@@ -42,10 +40,12 @@ import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import {
   compileLampFinalPrompt,
   isLampEvaluationArtifact,
+  LAMP_EVAL_IDS,
   lampEvaluationOperationId,
   projectLampEvaluationForRead,
   type LampEvaluationArtifact,
 } from "@/lib/lamp-evaluation";
+import { parseHumanGrade } from "@/lib/human-grade";
 import { readCanonicalIngestByRunId } from "@/lib/server/ingest";
 import { hasGeminiKey } from "@/lib/server/gemini";
 import { enqueueRunExecution } from "@/lib/server/run-execution-coordinator";
@@ -65,75 +65,7 @@ export const dynamic = "force-dynamic";
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 25;
 const SAFE_RESPONSE_BYTES = 3_500_000;
-const MAX_GRADE_NOTE_LENGTH = 4_000;
-const MAX_GRADE_OVERALL_NOTE_LENGTH = 8_000;
-const HUMAN_GRADE_SCALE: Record<
-  HumanCheckGrade["points"],
-  Pick<HumanCheckGrade, "score" | "verdict">
-> = {
-  1: { score: 30, verdict: "fail" },
-  2: { score: 55, verdict: "fail" },
-  3: { score: 72, verdict: "borderline" },
-  4: { score: 85, verdict: "pass" },
-  5: { score: 95, verdict: "pass" },
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Validate the final grade as strictly as the autosaved draft. */
-function parseHumanGrade(value: unknown): HumanGrade | null {
-  if (
-    !isRecord(value) ||
-    !Number.isSafeInteger(value.gradedAt) ||
-    (value.gradedAt as number) < 0 ||
-    typeof value.shipIt !== "boolean" ||
-    !isRecord(value.scores) ||
-    Object.keys(value.scores).length !== EVAL_DEFS.length ||
-    (value.overallNote !== undefined &&
-      (typeof value.overallNote !== "string" ||
-        value.overallNote.length > MAX_GRADE_OVERALL_NOTE_LENGTH))
-  ) {
-    return null;
-  }
-
-  const scores: Record<string, HumanCheckGrade> = {};
-  for (const definition of EVAL_DEFS) {
-    const candidate = value.scores[definition.id];
-    if (!isRecord(candidate)) return null;
-    const points = candidate.points;
-    if (!Number.isInteger(points) || (points as number) < 1 || (points as number) > 5) {
-      return null;
-    }
-    const canonical = HUMAN_GRADE_SCALE[points as HumanCheckGrade["points"]];
-    if (
-      candidate.score !== canonical.score ||
-      candidate.verdict !== canonical.verdict ||
-      (candidate.note !== undefined &&
-        (typeof candidate.note !== "string" ||
-          candidate.note.length > MAX_GRADE_NOTE_LENGTH))
-    ) {
-      return null;
-    }
-    scores[definition.id] = {
-      points: points as HumanCheckGrade["points"],
-      ...canonical,
-      ...(typeof candidate.note === "string" && candidate.note.length > 0
-        ? { note: candidate.note }
-        : {}),
-    };
-  }
-
-  return {
-    gradedAt: value.gradedAt as number,
-    scores,
-    shipIt: value.shipIt,
-    ...(typeof value.overallNote === "string" && value.overallNote.length > 0
-      ? { overallNote: value.overallNote }
-      : {}),
-  };
-}
+const ALL_EVAL_IDS = EVAL_DEFS.map((definition) => definition.id);
 
 function persistedWorkflowMode(run: Run): WorkflowMode {
   return run.workflowMode ?? (run.workflowId === "lamp-v1" ? "lamp" : "flora");
@@ -733,8 +665,6 @@ function materializeServerResults(
           "anchor-gate",
           "conform",
           "sample",
-          "eval-align",
-          "eval-lighting-anchor",
           "gate",
           "fallback",
         ]
@@ -763,11 +693,7 @@ function materializeServerResults(
         nodeId,
         status: "skipped",
         detail: lamp
-          ? nodeId === "eval-align"
-            ? "not available — deterministic frame correlation is not implemented"
-            : nodeId === "eval-lighting-anchor"
-              ? "not applicable — Lamp does not create a Look Anchor"
-              : "not part of Lamp's two-pass workflow"
+          ? "not part of Lamp's two-pass workflow"
           : "not run — first cut sent to human grading",
       };
     }
@@ -1450,11 +1376,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   } catch {
     return NextResponse.json({ error: "Body must be JSON." }, { status: 400 });
   }
-  const grade = parseHumanGrade(body.humanGrade);
   const expectedGradedAt = body.expectedGradedAt;
-  if (!grade) {
-    return NextResponse.json({ error: "Invalid human grade." }, { status: 400 });
-  }
   if (
     expectedGradedAt !== null &&
     (typeof expectedGradedAt !== "number" || !Number.isFinite(expectedGradedAt))
@@ -1481,7 +1403,17 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     lampEvaluations
   );
   const authoritativeExecution = materialized.serverExecution;
-  const lamp = isLampExecution(authoritativeExecution);
+  const lamp = authoritativeExecution
+    ? isLampExecution(authoritativeExecution)
+    : persistedWorkflowMode(materialized) === "lamp";
+  const grade = parseHumanGrade({
+    value: body.humanGrade,
+    requiredEvalIds: lamp ? LAMP_EVAL_IDS : ALL_EVAL_IDS,
+    ...(lamp ? { acceptedLegacyEvalIds: ALL_EVAL_IDS } : {}),
+  });
+  if (!grade) {
+    return NextResponse.json({ error: "Invalid human grade." }, { status: 400 });
+  }
   const lastIteration = materialized.iterations.at(-1);
   const selectedIndex = materialized.bestIterationIndex;
   const shipped = lamp
