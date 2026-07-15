@@ -14,12 +14,10 @@ export function VerdictLine({
   run,
   iteration,
   threshold,
-  hideAutomated = false,
 }: {
   run: Run;
   iteration?: Iteration;
   threshold: number;
-  hideAutomated?: boolean;
 }) {
   const composite = iteration?.composite;
   const availableResultCount = iteration?.evalResults.length ?? 0;
@@ -40,19 +38,6 @@ export function VerdictLine({
       : iteration?.index === 1
         ? "Initial critique score"
         : "Available AI score";
-
-  if (hideAutomated) {
-    return (
-      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 border-y border-edge py-5">
-        <span className="text-sm font-medium text-ink">Final is ready for your grade</span>
-        <span className="text-pretty text-2xs text-faint">
-          Its AI scores are ready and hidden by default; reveal them from Grade only
-          when you want to see them.
-        </span>
-        <span className="ml-auto text-2xs text-muted">Initial + Final generated</span>
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 border-y border-edge py-5">

@@ -32,7 +32,7 @@ import {
   aiPassRatePct,
   finalLampIteration,
   isGradeable,
-  isLampBlindGradeLocked,
+  needsLampHumanGrade,
 } from "../components/grade/derive.ts";
 import type { BatchExecution, Run, VideoAsset } from "../lib/types.ts";
 import {
@@ -453,7 +453,7 @@ test("run-scoped grading definitions keep Lamp at nine and Flora at eleven", () 
   );
 });
 
-test("Lamp seals ordinary reads while allowing an explicit Grade reveal", () => {
+test("Lamp exposes Final scores ordinarily and seals only an explicit blind Grade read", () => {
   const initialArtifact = buildLampEvaluationArtifact({
     raw: { results: rawVisualResults() },
     iteration: 1,
@@ -475,30 +475,31 @@ test("Lamp seals ordinary reads while allowing an explicit Grade reveal", () => 
     artifact: initialArtifact,
     humanGradeSaved: false,
   });
-  const sealedFinal = projectLampEvaluationForRead({
+  const visibleFinal = projectLampEvaluationForRead({
     iteration: 2,
     artifact: finalArtifact,
     humanGradeSaved: false,
   });
-  const revealedFinal = projectLampEvaluationForRead({
+  const blindGradeFinal = projectLampEvaluationForRead({
+    iteration: 2,
+    artifact: finalArtifact,
+    humanGradeSaved: false,
+    hideFinalEvaluation: true,
+  });
+  const gradedFinal = projectLampEvaluationForRead({
     iteration: 2,
     artifact: finalArtifact,
     humanGradeSaved: true,
-  });
-  const explicitlyRevealedFinal = projectLampEvaluationForRead({
-    iteration: 2,
-    artifact: finalArtifact,
-    humanGradeSaved: false,
-    revealFinalEvaluation: true,
+    hideFinalEvaluation: true,
   });
 
   assert.equal(visibleInitial.evalResults.length, 9);
   assert.ok(visibleInitial.composite);
-  assert.deepEqual(sealedFinal, { evalResults: [] });
-  assert.equal(revealedFinal.evalResults.length, 9);
-  assert.ok(revealedFinal.composite);
-  assert.equal(explicitlyRevealedFinal.evalResults.length, 9);
-  assert.ok(explicitlyRevealedFinal.composite);
+  assert.equal(visibleFinal.evalResults.length, 9);
+  assert.ok(visibleFinal.composite);
+  assert.deepEqual(blindGradeFinal, { evalResults: [] });
+  assert.equal(gradedFinal.evalResults.length, 9);
+  assert.ok(gradedFinal.composite);
 });
 
 test("the first holistic evaluation compiles one v2 prompt with every correction", () => {
@@ -927,7 +928,7 @@ test("Lamp enters Grade only with a provider-backed v2 final", () => {
   assert.equal(isGradeable(finished), true);
 });
 
-test("blind lock trusts canonical Lamp execution instead of presentation status", () => {
+test("human-grade CTA trusts canonical Lamp execution instead of presentation status", () => {
   const execution = {
     runId: "blind_fixture",
     executionId: "lamp:blind_fixture",
@@ -943,9 +944,9 @@ test("blind lock trusts canonical Lamp execution instead of presentation status"
     humanGrade: { gradedAt: 1, scores: {}, shipIt: true },
   } as unknown as Run;
 
-  assert.equal(isLampBlindGradeLocked(browserClaimedReviewed), true);
+  assert.equal(needsLampHumanGrade(browserClaimedReviewed), true);
   assert.equal(
-    isLampBlindGradeLocked({
+    needsLampHumanGrade({
       ...browserClaimedReviewed,
       serverExecution: {
         ...execution,
@@ -955,9 +956,9 @@ test("blind lock trusts canonical Lamp execution instead of presentation status"
     }),
     true
   );
-  assert.equal(isLampBlindGradeLocked(humanGradeSaved), false);
+  assert.equal(needsLampHumanGrade(humanGradeSaved), false);
   assert.equal(
-    isLampBlindGradeLocked({
+    needsLampHumanGrade({
       ...browserClaimedReviewed,
       serverExecution: {
         ...execution,

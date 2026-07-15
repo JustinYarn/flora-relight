@@ -1111,7 +1111,7 @@ function AggregateSection({
             },
             {
               label: "After Final",
-              value: "Stores AI grades hidden by default for optional reveal and comparison",
+              value: "Shows AI grades in Runs; Grade mode starts blind with an optional reveal",
               color: "var(--accent)",
             },
           ]}

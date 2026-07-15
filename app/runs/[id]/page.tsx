@@ -20,7 +20,6 @@ import { EvalList } from "@/components/review/EvalList";
 import { ReviewActions } from "@/components/review/ReviewActions";
 import { LostGenerationRecovery } from "@/components/review/LostGenerationRecovery";
 import { WorkflowRail } from "@/components/review/WorkflowRail";
-import { isLampBlindGradeLocked } from "@/components/grade/derive";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
 
 const STATUS_COLOR: Record<RunStatus, string> = {
@@ -92,10 +91,9 @@ export default function RunReviewPage() {
 
   const latest = run.iterations[run.iterations.length - 1];
   const lampRun = isLampRun(run);
-  const blindGradeLocked = isLampBlindGradeLocked(run);
   // Default to Lamp's delivered v2 final; mid-flight, follow the newest stage.
   const autoKey = run.finalVideo ? "final" : latest ? `iter-${latest.index}` : null;
-  const activeKey = blindGradeLocked ? "final" : userSelected ?? autoKey;
+  const activeKey = userSelected ?? autoKey;
   const isFinal = activeKey === "final" && Boolean(run.finalVideo);
 
   const selectedIteration: Iteration | undefined = isFinal
@@ -137,7 +135,7 @@ export default function RunReviewPage() {
         </Badge>
         <span className="font-mono text-2xs text-faint">{shortId}</span>
         <span className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto sm:flex-nowrap sm:gap-3">
-          <RunTabs runId={run.id} active="review" journeyLocked={blindGradeLocked} />
+          <RunTabs runId={run.id} active="review" />
           <DownloadSideBySide run={run} />
         </span>
       </header>
@@ -170,23 +168,19 @@ export default function RunReviewPage() {
               run={run}
               iteration={selectedIteration}
               threshold={workflow.config.compositePassThreshold}
-              hideAutomated={blindGradeLocked}
             />
           </div>
 
           {/* ATTEMPT SWITCHER */}
-          {blindGradeLocked ? null : (
-            <div className="py-3">
-              <AttemptSwitcher run={run} activeKey={activeKey} onSelect={setUserSelected} />
-            </div>
-          )}
+          <div className="py-3">
+            <AttemptSwitcher run={run} activeKey={activeKey} onSelect={setUserSelected} />
+          </div>
 
           {/* EVALS — nine Lamp rows, eleven Flora rows */}
           <EvalList
             iteration={selectedIteration}
             definitions={evalDefsForRun(run)}
             evalsUnderway={run.status !== "running" || evalPhaseReached(run)}
-            hiddenUntilHumanGrade={blindGradeLocked}
           />
 
           {/* REVIEW */}

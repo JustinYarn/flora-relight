@@ -24,8 +24,8 @@ import {
 import type { GradeDraftSaveState } from "@/components/grade/useGradeDraft";
 
 /*
- * Independent grading of ONE clip. Final AI evidence is hidden by default so
- * the human read can stay un-anchored, but the grader may explicitly reveal
+ * Independent grading of ONE clip. Final AI evidence is hidden only in this
+ * workspace so the human read can stay un-anchored, but the grader may reveal
  * the already-saved result. That read stays local to this component and never
  * starts provider work or writes the evidence into the global run cache.
  */

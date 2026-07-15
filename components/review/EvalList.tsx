@@ -226,7 +226,6 @@ export function EvalList({
   iteration,
   definitions = EVAL_DEFS,
   evalsUnderway = true,
-  hiddenUntilHumanGrade = false,
 }: {
   iteration?: Iteration;
   definitions?: readonly EvalDefinition[];
@@ -236,8 +235,6 @@ export function EvalList({
    * runs behave exactly as before.
    */
   evalsUnderway?: boolean;
-  /** Keep ordinary Review reads hidden; Grade owns the explicit reveal control. */
-  hiddenUntilHumanGrade?: boolean;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const definitionIds = new Set(definitions.map((definition) => definition.id));
@@ -249,21 +246,6 @@ export function EvalList({
       : iteration?.index === 2
         ? "Final AI evaluation"
         : "AI evaluation";
-
-  if (hiddenUntilHumanGrade) {
-    return (
-      <section className="border-y border-edge py-6">
-        <h2 className="text-balance text-sm font-medium text-ink">
-          Final AI evaluation is hidden
-        </h2>
-        <p className="mt-1 max-w-2xl text-pretty text-xs leading-relaxed text-muted">
-          Grade Final without opening it, or use Show AI evaluation in the Grade
-          workspace if you want to inspect the saved scores first. Revealing it
-          reads the existing result and does not run another AI evaluation.
-        </p>
-      </section>
-    );
-  }
 
   return (
     <section>

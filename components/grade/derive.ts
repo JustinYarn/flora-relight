@@ -90,8 +90,8 @@ export function finalLampVideo(run: Run): VideoAsset | undefined {
   return run.finalVideo ?? finalLampIteration(run)?.generatedVideo;
 }
 
-/** Canonical blind lock: presentation status is browser-writable; execution is not. */
-export function isLampBlindGradeLocked(run: Run): boolean {
+/** Canonical ungraded-Final predicate: execution truth is server-owned. */
+export function needsLampHumanGrade(run: Run): boolean {
   return (
     run.serverExecution?.executionId.startsWith("lamp:") === true &&
     run.serverExecution.status === "awaiting_review" &&

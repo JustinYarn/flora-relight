@@ -8,11 +8,9 @@ import Link from "next/link";
 export function RunTabs({
   runId,
   active,
-  journeyLocked = false,
 }: {
   runId: string;
   active: "review" | "journey";
-  journeyLocked?: boolean;
 }) {
   const linkClass = (tab: "review" | "journey") =>
     `inline-flex min-h-10 items-center rounded-md px-3 py-1 text-sm transition-[color,background-color,transform] duration-150 ease-out active:scale-[0.96] ${
@@ -23,18 +21,9 @@ export function RunTabs({
       <Link href={`/runs/${runId}`} className={linkClass("review")}>
         Review
       </Link>
-      {journeyLocked ? (
-        <span
-          className="inline-flex min-h-10 cursor-not-allowed items-center rounded-md px-3 py-1 text-sm text-faint"
-          title="Journey unlocks after the human grade is saved"
-        >
-          Journey
-        </span>
-      ) : (
-        <Link href={`/runs/${runId}/journey`} className={linkClass("journey")}>
-          Journey
-        </Link>
-      )}
+      <Link href={`/runs/${runId}/journey`} className={linkClass("journey")}>
+        Journey
+      </Link>
     </nav>
   );
 }

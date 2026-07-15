@@ -360,7 +360,7 @@ function mergeLampEvaluationResults(
   candidate: Run,
   execution: RunExecution,
   evaluations: LampEvaluationProjection,
-  revealFinalEvaluation = false
+  hideFinalEvaluation = false
 ): void {
   const first = lampArtifact(evaluations.first, 1);
   const final = lampArtifact(evaluations.final, 2);
@@ -372,14 +372,13 @@ function mergeLampEvaluationResults(
     const iteration = candidate.iterations.find((item) => item.index === index);
     if (!iteration) continue;
     if (index === 2 && finalPrompt) iteration.megaPrompt = finalPrompt;
-    // The final paid artifact remains server-owned and is used by grade
-    // authorization, but normal reads must not prime the human grader. This
-    // also clears any browser-written/stale projection.
+    // The final paid artifact remains server-owned. Ordinary reads expose it;
+    // only the Grade feed requests a blind projection for an ungraded Final.
     const projection = projectLampEvaluationForRead({
       iteration: index,
       artifact,
       humanGradeSaved: candidate.humanGrade !== undefined,
-      revealFinalEvaluation,
+      hideFinalEvaluation,
     });
     iteration.evalResults = projection.evalResults;
     if (projection.composite) iteration.composite = projection.composite;
@@ -439,7 +438,7 @@ function materializeServerResults(
   paidCosts: PaidOperationCostEntry[] = [],
   execution?: RunExecution | null,
   lampEvaluations: LampEvaluationProjection = { first: null, final: null },
-  revealFinalEvaluation = false
+  hideFinalEvaluation = false
 ): Run {
   const materialized: Run = {
     ...run,
@@ -650,14 +649,13 @@ function materializeServerResults(
       }
     }
     if (lamp) {
-      // An explicit reveal is available only after the exact durable execution
-      // has reached its normal grading boundary. The paid artifact is read from
-      // its existing journal; this branch never invokes an evaluator.
+      // The Grade workspace alone can request a blind read. Every projection
+      // comes from the existing paid journal and never invokes an evaluator.
       mergeLampEvaluationResults(
         materialized,
         execution,
         lampEvaluations,
-        revealFinalEvaluation && durableExecution?.status === "awaiting_review"
+        hideFinalEvaluation && durableExecution?.status === "awaiting_review"
       );
     }
 
@@ -932,6 +930,9 @@ function decodeCursor(raw: string | null): RunPageCursor | undefined | null {
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const storage = getStorage();
+  const hideFinalEvaluation =
+    req.nextUrl.searchParams.get("hideFinalEvaluation") === "1" &&
+    req.nextUrl.searchParams.get("revealFinalEvaluation") !== "1";
 
   const requestedId = req.nextUrl.searchParams.get("id");
   if (requestedId !== null) {
@@ -944,15 +945,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       storage.getRunExecution(requestedId),
       readLampEvaluationProjection(storage, requestedId),
     ]);
-    const revealFinalEvaluation =
-      req.nextUrl.searchParams.get("revealFinalEvaluation") === "1";
     const run = storedRun
       ? materializeServerResults(
           storedRun,
           paidCosts,
           execution,
           lampEvaluations,
-          revealFinalEvaluation
+          hideFinalEvaluation
         )
       : null;
     if (!run) return NextResponse.json({ error: "Run not found." }, { status: 404 });
@@ -993,7 +992,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         readLampEvaluationProjection(storage, run.id),
       ]);
       return compactRun(
-        materializeServerResults(run, paidCosts, execution, lampEvaluations)
+        materializeServerResults(
+          run,
+          paidCosts,
+          execution,
+          lampEvaluations,
+          hideFinalEvaluation
+        )
       );
     })
   );

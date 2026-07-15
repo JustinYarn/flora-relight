@@ -149,8 +149,8 @@ export function GradeView(
       try {
         for (let page = 0; page < 20; page += 1) {
           const url = cursor
-            ? `/api/runs?limit=25&cursor=${encodeURIComponent(cursor)}`
-            : "/api/runs?limit=25";
+            ? `/api/runs?limit=25&hideFinalEvaluation=1&cursor=${encodeURIComponent(cursor)}`
+            : "/api/runs?limit=25&hideFinalEvaluation=1";
           const response = await fetch(url, {
             cache: "no-store",
             signal: controller.signal,
@@ -298,7 +298,7 @@ export function GradeView(
         const settled = await Promise.allSettled(
           runIds.map(async (runId) => {
             const response = await fetch(
-              `/api/runs?id=${encodeURIComponent(runId)}`,
+              `/api/runs?id=${encodeURIComponent(runId)}&hideFinalEvaluation=1`,
               { cache: "no-store", signal: controller.signal }
             );
             if (!response.ok) {

@@ -5,7 +5,7 @@ import Link from "next/link";
 import type { Run } from "@/lib/types";
 import { Badge, Button } from "@/components/ui";
 import { formatClock } from "@/lib/util";
-import { isLampBlindGradeLocked } from "@/components/grade/derive";
+import { needsLampHumanGrade } from "@/components/grade/derive";
 
 /**
  * Bottom-right sticky cluster while the run awaits review; after the decision
@@ -34,12 +34,12 @@ export function ReviewActions({
     );
   }
 
-  if (isLampBlindGradeLocked(run)) {
+  if (needsLampHumanGrade(run)) {
     return (
       <div className="flex flex-wrap items-center justify-end gap-3 py-4">
         <span className="text-pretty text-2xs text-faint">
-          The final video and AI evaluation are ready. The AI results stay hidden
-          by default, with an optional reveal inside Grade.
+          The final video and AI evaluation are ready here. Grade mode starts
+          with the AI results hidden so you can score independently.
         </span>
         <Link
           href={`/grade?run=${encodeURIComponent(run.id)}`}

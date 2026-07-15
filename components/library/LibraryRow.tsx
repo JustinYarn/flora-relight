@@ -9,7 +9,7 @@ import { useAppStore } from "@/lib/store";
 import { CheckList } from "@/components/library/CheckList";
 import { PairPlayer } from "@/components/library/PairPlayer";
 import { DownloadSideBySide } from "@/components/review/DownloadSideBySide";
-import { isLampBlindGradeLocked } from "@/components/grade/derive";
+import { needsLampHumanGrade } from "@/components/grade/derive";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import {
   STATUS_META,
@@ -154,7 +154,7 @@ function RowBody({ run }: { run: Run }) {
   const relit = shippedVideo(run);
   const fixedTwoPass =
     run.workflowMode === "lamp" || run.workflowId === "lamp-v1";
-  const blindGradeLocked = isLampBlindGradeLocked(run);
+  const needsHumanGrade = needsLampHumanGrade(run);
 
   return (
     <div className="space-y-5 pb-6 pl-1 pr-1">
@@ -172,15 +172,7 @@ function RowBody({ run }: { run: Run }) {
         }
       />
 
-      {blindGradeLocked ? (
-        <div className="rounded-xl bg-raised px-4 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-          <p className="text-sm font-medium text-ink">Final AI evaluation is ready</p>
-          <p className="mt-1 text-pretty text-2xs leading-relaxed text-muted">
-            It stays hidden by default in Grade. You can reveal it there when you
-            want, or grade the Final without looking.
-          </p>
-        </div>
-      ) : ordered.length > 0 ? (
+      {ordered.length > 0 ? (
         <div className="space-y-2">
           <AttemptChips
             iterations={ordered}
@@ -203,7 +195,7 @@ function RowBody({ run }: { run: Run }) {
         />
       )}
 
-      {!blindGradeLocked && fixes.length > 0 ? (
+      {fixes.length > 0 ? (
         <div>
           <p className="mb-1.5 text-2xs uppercase tracking-[0.14em] text-faint">
             {fixedTwoPass ? "Corrections applied to Final" : "Fixes that drove the final attempt"}
@@ -226,16 +218,14 @@ function RowBody({ run }: { run: Run }) {
         >
           Open review →
         </Link>
-        {!blindGradeLocked ? (
-          <Link
-            href={`/runs/${run.id}/journey`}
-            className="text-sm text-muted transition hover:text-ink"
-          >
-            Open journey →
-          </Link>
-        ) : null}
+        <Link
+          href={`/runs/${run.id}/journey`}
+          className="text-sm text-muted transition hover:text-ink"
+        >
+          Open journey →
+        </Link>
         <span className="ml-auto flex items-center gap-2">
-          {blindGradeLocked ? (
+          {needsHumanGrade ? (
             <Link
               href={`/grade?run=${encodeURIComponent(run.id)}`}
               className="inline-flex min-h-10 items-center rounded-lg bg-pass px-3.5 py-1.5 text-sm font-medium text-canvas transition-transform active:scale-[0.96]"
