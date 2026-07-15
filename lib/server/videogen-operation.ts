@@ -21,7 +21,12 @@ import {
   audioPresenceMatchesSource,
 } from "@/lib/server/audio-integrity";
 import { getStorage, scratchMediaPath, type StorageDriver } from "@/lib/server/storage";
-import { authorizedRawOutputCostUsd } from "@/lib/server/video-generation-cost";
+import { assertAuthorizedRawOutputDuration } from "@/lib/server/video-generation-cost";
+import {
+  omniCostFromUsage,
+  requireOmniUsage,
+} from "@/lib/cost";
+import { buildFreshVideoGenerationRequest } from "@/lib/video-generation-request";
 import {
   automaticVideoGenerationStopReason,
   videoGenerationWorkflowErrorMessage,
@@ -226,32 +231,16 @@ export async function startVideoGeneration(
   }
   assertVideoGenerationAuthorized(run, input.iteration);
 
-  // Iteration presentation state is browser-writable. Chaining may use only
-  // the canonical completed provider journal for the preceding generation.
-  const previousInteractionId = run.providerOperations?.find(
-    (item) =>
-      item.kind === "video_generation" &&
-      item.iteration === input.iteration - 1 &&
-      item.status === "completed" &&
-      item.result
-  )?.providerInteractionId;
   const uploadUri =
     input.preparedUploadUri ?? (await prepareVideoGenerationStart(input.runId));
   const startedAt = existing?.startedAt ?? Date.now();
   const interaction = await getGemini().interactions.create(
-    {
+    buildFreshVideoGenerationRequest({
+      iteration: input.iteration,
       model: OMNI_VIDEO_MODEL,
-      input: [
-        { type: "text", text: input.prompt },
-        { type: "video", uri: uploadUri, mime_type: "video/mp4" },
-      ],
-      response_format: { type: "video", delivery: "uri" },
-      background: true,
-      store: true,
-      ...(previousInteractionId
-        ? { previous_interaction_id: previousInteractionId }
-        : {}),
-    },
+      prompt: input.prompt,
+      uploadUri,
+    }),
     // A transport retry can create a second billed interaction when the first
     // response is ambiguous. The durable application claim owns all retry
     // policy, so the SDK must make exactly one HTTP attempt here.
@@ -364,6 +353,30 @@ export async function pollVideoGeneration(
     throw new Error("Completed video generation returned no output video URI.");
   }
 
+  let usage: VideoGenerationOperationResult["usage"];
+  let costUsd: number;
+  try {
+    usage = requireOmniUsage(interaction.usage);
+    costUsd = omniCostFromUsage(usage);
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Completed Omni interaction returned invalid usage metadata.";
+    await writeVideoGenerationOperation(input.runId, {
+      id: operationId,
+      provider: "gemini",
+      kind: "video_generation",
+      iteration: input.iteration,
+      providerInteractionId: input.interactionId,
+      status: "reconcile_required",
+      startedAt,
+      updatedAt: Date.now(),
+      error: message,
+    });
+    throw new Error(message);
+  }
+
   const finalization = await storage.claimVideoFinalization(
     input.runId,
     input.iteration,
@@ -408,11 +421,10 @@ export async function pollVideoGeneration(
       await prepared.storage.putMediaFromFile(input.runId, genName, genPath);
     }
     const rawProbe = await probe(genPath);
-    let costUsd: number;
     try {
-      // Provider billing is based on generated output before `-shortest`
-      // audio remux can shorten the delivered review artifact.
-      costUsd = authorizedRawOutputCostUsd(rawProbe.durationSec, {
+      // Keep the immutable output-duration authorization as a strict artifact
+      // boundary. Actual dollars come only from the provider usage above.
+      assertAuthorizedRawOutputDuration(rawProbe.durationSec, {
         maxAuthorizedCostMicros:
           latestOperation?.maxAuthorizedCostMicros ??
           existing.maxAuthorizedCostMicros,
@@ -424,7 +436,7 @@ export async function pollVideoGeneration(
       const message =
         error instanceof Error
           ? error.message
-          : "The raw provider output cost could not be authorized.";
+          : "The raw provider output could not be authorized.";
       await writeVideoGenerationOperation(input.runId, {
         id: operationId,
         provider: "gemini",
@@ -518,6 +530,7 @@ export async function pollVideoGeneration(
       rawUrl: await prepared.storage.publicMediaUrl(input.runId, genName),
       durationSec: finalProbe.durationSec,
       audioVerified,
+      usage,
       costUsd,
     };
     await writeVideoGenerationOperation(input.runId, {

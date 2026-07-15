@@ -25,9 +25,10 @@ Each live Lamp run has one fixed, auditable path:
 
 `temporal-alignment` is currently unavailable because its deterministic live
 correlation metric is not implemented. `lighting-match-to-anchor` is inapplicable
-because Lamp does not create or condition on a Look Anchor. Those rows remain visible
-to the human grader as unavailable/inapplicable rather than receiving invented AI
-scores. Lamp supports both single runs and server-owned batches; every admitted
+because Lamp does not create or condition on a Look Anchor, so that row is absent
+from Lamp's AI and human grading contracts. Temporal alignment remains visible to
+the human grader as unavailable rather than receiving an invented AI score. Lamp
+supports both single runs and server-owned batches; every admitted
 batch member executes this same two-generation/two-evaluation contract and enters
 the same blind per-video grading flow.
 
@@ -369,30 +370,16 @@ one-line stats strip (total generations, review counts, final AI scores, actual 
 spend) and filters (clip search, status chips, live-vs-simulated toggle, sort). Lamp rows
 disclose the initial and final videos, the correction prompt derived from the initial
 critique, and the available final evaluation results. The temporal-alignment row is marked
-unavailable and anchor-match is marked inapplicable; neither receives a synthetic score.
+unavailable; anchor matching is omitted because it is not part of Lamp's rubric.
 Simulated runs are always badged, older Flora records remain readable, and records missing
 relit files fall back to the original thumbnail.
-
-## Sharing results
-
-Every run page has a **Share snapshot** button. It compiles that run into a single,
-fully self-contained HTML file (`relight-review-<id>.html`) and downloads it: the clip is
-embedded as a base64 data URI (~40 MB cap), alongside the original-vs-relit comparison, the
-composite verdict, and the evaluation rows with scores, confidence, and violations. No server,
-no tracking, no dependencies — the file opens anywhere and is the product. In mock mode the
-"relit" side is the embedded original replayed through the final iteration's simulated CSS
-filter and is labeled as such; for live runs, the journaled final generated video gets
-embedded instead. The snapshot exists so teammates can judge whether the evaluations match
-their expectations of the video: each eval row carries agree/disagree toggles and a free-text
-note, and a **Copy feedback summary** bar composes the whole review (clip, composite,
-per-eval verdicts, reviewer reads, notes) into plain text on the clipboard, ready to paste
-back to the team.
 
 ## Batch status
 
 Create accepts multiple clips for either method. The server freezes one immutable
 `BatchExecution` before dispatch, reserves each admitted member's full worst-case
-cost, and runs at most two children concurrently. Flora reserves its one-cut amount.
+cost allowance, and runs at most two children concurrently. Flora reserves a
+conservative one-cut amount that covers video, input, and thinking usage.
 Lamp separately reserves two generations plus two holistic evaluations per member;
 it never reuses Flora's smaller reservation. Each Lamp member keeps its own Initial,
 Final, evaluation journals, human grade, and per-check AI comparison. Closing
@@ -439,7 +426,8 @@ media plumbing stay on server routes:
 2. **Holistic evaluation:** one Gemini call evaluates all eight applicable visual rubrics for
    each generated video. The server validates that the response contains the complete
    applicable set. Original-audio integrity is recorded separately from deterministic media
-   verification. Temporal alignment remains unavailable and anchor match is inapplicable.
+   verification. Temporal alignment remains unavailable; anchor matching is not part of
+   Lamp's rubric because Lamp has no Look Anchor.
 3. **Server media service:** ffmpeg handles ingest probing/trimming, audio demux/remux,
    generated-video inspection, verification, and exports. `ffmpeg-static` is traced into
    hosted functions; local development may use the installed binary.

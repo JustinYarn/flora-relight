@@ -399,9 +399,9 @@ export interface Iteration {
   index: number; // 1-based
   megaPrompt: MegaPrompt;
   /**
-   * Live mode: interaction id of THIS iteration's video generation. The next
-   * iteration passes it as previous_interaction_id so corrections run as
-   * multi-turn refinements (the Stage-A anchor chain is tracked separately).
+   * Live mode: identity of THIS iteration's video generation. Later
+   * iterations are fresh source-based requests and never consume this as
+   * provider context.
    */
   interactionId?: string;
   /** Stage A artifact: the approved relit keyframe for this iteration. */
@@ -496,10 +496,10 @@ export interface HumanCheckGrade {
 }
 
 /**
- * A human grade of one run's shipped cut across the same 11 rubric rows. Lamp
- * starts with AI evidence hidden so the grader can avoid anchoring, while an
- * explicit reveal remains available. Results compares the saved human grade
- * against Lamp Final's evalResults to calibrate the judge rubrics.
+ * A human grade of one run's shipped cut across that workflow's applicable
+ * rubric rows. Lamp starts with AI evidence hidden so the grader can avoid
+ * anchoring, while an explicit reveal remains available. Results compares the
+ * saved human grade against Lamp Final's evalResults to calibrate the judges.
  */
 export interface HumanGrade {
   gradedAt: number;
@@ -515,7 +515,26 @@ export interface VideoGenerationOperationResult {
   rawUrl: string;
   durationSec: number;
   audioVerified: boolean;
+  /** Exact token counters returned by the completed Interactions response. */
+  usage: OmniUsageSnapshot;
   costUsd: number;
+}
+
+/** Billable Interactions counters. Extra provider fields are persisted too. */
+export interface OmniUsageSnapshot {
+  total_input_tokens: number;
+  total_output_tokens: number;
+  output_tokens_by_modality: Array<{ modality: string; tokens: number }>;
+  total_thought_tokens?: number;
+  [key: string]: unknown;
+}
+
+/** Billable GenerateContent counters. Extra provider fields are persisted too. */
+export interface GeminiProUsageSnapshot {
+  promptTokenCount: number;
+  candidatesTokenCount: number;
+  thoughtsTokenCount?: number;
+  [key: string]: unknown;
 }
 
 /** Server-owned journal entry for one potentially billed background operation. */
@@ -592,7 +611,7 @@ export interface SpendApproval {
   durationSec: number;
   approvedAt: number;
   expiresAt: number;
-  /** Worst-case run estimate authorized by the confirmation, in USD. */
+  /** Conservative run reservation authorized by the confirmation, in USD. */
   maxUsd: number;
   maxIterations: number;
 }
@@ -732,7 +751,7 @@ export interface BatchExecutionMember {
   runId: string;
   position: number;
   state: BatchExecutionMemberState;
-  /** Worst-case approved reservation for this member, in millionths of USD. */
+  /** Conservative approved reservation for this member, in millionths of USD. */
   maxReservedMicros: number;
   /** Confirmed terminal spend, in millionths of USD. */
   actualMicros?: number;

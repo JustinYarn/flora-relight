@@ -3,7 +3,11 @@
 import { useMemo } from "react";
 import Link from "next/link";
 import type { Run } from "@/lib/types";
-import { EVAL_DEFS, getEvalDef } from "@/lib/prompts/eval-defs";
+import {
+  EVAL_DEFS,
+  getEvalDef,
+  humanGradeEvalDefsForMode,
+} from "@/lib/prompts/eval-defs";
 import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
 import { SectionTitle, verdictColor } from "@/components/ui";
 import {
@@ -12,7 +16,9 @@ import {
   biggestDivergence,
   collectComparisons,
   finalLampIteration,
+  humanGradeEvalDefsForRun,
   humanVerdictWord,
+  isLampRun,
   overallAgreementPct,
   perCheckStats,
   shipRatePct,
@@ -65,15 +71,16 @@ function isUnavailable(evalId: string): boolean {
   );
 }
 
-function unavailableLabel(evalId: string): string {
-  return evalId === "lighting-match-to-anchor" ? "Not applicable" : "Unavailable";
-}
-
 function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean }) {
   const final = finalLampIteration(run);
   const aiResults = final?.evalResults ?? [];
-  const applicableCount = EVAL_DEFS.length - LAMP_UNAVAILABLE_EVAL_IDS.length;
-  const availableCount = aiResults.filter((result) => !isUnavailable(result.evalId)).length;
+  const lamp = isLampRun(run);
+  const definitions = humanGradeEvalDefsForRun(run);
+  const applicableCount =
+    definitions.length - (lamp ? LAMP_UNAVAILABLE_EVAL_IDS.length : 0);
+  const availableCount = aiResults.filter(
+    (result) => !lamp || !isUnavailable(result.evalId)
+  ).length;
 
   return (
     <details
@@ -111,11 +118,11 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
           <span className="text-right">gap</span>
         </div>
           <div className="divide-y divide-edge">
-            {EVAL_DEFS.map((def) => {
+            {definitions.map((def) => {
             const human = run.humanGrade?.scores[def.id];
             const ai = aiResults.find((result) => result.evalId === def.id);
             const gap =
-              human && ai && !isUnavailable(def.id)
+              human && ai && !(lamp && isUnavailable(def.id))
                 ? human.score - ai.score
                 : undefined;
             return (
@@ -136,16 +143,12 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
                   )}
                 </span>
                 <span className="tabular-nums">
-                  {isUnavailable(def.id) ? (
+                  {lamp && isUnavailable(def.id) ? (
                     <span
                       className="text-faint"
-                      title={
-                        def.id === "temporal-alignment"
-                          ? "Lamp does not yet implement the documented local temporal-correlation metric."
-                          : "Lamp has no Look Anchor, so this rubric does not apply."
-                      }
+                      title="Lamp does not yet implement the documented local temporal-correlation metric."
                     >
-                      {unavailableLabel(def.id)}
+                      Unavailable
                     </span>
                   ) : ai ? (
                     <span style={{ color: verdictColor(ai.verdict) }}>
@@ -181,7 +184,17 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
 
 export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
   const comps = useMemo(() => collectComparisons(gradedRuns), [gradedRuns]);
-  const stats = useMemo(() => perCheckStats(comps), [comps]);
+  const statDefinitions = useMemo(
+    () =>
+      gradedRuns.every(isLampRun)
+        ? humanGradeEvalDefsForMode("lamp")
+        : EVAL_DEFS,
+    [gradedRuns]
+  );
+  const stats = useMemo(
+    () => perCheckStats(comps, statDefinitions),
+    [comps, statDefinitions]
+  );
   const overall = overallAgreementPct(comps);
   const divergence = biggestDivergence(stats);
   const shipRate = shipRatePct(gradedRuns);
@@ -264,7 +277,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         </p>
       ) : null}
 
-      {/* PER-CHECK TABLE — 11 flat rows */}
+      {/* PER-CHECK TABLE — mode-applicable flat rows */}
       <section className="pt-6">
         <SectionTitle>Check by check</SectionTitle>
         <div className="flex items-center gap-x-5 border-b border-edge pb-2 text-2xs uppercase tracking-[0.14em] text-faint">
@@ -292,9 +305,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
                   </span>
                   <span className="flex-1 text-2xs text-faint">
                     {isUnavailable(s.evalId)
-                      ? s.evalId === "temporal-alignment"
-                        ? "unavailable in Lamp — temporal correlation is not implemented yet"
-                        : "not applicable in Lamp — there is no Look Anchor"
+                      ? "unavailable in Lamp — temporal correlation is not implemented yet"
                       : "no final AI result was returned for a graded video"}
                   </span>
                 </div>

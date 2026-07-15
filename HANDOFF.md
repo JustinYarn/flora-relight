@@ -52,12 +52,14 @@ Final is always the grading target; Lamp does not choose a best-scoring attempt 
 loop again. It does not create a manifest or Look Anchor, run a Claude second
 judge, gate on a pass threshold, or invoke a fallback.
 
-The canonical human rubric still has 11 rows. Two AI rows intentionally have no
+Lamp's human rubric has ten applicable rows. One row intentionally has no AI
 score:
 
 - `temporal-alignment` is **unavailable** because the deterministic live
   correlation metric is not implemented.
-- `lighting-match-to-anchor` is **inapplicable** because Lamp has no Look Anchor.
+
+`lighting-match-to-anchor` is not part of Lamp's AI or human rubric because
+Lamp has no Look Anchor.
 
 The Grade Results view must preserve those truth boundaries instead of converting
 missing results to zero or presenting invented agreement.
@@ -95,7 +97,7 @@ missing results to zero or presenting invented agreement.
   Normal run reads explicitly clear Final's AI projection. An exact-run,
   no-store reveal request can expose that already-saved evidence inside Grade
   without rerunning a provider. A successful human-grade save remains the reveal
-  boundary for Review, Journey, Results, and share/read surfaces.
+  boundary for Review, Journey, and Results.
 - **Deletion:** deleted run ids are tombstoned. Normal deletion is refused while
   an execution, batch membership, or provider journal is active or needs
   reconciliation.

@@ -3,12 +3,14 @@
 import Link from "next/link";
 import { useMemo, useState, type ReactNode } from "react";
 import { Badge, Card, SectionTitle } from "@/components/ui";
-import { RELIGHT_BASE_PROMPT } from "@/lib/prompts/base-prompt";
 import { MANIFEST_PROMPT } from "@/lib/prompts/manifest";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import {
+  EVAL_DEFS,
+  humanGradeEvalDefsForMode,
+} from "@/lib/prompts/eval-defs";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { useAppStore } from "@/lib/store";
-import type { EvalDefinition, EvalMethod } from "@/lib/types";
+import type { EvalDefinition, EvalMethod, WorkflowMode } from "@/lib/types";
 import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
 import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
 
@@ -178,19 +180,23 @@ function checkKind(def: EvalDefinition): {
 function CheckRow({
   def,
   index,
+  workflowMode,
   open,
   onToggle,
 }: {
   def: EvalDefinition;
   index: number;
+  workflowMode: WorkflowMode;
   open: boolean;
   onToggle: () => void;
 }) {
   const kind = checkKind(def);
   const nodeId = EVAL_NODE_IDS.get(def.id);
-  const unavailable = LAMP_UNAVAILABLE_EVAL_IDS.includes(
-    def.id as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
-  );
+  const unavailable =
+    workflowMode === "lamp" &&
+    LAMP_UNAVAILABLE_EVAL_IDS.includes(
+      def.id as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
+    );
 
   return (
     <article
@@ -222,11 +228,7 @@ function CheckRow({
                 )
               ) : null}
               {unavailable ? (
-                <Badge color="var(--faint)">
-                  {def.id === "lighting-match-to-anchor"
-                    ? "not applicable in Lamp"
-                    : "unavailable in Lamp"}
-                </Badge>
+                <Badge color="var(--faint)">unavailable in Lamp</Badge>
               ) : null}
             </span>
             <span className="mt-1 block text-pretty text-xs leading-relaxed text-muted">
@@ -344,11 +346,17 @@ export default function PromptsPage() {
   const [filter, setFilter] = useState<CheckFilter>("all");
   const [openId, setOpenId] = useState<string | null>(null);
 
-  const base = RELIGHT_BASE_PROMPT;
+  const base = mega.base;
+  const workflowEvalDefs = useMemo(() => {
+    const applicableIds = new Set(
+      humanGradeEvalDefsForMode(workflowMode).map((definition) => definition.id)
+    );
+    return ORDERED_EVAL_DEFS.filter((definition) => applicableIds.has(definition.id));
+  }, [workflowMode]);
 
   const filteredDefs = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return ORDERED_EVAL_DEFS.filter((def) => {
+    return workflowEvalDefs.filter((def) => {
       const codeOnly = !def.promptTemplate;
       if (filter === "rubric" && codeOnly) return false;
       if (filter === "code" && !codeOnly) return false;
@@ -366,7 +374,7 @@ export default function PromptsPage() {
         .toLowerCase()
         .includes(needle);
     });
-  }, [filter, query]);
+  }, [filter, query, workflowEvalDefs]);
 
   return (
     <main className="mx-auto max-w-6xl px-5 pb-16 pt-8">
@@ -385,7 +393,8 @@ export default function PromptsPage() {
         <p className="mt-2 max-w-3xl text-pretty text-2xs leading-relaxed text-faint">
           Each generated video gets one whole-video evaluation covering eight
           visual rubrics plus deterministic audio. Temporal correlation is
-          unavailable; Look Anchor matching does not apply because Lamp has no anchor.
+          unavailable; anchor matching is not part of Lamp&apos;s rubric because
+          Lamp has no anchor.
         </p>
       </header>
 
@@ -565,7 +574,9 @@ export default function PromptsPage() {
             </p>
           </div>
           <Badge>
-            9 applicable · 2 explicitly excluded · 8 active visual rubrics · 1 active code check
+            {workflowMode === "lamp"
+              ? "9 applicable · 1 unavailable · 8 active visual rubrics · 1 active code check"
+              : `${workflowEvalDefs.length} Flora checks`}
           </Badge>
         </div>
 
@@ -618,10 +629,12 @@ export default function PromptsPage() {
             </div>
           </div>
           <p className="mt-2 text-2xs tabular-nums text-faint" role="status">
-            Showing {filteredDefs.length} of {EVAL_DEFS.length} checks
+            Showing {filteredDefs.length} of {workflowEvalDefs.length} checks
             {query || filter !== "all"
               ? ""
-              : " · Lamp returns 8 visual results together and appends deterministic audio · timing is unavailable · anchor match is inapplicable"}
+              : workflowMode === "lamp"
+                ? " · Lamp returns 8 visual results together and appends deterministic audio · timing is unavailable"
+                : ""}
           </p>
         </Card>
 
@@ -631,7 +644,8 @@ export default function PromptsPage() {
               <CheckRow
                 key={def.id}
                 def={def}
-                  index={ORDERED_EVAL_DEFS.indexOf(def)}
+                index={workflowEvalDefs.indexOf(def)}
+                workflowMode={workflowMode}
                 open={openId === def.id}
                 onToggle={() =>
                   setOpenId((current) => (current === def.id ? null : def.id))

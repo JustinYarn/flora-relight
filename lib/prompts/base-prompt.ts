@@ -89,3 +89,27 @@ export const RELIGHT_BASE_PROMPT: RelightBasePrompt = {
     "Do not apply any stylistic look — no film emulation, HDR tone-mapping, painterly or anime rendering, or color grading beyond the specified lighting. This is a photorealistic relight only.",
   ],
 };
+
+/**
+ * Lamp generates directly from the source video and a lighting specification.
+ * It has no approved Look Anchor, so its task must not inherit Flora's
+ * anchor-conditioned generation contract.
+ */
+export const LAMP_RELIGHT_BASE_PROMPT: RelightBasePrompt = {
+  ...RELIGHT_BASE_PROMPT,
+  task: [
+    "Relight and color-grade this exact video using the lighting specification below.",
+    "Treat the original video as structural and temporal ground truth.",
+    "Preserve identity, geometry, performance, lip motion, framing, wardrobe, and environment.",
+    "The lighting specification is the only creative direction.",
+    "If a difference cannot be explained by illumination or color response, do not make it.",
+  ].join(" "),
+  locks: {
+    ...RELIGHT_BASE_PROMPT.locks,
+    audio: [
+      "The source audio may be used only as timing context for lip motion and events in the original performance.",
+      "Do not change, re-time, or reinterpret the performance based on the audio.",
+      "Any provider-generated audio is discarded after generation; the canonical source audio is restored and verified before the result can continue.",
+    ].join(" "),
+  },
+};

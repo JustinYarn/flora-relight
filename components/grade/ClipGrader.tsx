@@ -10,7 +10,7 @@ import type {
 } from "@/lib/types";
 import { useAppStore } from "@/lib/store";
 import { markServerRunObserved } from "@/lib/persist";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import { humanGradeEvalDefsForMode } from "@/lib/prompts/eval-defs";
 import { Button, verdictColor } from "@/components/ui";
 import { PairPlayer } from "@/components/library/PairPlayer";
 import { formatRunDate } from "@/components/library/derive";
@@ -138,13 +138,18 @@ export function ClipGrader({
     run.workflowMode === "lamp" ||
     run.workflowId === "lamp-v1" ||
     run.serverExecution?.executionId.startsWith("lamp:") === true;
+  const gradeDefinitions = useMemo(
+    () => humanGradeEvalDefsForMode(lampRun ? "lamp" : "flora"),
+    [lampRun]
+  );
   const aiHeadingId = `final-ai-heading-${run.id}`;
   const aiPanelId = `final-ai-panel-${run.id}`;
   const answeredCount = useMemo(
-    () => EVAL_DEFS.filter((d) => answers[d.id]).length,
-    [answers]
+    () => gradeDefinitions.filter((definition) => answers[definition.id]).length,
+    [answers, gradeDefinitions]
   );
-  const complete = answeredCount === EVAL_DEFS.length && shipIt !== undefined;
+  const complete =
+    answeredCount === gradeDefinitions.length && shipIt !== undefined;
 
   useEffect(
     () => () => {
@@ -207,7 +212,7 @@ export function ClipGrader({
   const save = async (): Promise<void> => {
     if (!complete || shipIt === undefined || submitting) return;
     const scores: Record<string, HumanCheckGrade> = {};
-    for (const def of EVAL_DEFS) {
+    for (const def of gradeDefinitions) {
       const a = answers[def.id];
       if (!a) return;
       const p = scalePoint(a.points);
@@ -381,15 +386,18 @@ export function ClipGrader({
               aria-labelledby={aiHeadingId}
               className="mt-4 border-t border-edge pt-4"
             >
-              <EvalList iteration={revealedFinal} />
+              <EvalList
+                iteration={revealedFinal}
+                workflowMode={lampRun ? "lamp" : "flora"}
+              />
             </div>
           ) : null}
         </section>
       ) : null}
 
-      {/* The 11 checks — flat rows, same order as everywhere else in the app */}
+      {/* Applicable checks — flat rows, same order as everywhere else in the app */}
       <section className="mt-6 divide-y divide-edge border-b border-t border-edge">
-        {EVAL_DEFS.map((def) => (
+        {gradeDefinitions.map((def) => (
           <div
             key={def.id}
             className="flex flex-wrap items-start gap-x-5 gap-y-2 py-3.5"
@@ -445,10 +453,12 @@ export function ClipGrader({
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span
             className={`text-2xs tabular-nums ${
-              answeredCount === EVAL_DEFS.length ? "text-pass" : "text-muted"
+              answeredCount === gradeDefinitions.length
+                ? "text-pass"
+                : "text-muted"
             }`}
           >
-            {answeredCount} of {EVAL_DEFS.length} answered
+            {answeredCount} of {gradeDefinitions.length} answered
           </span>
           <span className="flex items-center gap-1.5">
             <span className="text-xs text-muted">Would you ship this cut?</span>
@@ -519,7 +529,7 @@ export function ClipGrader({
               title={
                 complete
                   ? undefined
-                  : "answer all 11 checks and the ship question first"
+                  : `answer all ${gradeDefinitions.length} checks and the ship question first`
               }
             >
               {submitting ? "Saving grade…" : "Save grade & next"}

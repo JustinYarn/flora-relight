@@ -6,6 +6,7 @@ import {
 import type {
   Correction,
   EvalResult,
+  GeminiProUsageSnapshot,
   IterationComposite,
   JudgeVerdict,
   MegaPrompt,
@@ -18,9 +19,8 @@ import { clamp, verdictFor } from "./util.ts";
 /**
  * Lamp deliberately evaluates only checks it can truthfully perform in one
  * whole-video pass. Temporal alignment still lacks its documented local
- * correlation metric, and anchor matching is inapplicable because Lamp has no
- * Look Anchor stage. Human grading keeps all 11 rows so those gaps remain
- * visible instead of being manufactured as passes.
+ * correlation metric. Anchor matching is not part of Lamp's AI or human
+ * contract because Lamp has no Look Anchor stage.
  */
 export const LAMP_VISUAL_EVAL_DEFS = EVAL_DEFS.filter(
   (definition) =>
@@ -30,7 +30,6 @@ export const LAMP_VISUAL_EVAL_DEFS = EVAL_DEFS.filter(
 
 export const LAMP_UNAVAILABLE_EVAL_IDS = [
   "temporal-alignment",
-  "lighting-match-to-anchor",
 ] as const;
 
 export const LAMP_EVALUATOR_VERSION = "lamp-holistic-v1";
@@ -132,7 +131,9 @@ export interface LampEvaluationArtifact {
   version: typeof LAMP_EVALUATOR_VERSION;
   iteration: number;
   evalResults: EvalResult[];
-  /** Fixed provider estimate recorded by the paid-operation journal. */
+  /** Exact token counters returned by GenerateContent. */
+  usage: GeminiProUsageSnapshot;
+  /** Usage-derived provider charge recorded by the paid-operation journal. */
   costUsd: number;
 }
 
@@ -264,6 +265,7 @@ export function buildLampEvaluationArtifact(input: {
   iteration: number;
   audioVerified: boolean;
   previousResults?: EvalResult[];
+  usage: GeminiProUsageSnapshot;
   costUsd: number;
 }): LampEvaluationArtifact {
   if (
@@ -321,6 +323,7 @@ export function buildLampEvaluationArtifact(input: {
     version: LAMP_EVALUATOR_VERSION,
     iteration: input.iteration,
     evalResults: ordered,
+    usage: input.usage,
     costUsd: input.costUsd,
   };
 }
@@ -334,6 +337,9 @@ export function isLampEvaluationArtifact(
     value.version !== LAMP_EVALUATOR_VERSION ||
     !Number.isSafeInteger(value.iteration) ||
     !Array.isArray(value.evalResults) ||
+    !isRecord(value.usage) ||
+    !Number.isSafeInteger(value.usage.promptTokenCount) ||
+    !Number.isSafeInteger(value.usage.candidatesTokenCount) ||
     typeof value.costUsd !== "number" ||
     !Number.isFinite(value.costUsd)
   ) {

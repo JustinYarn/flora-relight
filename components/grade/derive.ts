@@ -16,7 +16,10 @@ import type {
   Verdict,
   VideoAsset,
 } from "@/lib/types";
-import { EVAL_DEFS } from "../../lib/prompts/eval-defs.ts";
+import {
+  EVAL_DEFS,
+  humanGradeEvalDefsForMode,
+} from "../../lib/prompts/eval-defs.ts";
 import {
   lampCompositeForResults,
   LAMP_UNAVAILABLE_EVAL_IDS,
@@ -74,12 +77,16 @@ export function isGradeable(run: Run): boolean {
   );
 }
 
-function isLampRun(run: Run): boolean {
+export function isLampRun(run: Run): boolean {
   return (
     run.workflowMode === "lamp" ||
     run.workflowId === "lamp-v1" ||
     run.serverExecution?.executionId.startsWith("lamp:") === true
   );
+}
+
+export function humanGradeEvalDefsForRun(run: Run) {
+  return humanGradeEvalDefsForMode(isLampRun(run) ? "lamp" : "flora");
 }
 
 /** Lamp's human grade and comparison target is strictly v2. */
@@ -125,8 +132,9 @@ export function collectComparisons(gradedRuns: Run[]): CheckComparison[] {
   const out: CheckComparison[] = [];
   for (const run of gradedRuns) {
     const aiResults = finalLampIteration(run)?.evalResults ?? [];
-    for (const def of EVAL_DEFS) {
+    for (const def of humanGradeEvalDefsForRun(run)) {
       if (
+        isLampRun(run) &&
         LAMP_UNAVAILABLE_EVAL_IDS.includes(
           def.id as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
         )
@@ -165,9 +173,12 @@ export interface CheckStats {
   direction: Direction;
 }
 
-/** Per-check aggregate over a set of comparisons (11 entries, EVAL_DEFS order). */
-export function perCheckStats(comps: CheckComparison[]): CheckStats[] {
-  return EVAL_DEFS.map((def) => {
+/** Per-check aggregate over the supplied mode-specific definitions. */
+export function perCheckStats(
+  comps: CheckComparison[],
+  definitions = EVAL_DEFS
+): CheckStats[] {
+  return definitions.map((def) => {
     const mine = comps.filter((c) => c.evalId === def.id);
     if (mine.length === 0) {
       return {

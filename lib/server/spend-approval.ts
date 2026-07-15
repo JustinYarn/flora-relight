@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
   FIRST_CUT_MAX_OUTPUT_SECONDS,
-  estimateLampRun,
   estimateRun,
+  lampRunReservationUsd,
 } from "../cost.ts";
 import {
   firstCutMaximumMicros,
@@ -25,9 +25,7 @@ const APPROVAL_CLOCK_SKEW_MS = 60_000;
 const LEGACY_MAX_ITERATIONS = 4;
 
 export function lampMaximumMicros(): number {
-  return usdToMicros(
-    estimateLampRun(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd
-  );
+  return usdToMicros(lampRunReservationUsd(FIRST_CUT_MAX_OUTPUT_SECONDS));
 }
 
 function approvalLifetimeMs(source: SpendApproval["source"]): number {

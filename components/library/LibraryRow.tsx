@@ -151,7 +151,8 @@ function RowBody({ run }: { run: Run }) {
     ordered.find((it) => it.index === selectedIndex) ?? shipped;
   const fixes = activeFixes(run);
   const relit = shippedVideo(run);
-  const fixedTwoPass = run.workflowId === "lamp-v1";
+  const fixedTwoPass =
+    run.workflowMode === "lamp" || run.workflowId === "lamp-v1";
   const blindGradeLocked = isLampBlindGradeLocked(run);
 
   return (
@@ -187,10 +188,18 @@ function RowBody({ run }: { run: Run }) {
             selected={selected?.index}
             onSelect={setSelectedIndex}
           />
-          <CheckList iteration={selected} runActive={run.status === "running"} />
+          <CheckList
+            iteration={selected}
+            runActive={run.status === "running"}
+            workflowMode={fixedTwoPass ? "lamp" : "flora"}
+          />
         </div>
       ) : (
-        <CheckList iteration={undefined} runActive={run.status === "running"} />
+        <CheckList
+          iteration={undefined}
+          runActive={run.status === "running"}
+          workflowMode={fixedTwoPass ? "lamp" : "flora"}
+        />
       )}
 
       {!blindGradeLocked && fixes.length > 0 ? (

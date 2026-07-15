@@ -6,6 +6,7 @@ import type {
   EvalResult,
   Iteration,
   ViolationSeverity,
+  WorkflowMode,
 } from "@/lib/types";
 import {
   Badge,
@@ -14,11 +15,11 @@ import {
   VerdictBadge,
   verdictColor,
 } from "@/components/ui";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import { humanGradeEvalDefsForMode } from "@/lib/prompts/eval-defs";
 import { formatTime } from "@/lib/util";
 
 /*
- * Level 2/3 of the Library's progressive disclosure: the 11 checks as compact
+ * Level 2/3 of the Library's progressive disclosure: applicable checks as compact
  * rows; clicking one expands both judges' verdicts and the violations in
  * place. Mirrors the interaction pattern of components/review/EvalList.tsx
  * (its row internals are not exported, so the markup is mirrored, compacted).
@@ -156,16 +157,19 @@ function CheckRow({
   );
 }
 
-/** The 11 checks for one attempt, flat rows, single accordion for judge detail. */
+/** The applicable checks for one attempt, flat rows, single accordion. */
 export function CheckList({
   iteration,
   runActive,
+  workflowMode,
 }: {
   iteration?: Iteration;
+  workflowMode: WorkflowMode;
   /** False once the run has settled — a still-"running" attempt then reads as never finished, not in flight. */
   runActive: boolean;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
+  const definitions = humanGradeEvalDefsForMode(workflowMode);
 
   if (!iteration) {
     return (
@@ -177,7 +181,7 @@ export function CheckList({
 
   return (
     <div className="divide-y divide-edge">
-      {EVAL_DEFS.map((def) => (
+      {definitions.map((def) => (
         <CheckRow
           key={def.id}
           def={def}

@@ -1,7 +1,7 @@
 import "server-only";
 
 import { isValidRunId } from "@/lib/server/runstore";
-import { firstCutMaximumMicros } from "@/lib/server/batch-budget";
+import { firstCutOutputAuthorizationMicros } from "@/lib/server/batch-budget";
 import { assertVideoGenerationAuthorized } from "@/lib/server/spend-approval";
 import { getStorage } from "@/lib/server/storage";
 import {
@@ -201,7 +201,7 @@ export async function claimAndStartVideoGeneration(
     provider: "gemini",
     kind: "video_generation",
     iteration: input.iteration,
-    maxAuthorizedCostMicros: firstCutMaximumMicros(),
+    maxAuthorizedCostMicros: firstCutOutputAuthorizationMicros(),
     billingUsdPerOutputSecond:
       PRICE_TABLE.omniFlashPerOutputSecond.usd,
     renderedPrompt: input.renderedPrompt,

@@ -6,6 +6,7 @@ import type {
   EvalResult,
   Iteration,
   ViolationSeverity,
+  WorkflowMode,
 } from "@/lib/types";
 import {
   Badge,
@@ -14,19 +15,20 @@ import {
   VerdictBadge,
   verdictColor,
 } from "@/components/ui";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import { humanGradeEvalDefsForMode } from "@/lib/prompts/eval-defs";
 import { LAMP_UNAVAILABLE_EVAL_IDS } from "@/lib/lamp-evaluation";
 import { formatTime, LOW_CONFIDENCE } from "@/lib/util";
 
 const UNAVAILABLE_REASON: Record<(typeof LAMP_UNAVAILABLE_EVAL_IDS)[number], string> = {
   "temporal-alignment":
     "unavailable in Lamp — the documented local temporal-correlation metric is not implemented yet",
-  "lighting-match-to-anchor":
-    "not applicable in Lamp — this method does not create or approve a Look Anchor",
 };
 
-function unavailableReason(evalId: string): string | undefined {
-  return LAMP_UNAVAILABLE_EVAL_IDS.includes(
+function unavailableReason(
+  evalId: string,
+  workflowMode: WorkflowMode
+): string | undefined {
+  return workflowMode === "lamp" && LAMP_UNAVAILABLE_EVAL_IDS.includes(
     evalId as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]
   )
     ? UNAVAILABLE_REASON[evalId as (typeof LAMP_UNAVAILABLE_EVAL_IDS)[number]]
@@ -137,6 +139,7 @@ function EvalRowDetail({ def, result }: { def: EvalDefinition; result: EvalResul
 function EvalRow({
   def,
   result,
+  unavailable,
   running,
   evalsUnderway,
   open,
@@ -144,6 +147,7 @@ function EvalRow({
 }: {
   def: EvalDefinition;
   result?: EvalResult;
+  unavailable?: string;
   running: boolean;
   /** True once the run has reached the checks phase — gates the pulsing rows. */
   evalsUnderway: boolean;
@@ -180,7 +184,6 @@ function EvalRow({
   // has actually started — earlier stages (a 5-minute videogen) show a flat
   // dash instead of ten pulsing rows.
   if (!result) {
-    const unavailable = unavailableReason(def.id);
     return (
       <div className="-ml-3 flex flex-wrap items-center gap-x-5 gap-y-2 border-l-2 border-transparent py-4 pl-3">
         {nameCell}
@@ -240,16 +243,18 @@ function EvalRow({
 }
 
 /**
- * The eleven evals as flat rows with hairline dividers — no cards. One row
+ * The mode-applicable evals as flat rows with hairline dividers — no cards. One row
  * expands at a time (single accordion); the open row stays open across
  * attempt switches so a reviewer can watch one eval change attempt to attempt.
  */
 export function EvalList({
   iteration,
+  workflowMode,
   evalsUnderway = true,
   hiddenUntilHumanGrade = false,
 }: {
   iteration?: Iteration;
+  workflowMode: WorkflowMode;
   /**
    * While the run executes: has the pipeline reached the checks phase yet?
    * (see evalPhaseReached in GenerationTheater). Defaults true so completed
@@ -260,9 +265,14 @@ export function EvalList({
   hiddenUntilHumanGrade?: boolean;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
-  const applicableCount = EVAL_DEFS.length - LAMP_UNAVAILABLE_EVAL_IDS.length;
+  const definitions = humanGradeEvalDefsForMode(workflowMode);
+  const applicableCount =
+    definitions.length -
+    (workflowMode === "lamp" ? LAMP_UNAVAILABLE_EVAL_IDS.length : 0);
   const availableCount =
-    iteration?.evalResults.filter((result) => !unavailableReason(result.evalId)).length ?? 0;
+    iteration?.evalResults.filter(
+      (result) => !unavailableReason(result.evalId, workflowMode)
+    ).length ?? 0;
   const sectionLabel =
     iteration?.index === 1
       ? "Initial whole-video critique"
@@ -290,26 +300,28 @@ export function EvalList({
       <header className="flex flex-wrap items-end justify-between gap-2 border-b border-edge pb-3 pt-2">
         <div>
           <h2 className="text-balance text-sm font-medium text-ink">{sectionLabel}</h2>
-          <p className="mt-1 text-pretty text-2xs text-faint">
-            {LAMP_UNAVAILABLE_EVAL_IDS.length} of {EVAL_DEFS.length} rubric rows
-            stay explicitly unscored: timing correlation is unavailable and
-            anchor matching is not applicable.
-          </p>
+          {workflowMode === "lamp" ? (
+            <p className="mt-1 text-pretty text-2xs text-faint">
+              One of {definitions.length} Lamp rubric rows stays explicitly
+              unscored because timing correlation is unavailable.
+            </p>
+          ) : null}
         </div>
         <span className="text-2xs tabular-nums text-muted">
           {availableCount} of {applicableCount} applicable results available
         </span>
       </header>
       <div className="divide-y divide-edge border-b border-edge">
-        {EVAL_DEFS.map((def) => (
+        {definitions.map((def) => (
           <EvalRow
             key={def.id}
             def={def}
             result={
-              unavailableReason(def.id)
+              unavailableReason(def.id, workflowMode)
                 ? undefined
                 : iteration?.evalResults.find((r) => r.evalId === def.id)
             }
+            unavailable={unavailableReason(def.id, workflowMode)}
             running={iteration?.status === "running"}
             evalsUnderway={evalsUnderway}
             open={openId === def.id}

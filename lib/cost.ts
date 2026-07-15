@@ -3,7 +3,7 @@
  *
  * Standing rule: the team lead is never surprised by spend. Every action in
  * the app shows its estimated live cost BEFORE it runs, every run keeps a
- * cost ledger, and live batches carry a hard server-owned integer budget cap.
+ * cost ledger, and live batches carry a server-owned integer reservation.
  *
  * MOCK MODE: nothing costs money — every figure this module produces is an
  * "est. live cost": what the run/batch WOULD cost against the real APIs.
@@ -18,7 +18,12 @@
 
 import { EVAL_DEFS } from "./prompts/eval-defs.ts";
 import { RELIGHT_WORKFLOW } from "./workflow-def.ts";
-import type { JudgeId, VideoAsset } from "@/lib/types";
+import type {
+  GeminiProUsageSnapshot,
+  JudgeId,
+  OmniUsageSnapshot,
+  VideoAsset,
+} from "@/lib/types";
 
 /**
  * Absolute billable output ceiling reserved by generation approvals.
@@ -32,6 +37,23 @@ export const FIRST_CUT_MAX_OUTPUT_SECONDS = 10.05;
 /** Lamp always performs two generations and two one-shot holistic evaluations. */
 export const LAMP_GENERATION_COUNT = 2;
 export const LAMP_EVALUATION_COUNT = 2;
+/** Gemini 3.1 Pro's documented output ceiling, including its thinking room. */
+export const LAMP_EVALUATOR_MAX_OUTPUT_TOKENS = 65_536;
+
+// These figures drive the estimate shown before a call. Settled spend always
+// comes from the provider usage snapshots below.
+const ESTIMATED_OMNI_INPUT_TOKENS = 16_000;
+const ESTIMATED_LAMP_EVALUATOR_INPUT_TOKENS = 16_000;
+const ESTIMATED_LAMP_EVALUATOR_OUTPUT_AND_THINKING_TOKENS = 8_192;
+
+// Batch admission reserves more than the UI estimate so normal usage variance
+// does not strand a completed call in reconciliation. These are intentionally
+// simple app policy ceilings, not invented provider usage measurements.
+export const OMNI_INPUT_RESERVATION_TOKENS = 128_000;
+export const OMNI_TEXT_AND_THINKING_RESERVATION_TOKENS = 65_536;
+export const LAMP_EVALUATOR_INPUT_RESERVATION_TOKENS = 32_000;
+export const LAMP_EVALUATOR_OUTPUT_AND_THINKING_RESERVATION_TOKENS =
+  LAMP_EVALUATOR_MAX_OUTPUT_TOKENS;
 
 // ---------------------------------------------------------------------------
 // Cost item (lives here, not in lib/types.ts, to keep the core contract stable)
@@ -65,11 +87,53 @@ interface PriceEntry {
 }
 
 export const PRICE_TABLE = {
-  /** VERIFIED 2026-07-11 — Gemini Omni Flash video-to-video, per output second. */
+  /** VERIFIED 2026-07-15 — 5,792 video tokens/s at $17.50 per million. */
   omniFlashPerOutputSecond: {
-    usd: 0.1,
+    usd: (5_792 * 17.5) / 1_000_000,
     provider: "omni",
     unitLabel: "output second",
+    verified: true,
+  },
+  omniFlashInputPerMillionTokens: {
+    usd: 1.5,
+    provider: "omni",
+    unitLabel: "million input tokens",
+    verified: true,
+  },
+  omniFlashTextOutputPerMillionTokens: {
+    usd: 9,
+    provider: "omni",
+    unitLabel: "million text/thinking output tokens",
+    verified: true,
+  },
+  omniFlashVideoOutputPerMillionTokens: {
+    usd: 17.5,
+    provider: "omni",
+    unitLabel: "million video output tokens",
+    verified: true,
+  },
+  geminiProInputPerMillionTokens: {
+    usd: 2,
+    provider: "gemini",
+    unitLabel: "million input tokens up to 200k",
+    verified: true,
+  },
+  geminiProLargeInputPerMillionTokens: {
+    usd: 4,
+    provider: "gemini",
+    unitLabel: "million input tokens above 200k",
+    verified: true,
+  },
+  geminiProOutputPerMillionTokens: {
+    usd: 12,
+    provider: "gemini",
+    unitLabel: "million output/thinking tokens up to 200k input",
+    verified: true,
+  },
+  geminiProLargeOutputPerMillionTokens: {
+    usd: 18,
+    provider: "gemini",
+    unitLabel: "million output/thinking tokens above 200k input",
     verified: true,
   },
   /** VERIFIED 2026-07-13 — gemini-3-pro-image (Nano Banana Pro) edit, premium tier. */
@@ -108,6 +172,134 @@ export const PRICE_TABLE = {
     verified: false,
   },
 } satisfies Record<string, PriceEntry>;
+
+const TOKENS_PER_MILLION = 1_000_000;
+const GEMINI_PRO_LONG_CONTEXT_THRESHOLD = 200_000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isTokenCount(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+/** Assert the billable Omni counters and retain the provider object unchanged. */
+export function requireOmniUsage(value: unknown): OmniUsageSnapshot {
+  if (!isRecord(value)) {
+    throw new Error("Completed Omni interaction returned no usage metadata.");
+  }
+  if (
+    !isTokenCount(value.total_input_tokens) ||
+    !isTokenCount(value.total_output_tokens) ||
+    (value.total_thought_tokens !== undefined &&
+      !isTokenCount(value.total_thought_tokens)) ||
+    !Array.isArray(value.output_tokens_by_modality) ||
+    value.output_tokens_by_modality.some(
+      (item) =>
+        !isRecord(item) ||
+        typeof item.modality !== "string" ||
+        !isTokenCount(item.tokens)
+    )
+  ) {
+    throw new Error("Completed Omni interaction returned invalid usage metadata.");
+  }
+  return value as OmniUsageSnapshot;
+}
+
+/** Price one completed Omni interaction from usage, including thinking. */
+export function omniCostFromUsage(usage: OmniUsageSnapshot): number {
+  const videoOutputTokens = usage.output_tokens_by_modality
+    .filter((item) => item.modality.toUpperCase() === "VIDEO")
+    .reduce((sum, item) => sum + item.tokens, 0);
+  if (videoOutputTokens <= 0) {
+    throw new Error("Completed Omni interaction reported no video output usage.");
+  }
+  if (videoOutputTokens > usage.total_output_tokens) {
+    throw new Error("Omni video output usage exceeds its total output usage.");
+  }
+  const textOutputTokens = usage.total_output_tokens - videoOutputTokens;
+  const thinkingTokens = usage.total_thought_tokens ?? 0;
+  return (
+    (usage.total_input_tokens *
+      PRICE_TABLE.omniFlashInputPerMillionTokens.usd +
+      videoOutputTokens *
+        PRICE_TABLE.omniFlashVideoOutputPerMillionTokens.usd +
+      (textOutputTokens + thinkingTokens) *
+        PRICE_TABLE.omniFlashTextOutputPerMillionTokens.usd) /
+    TOKENS_PER_MILLION
+  );
+}
+
+/** Assert the billable Pro counters and retain the provider object unchanged. */
+export function requireGeminiProUsage(
+  value: unknown
+): GeminiProUsageSnapshot {
+  if (!isRecord(value)) {
+    throw new Error("Completed Gemini Pro evaluation returned no usage metadata.");
+  }
+  if (
+    !isTokenCount(value.promptTokenCount) ||
+    !isTokenCount(value.candidatesTokenCount) ||
+    (value.thoughtsTokenCount !== undefined &&
+      !isTokenCount(value.thoughtsTokenCount))
+  ) {
+    throw new Error(
+      "Completed Gemini Pro evaluation returned invalid usage metadata."
+    );
+  }
+  return value as GeminiProUsageSnapshot;
+}
+
+/** Gemini 3.1 Pro switches both rates when the prompt exceeds 200k tokens. */
+export function geminiProCostFromUsage(
+  usage: GeminiProUsageSnapshot
+): number {
+  const longContext =
+    usage.promptTokenCount > GEMINI_PRO_LONG_CONTEXT_THRESHOLD;
+  const inputRate = longContext
+    ? PRICE_TABLE.geminiProLargeInputPerMillionTokens.usd
+    : PRICE_TABLE.geminiProInputPerMillionTokens.usd;
+  const outputRate = longContext
+    ? PRICE_TABLE.geminiProLargeOutputPerMillionTokens.usd
+    : PRICE_TABLE.geminiProOutputPerMillionTokens.usd;
+  return (
+    (usage.promptTokenCount * inputRate +
+      (usage.candidatesTokenCount + (usage.thoughtsTokenCount ?? 0)) *
+        outputRate) /
+    TOKENS_PER_MILLION
+  );
+}
+
+/** Conservative pre-call reservation for one Omni generation. */
+export function omniGenerationReservationUsd(durationSec: number): number {
+  return (
+    durationSec * PRICE_TABLE.omniFlashPerOutputSecond.usd +
+    (OMNI_INPUT_RESERVATION_TOKENS *
+      PRICE_TABLE.omniFlashInputPerMillionTokens.usd) /
+      TOKENS_PER_MILLION +
+    (OMNI_TEXT_AND_THINKING_RESERVATION_TOKENS *
+      PRICE_TABLE.omniFlashTextOutputPerMillionTokens.usd) /
+      TOKENS_PER_MILLION
+  );
+}
+
+/** Conservative pre-call reservation for Lamp's fixed two-pass workflow. */
+export function lampRunReservationUsd(durationSec: number): number {
+  const evaluatorInputUsd = geminiProCostFromUsage({
+    promptTokenCount: LAMP_EVALUATOR_INPUT_RESERVATION_TOKENS,
+    candidatesTokenCount: 0,
+  });
+  const evaluatorOutputUsd = geminiProCostFromUsage({
+    promptTokenCount: 0,
+    candidatesTokenCount:
+      LAMP_EVALUATOR_OUTPUT_AND_THINKING_RESERVATION_TOKENS,
+  });
+  return (
+    omniGenerationReservationUsd(durationSec) * LAMP_GENERATION_COUNT +
+    (evaluatorInputUsd + evaluatorOutputUsd) * LAMP_EVALUATION_COUNT
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Registry-driven counts — the estimate must move with the config, never drift
@@ -212,6 +404,16 @@ export function estimateFirstCut(durationSec: number): CostEstimate {
       usd: durationSec * PRICE_TABLE.omniFlashPerOutputSecond.usd,
     },
     {
+      label: "First-cut source and prompt input (estimated)",
+      provider: PRICE_TABLE.omniFlashInputPerMillionTokens.provider,
+      units: ESTIMATED_OMNI_INPUT_TOKENS,
+      unitLabel: "input tokens",
+      usd:
+        (ESTIMATED_OMNI_INPUT_TOKENS *
+          PRICE_TABLE.omniFlashInputPerMillionTokens.usd) /
+        TOKENS_PER_MILLION,
+    },
+    {
       label: "Original-audio remux and verification",
       provider: "local",
       units: 1,
@@ -227,6 +429,15 @@ export function estimateFirstCut(durationSec: number): CostEstimate {
  * audio is remuxed and verified after each generation at no provider cost.
  */
 export function estimateLampRun(durationSec: number): CostEstimate {
+  const evaluatorOutputEstimate = geminiProCostFromUsage({
+    promptTokenCount: 0,
+    candidatesTokenCount:
+      ESTIMATED_LAMP_EVALUATOR_OUTPUT_AND_THINKING_TOKENS,
+  });
+  const evaluatorInputEstimate = geminiProCostFromUsage({
+    promptTokenCount: ESTIMATED_LAMP_EVALUATOR_INPUT_TOKENS,
+    candidatesTokenCount: 0,
+  });
   return total([
     {
       label: `Two video generations (${durationSec.toFixed(1)}s each)`,
@@ -239,12 +450,31 @@ export function estimateLampRun(durationSec: number): CostEstimate {
         PRICE_TABLE.omniFlashPerOutputSecond.usd,
     },
     {
-      label: "Two holistic whole-video evaluations",
-      provider: PRICE_TABLE.geminiJudgePerCall.provider,
-      units: LAMP_EVALUATION_COUNT,
-      unitLabel: PRICE_TABLE.geminiJudgePerCall.unitLabel,
+      label: "Two source-and-prompt generation inputs (estimated)",
+      provider: PRICE_TABLE.omniFlashInputPerMillionTokens.provider,
+      units: ESTIMATED_OMNI_INPUT_TOKENS * LAMP_GENERATION_COUNT,
+      unitLabel: "input tokens",
       usd:
-        LAMP_EVALUATION_COUNT * PRICE_TABLE.geminiJudgePerCall.usd,
+        (ESTIMATED_OMNI_INPUT_TOKENS *
+          LAMP_GENERATION_COUNT *
+          PRICE_TABLE.omniFlashInputPerMillionTokens.usd) /
+        TOKENS_PER_MILLION,
+    },
+    {
+      label: "Two whole-video evaluation inputs (estimated)",
+      provider: PRICE_TABLE.geminiProInputPerMillionTokens.provider,
+      units: ESTIMATED_LAMP_EVALUATOR_INPUT_TOKENS * LAMP_EVALUATION_COUNT,
+      unitLabel: "input tokens",
+      usd: evaluatorInputEstimate * LAMP_EVALUATION_COUNT,
+    },
+    {
+      label: "Two whole-video evaluation outputs (estimated)",
+      provider: PRICE_TABLE.geminiProOutputPerMillionTokens.provider,
+      units:
+        ESTIMATED_LAMP_EVALUATOR_OUTPUT_AND_THINKING_TOKENS *
+        LAMP_EVALUATION_COUNT,
+      unitLabel: "output/thinking tokens",
+      usd: evaluatorOutputEstimate * LAMP_EVALUATION_COUNT,
     },
     {
       label: "Original-audio remux and verification (both cuts)",

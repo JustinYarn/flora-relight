@@ -14,7 +14,6 @@ import { useAppStore } from "@/lib/store";
 import { useRunDetails } from "@/lib/useRunDetails";
 import type { RunStatus } from "@/lib/types";
 import { Badge, EmptyState } from "@/components/ui";
-import { ShareButton } from "@/components/share/ShareButton";
 import { buildJourneySteps } from "@/components/journey/chain";
 import { JourneyChain } from "@/components/journey/JourneyChain";
 import { StepDetail } from "@/components/journey/StepDetail";
@@ -103,22 +102,19 @@ export default function RunJourneyPage() {
           </h1>
           <Badge color={STATUS_COLOR[run.status]}>{STATUS_LABEL[run.status]}</Badge>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="flex rounded-lg border border-edge p-0.5">
-            <Link
-              href={`/runs/${run.id}`}
-              className="rounded-md px-3 py-1 text-sm text-muted transition hover:text-ink"
-            >
-              Review
-            </Link>
-            <Link
-              href={`/runs/${run.id}/journey`}
-              className="rounded-md bg-raised px-3 py-1 text-sm text-ink"
-            >
-              Journey
-            </Link>
-          </div>
-          <ShareButton run={run} />
+        <div className="flex rounded-lg border border-edge p-0.5">
+          <Link
+            href={`/runs/${run.id}`}
+            className="rounded-md px-3 py-1 text-sm text-muted transition hover:text-ink"
+          >
+            Review
+          </Link>
+          <Link
+            href={`/runs/${run.id}/journey`}
+            className="rounded-md bg-raised px-3 py-1 text-sm text-ink"
+          >
+            Journey
+          </Link>
         </div>
       </header>
 

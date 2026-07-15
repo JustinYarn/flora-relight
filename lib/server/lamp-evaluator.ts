@@ -6,7 +6,11 @@ import {
   resolveSourceUrl,
   uploadVideoCached,
 } from "@/lib/server/gemini";
-import { PRICE_TABLE } from "@/lib/cost";
+import {
+  LAMP_EVALUATOR_MAX_OUTPUT_TOKENS,
+  geminiProCostFromUsage,
+  requireGeminiProUsage,
+} from "@/lib/cost";
 import {
   LAMP_EVALUATOR_VERSION,
   LAMP_VISUAL_EVAL_DEFS,
@@ -197,6 +201,7 @@ export async function runLampHolisticEvaluation(input: {
       ],
       config: {
         httpOptions: { retryOptions: { attempts: 1 } },
+        maxOutputTokens: LAMP_EVALUATOR_MAX_OUTPUT_TOKENS,
         responseMimeType: "application/json",
         responseJsonSchema: RESPONSE_SCHEMA,
       },
@@ -204,12 +209,14 @@ export async function runLampHolisticEvaluation(input: {
     if (!response.text) {
       throw new Error("Lamp evaluator returned no content.");
     }
+    const usage = requireGeminiProUsage(response.usageMetadata);
     const artifact = buildLampEvaluationArtifact({
       raw: JSON.parse(response.text),
       iteration: input.iteration,
       audioVerified: generation.result.audioVerified,
       previousResults: input.previousResults,
-      costUsd: PRICE_TABLE.geminiJudgePerCall.usd,
+      usage,
+      costUsd: geminiProCostFromUsage(usage),
     });
     return completePaidOperation(claim.operation, artifact);
   } catch (error) {

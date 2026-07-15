@@ -11,8 +11,8 @@ import type { Run, VideoAsset } from "@/lib/types";
  * Exports the currently shipped cut: the final video when one exists,
  * otherwise the latest attempt with a real generated file. Simulated (mock)
  * attempts have no file on disk, so the button disables with a tooltip.
- * Busy/error handling mirrors ShareButton: label swap while working, a small
- * error line underneath on failure.
+ * The label changes while the export is being built, and a small error line
+ * appears underneath on failure.
  */
 
 /** Real relit files live under /api/media; simulated attempts don't. */

@@ -10,6 +10,8 @@ import {
   estimateLampRun,
   FIRST_CUT_MAX_OUTPUT_SECONDS,
   formatUsd,
+  lampRunReservationUsd,
+  omniGenerationReservationUsd,
 } from "@/lib/cost";
 import { formatClock, uid } from "@/lib/util";
 import { ConfirmSpend } from "@/components/shell/ConfirmSpend";
@@ -95,6 +97,17 @@ function estimateWorkflowRun(mode: WorkflowMode, durationSec: number) {
   return mode === "lamp"
     ? estimateLampRun(durationSec)
     : estimateFirstCut(durationSec);
+}
+
+function workflowReservationUsd(mode: WorkflowMode): number {
+  return mode === "lamp"
+    ? lampRunReservationUsd(FIRST_CUT_MAX_OUTPUT_SECONDS)
+    : omniGenerationReservationUsd(FIRST_CUT_MAX_OUTPUT_SECONDS);
+}
+
+/** Display the next whole cent so a matching optional cap can admit the clip. */
+function formatReservationUsd(usd: number): string {
+  return `$${(Math.ceil(usd * 100) / 100).toFixed(2)}`;
 }
 
 /** Shape of a successful ingest response (POST /api/ingest and /api/ingest/finalize). */
@@ -1335,7 +1348,7 @@ export default function DashboardPage() {
               ? [
                   `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
                   `Estimated provider cost: ${formatUsd(estimateLampRun(pendingLaunch.video.durationSec).totalUsd)}`,
-                  `Hard authorization: exactly two video generations and two holistic evaluation calls, up to ${formatUsd(estimateLampRun(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd)} including the 50ms-per-generation container allowance above the 10-second model cap. There is no open-ended retry loop.`,
+                  `Spend authorization: the server reserves ${formatReservationUsd(workflowReservationUsd("lamp"))} for exactly two video generations and two holistic evaluation calls, including input and thinking usage plus the 50ms-per-generation container allowance. Actual cost is settled from provider usage; there is no open-ended retry loop.`,
                   "For both Initial and Final, Lamp restores and verifies source audio before the whole-video evaluation. The fixed two-pass run continues on the server if this tab closes.",
                   "Final enters per-video human grading. Its completed AI evaluation stays hidden by default and can be revealed whenever you choose.",
                   ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
@@ -1343,7 +1356,7 @@ export default function DashboardPage() {
               : [
                   `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
                   `Estimated provider cost: ${formatUsd(estimateFirstCut(pendingLaunch.video.durationSec).totalUsd)}`,
-                  `Hard authorization: one video generation, up to ${formatUsd(estimateFirstCut(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd)} including the 50ms container allowance above the 10-second model cap.`,
+                  `Spend authorization: the server reserves ${formatReservationUsd(workflowReservationUsd("flora"))} for one video generation, including input and thinking usage plus the 50ms container allowance. Actual cost is settled from provider usage.`,
                   "Flora restores and verifies the original audio, then sends the one-pass cut to human review.",
                   ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
                 ]
@@ -1403,18 +1416,16 @@ export default function DashboardPage() {
               ? "Every Lamp clip uses exactly two generations and two holistic evaluations, then waits for its own human grade."
               : "Every Flora clip uses one generation and lands in the established human review queue.",
             mode === "live"
-              ? `Hard batch authorization: up to ${formatUsd(
+              ? `Batch spend authorization: the server reserves ${formatReservationUsd(
                   pendingBatchAssets.length *
-                    estimateWorkflowRun(
-                      pendingBatch.workflowMode ?? "flora",
-                      FIRST_CUT_MAX_OUTPUT_SECONDS
-                    ).totalUsd
-                )} total (${formatUsd(
-                  estimateWorkflowRun(
-                    pendingBatch.workflowMode ?? "flora",
-                    FIRST_CUT_MAX_OUTPUT_SECONDS
-                  ).totalUsd
-                )} per clip), including the bounded 50ms container allowance per generation. An optional budget cap can only reduce how many clips dispatch.`
+                    workflowReservationUsd(
+                      pendingBatch.workflowMode ?? "flora"
+                    )
+                )} total (${formatReservationUsd(
+                  workflowReservationUsd(
+                    pendingBatch.workflowMode ?? "flora"
+                  )
+                )} per clip), including input and thinking usage plus the bounded 50ms container allowance per generation. Actual cost is settled from provider usage. An optional budget cap can only reduce how many clips dispatch.`
               : "This is a demo batch; actual mock spend is $0.00.",
             mode === "mock"
               ? "The demo keeps the same bounded queue shape without calling a provider."

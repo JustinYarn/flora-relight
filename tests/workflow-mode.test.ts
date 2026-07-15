@@ -26,24 +26,25 @@ test("new browser selections default to Lamp and retain product labels", () => {
   assert.equal(workflowModeLabel("lamp"), "Lamp");
 });
 
-test("Flora and Lamp prompts preserve method labels without changing prompt semantics", () => {
+test("Lamp compiles a source-only prompt while Flora keeps its anchor contract", () => {
   const flora = initialMegaPrompt("flora");
   const lamp = initialMegaPrompt("lamp");
 
   assert.match(flora.rendered, /^=== FLORA RELIGHT MEGA PROMPT v1 ===/);
   assert.match(lamp.rendered, /^=== LAMP RELIGHT MEGA PROMPT v1 ===/);
-  assert.equal(
-    flora.rendered.replace("FLORA RELIGHT", "METHOD RELIGHT"),
-    lamp.rendered.replace("LAMP RELIGHT", "METHOD RELIGHT")
-  );
+  assert.match(flora.rendered, /approved anchor frame/i);
+  assert.doesNotMatch(lamp.rendered, /\banchor\b/i);
+  assert.match(lamp.rendered, /original video as structural and temporal ground truth/i);
+  assert.match(lamp.rendered, /source audio may be used only as timing context/i);
+  assert.match(lamp.rendered, /provider-generated audio is discarded/i);
+  assert.match(lamp.rendered, /canonical source audio is restored and verified/i);
   assert.match(
     nextMegaPrompt(flora, []).rendered,
     /^=== FLORA RELIGHT MEGA PROMPT v2 ===/
   );
-  assert.match(
-    nextMegaPrompt(lamp, []).rendered,
-    /^=== LAMP RELIGHT MEGA PROMPT v2 ===/
-  );
+  const nextLamp = nextMegaPrompt(lamp, []).rendered;
+  assert.match(nextLamp, /^=== LAMP RELIGHT MEGA PROMPT v2 ===/);
+  assert.doesNotMatch(nextLamp, /\banchor\b/i);
 });
 
 test("a later browser batch snapshot cannot change the batch method", () => {
