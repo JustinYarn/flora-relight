@@ -2,7 +2,7 @@ import {
   FIRST_CUT_MAX_OUTPUT_SECONDS,
 } from "../cost.ts";
 import {
-  firstCutMaximumMicros,
+  firstCutOutputAuthorizationMicros,
   microsToUsd,
   usdToMicros,
 } from "./batch-budget.ts";
@@ -36,7 +36,7 @@ function resolveCostAuthorization(
     typeof maxAuthorizedCostMicros !== "number" ||
     !Number.isSafeInteger(maxAuthorizedCostMicros) ||
     maxAuthorizedCostMicros <= 0 ||
-    maxAuthorizedCostMicros > firstCutMaximumMicros() ||
+    maxAuthorizedCostMicros > firstCutOutputAuthorizationMicros() ||
     typeof billingUsdPerOutputSecond !== "number" ||
     !Number.isFinite(billingUsdPerOutputSecond) ||
     billingUsdPerOutputSecond <= 0
@@ -67,14 +67,13 @@ function resolveCostAuthorization(
 }
 
 /**
- * Price one already-created provider artifact without understating its actual
- * probed duration. The request is paid by this point, so reconciliation may
- * accept only the small container/timebase allowance reserved before launch.
+ * Verify one already-created artifact against the exact output-duration bound
+ * reserved before launch. This is not actual billing; provider usage owns that.
  */
-export function authorizedRawOutputCostUsd(
+export function assertAuthorizedRawOutputDuration(
   rawDurationSec: number,
   authorization: VideoGenerationCostAuthorization
-): number {
+): void {
   if (!Number.isFinite(rawDurationSec) || rawDurationSec <= 0) {
     throw new Error("The raw provider output has no valid billable duration.");
   }
@@ -91,12 +90,11 @@ export function authorizedRawOutputCostUsd(
       `The raw provider output is ${rawDurationSec.toFixed(3)}s, above the immutable ${resolved.maxAuthorizedOutputSeconds.toFixed(2)}s per-generation authorization.`
     );
   }
-  const costUsd =
+  const outputCostUsd =
     rawDurationSec * resolved.billingUsdPerOutputSecond;
-  if (usdToMicros(costUsd) > resolved.maxAuthorizedCostMicros) {
+  if (usdToMicros(outputCostUsd) > resolved.maxAuthorizedCostMicros) {
     throw new Error(
       "The raw provider output exceeds the immutable per-generation authorization."
     );
   }
-  return costUsd;
 }

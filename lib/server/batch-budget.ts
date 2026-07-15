@@ -1,5 +1,6 @@
 import {
   FIRST_CUT_MAX_OUTPUT_SECONDS,
+  omniGenerationReservationUsd,
   PRICE_TABLE,
 } from "../cost.ts";
 
@@ -47,14 +48,20 @@ export function microsToUsd(micros: number): number {
 }
 
 /**
- * Full reservation for one generation-only cut. The provider bills output
- * duration, which is not known until finalization, so reserve the model's
- * complete supported output window before the call starts.
+ * Immutable raw-video output authorization. This deliberately covers only the
+ * exact 10.05s video-token ceiling used by post-generation verification.
  */
-export function firstCutMaximumMicros(): number {
+export function firstCutOutputAuthorizationMicros(): number {
   return usdToMicros(
     FIRST_CUT_MAX_OUTPUT_SECONDS *
       PRICE_TABLE.omniFlashPerOutputSecond.usd
+  );
+}
+
+/** Conservative full-spend reservation for one generation-only cut. */
+export function firstCutMaximumMicros(): number {
+  return usdToMicros(
+    omniGenerationReservationUsd(FIRST_CUT_MAX_OUTPUT_SECONDS)
   );
 }
 

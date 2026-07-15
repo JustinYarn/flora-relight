@@ -16,6 +16,12 @@ import {
 } from "../lib/server/run-execution-failure.ts";
 import type { ProviderOperation } from "../lib/types.ts";
 
+const OMNI_USAGE = {
+  total_input_tokens: 3_000,
+  total_output_tokens: 46_000,
+  output_tokens_by_modality: [{ modality: "VIDEO", tokens: 46_000 }],
+};
+
 function operation(
   status: ProviderOperation["status"],
   overrides: Partial<ProviderOperation> = {}
@@ -99,6 +105,7 @@ test("a completed durable artifact is recovered after a poll error", () => {
           rawUrl: "/api/media/run_fixture/gen-v1.mp4",
           durationSec: 8,
           audioVerified: true,
+          usage: OMNI_USAGE,
           costUsd: 0.6,
         },
       })
@@ -247,6 +254,7 @@ test("only an audio-verified completed generation is gradeable", () => {
       rawUrl: "/api/media/run_fixture/gen-v1.mp4",
       durationSec: 9.9,
       audioVerified: true,
+      usage: OMNI_USAGE,
       costUsd: 1,
     },
   });

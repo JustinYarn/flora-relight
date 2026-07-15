@@ -36,6 +36,7 @@ import {
 } from "@/lib/server/spend-approval";
 import { estimateFirstCut, estimateLampRun, estimateRun } from "@/lib/cost";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import { parseHumanGrade } from "@/lib/human-grade";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import {
   compileLampFinalPrompt,
@@ -45,7 +46,6 @@ import {
   projectLampEvaluationForRead,
   type LampEvaluationArtifact,
 } from "@/lib/lamp-evaluation";
-import { parseHumanGrade } from "@/lib/human-grade";
 import { readCanonicalIngestByRunId } from "@/lib/server/ingest";
 import { hasGeminiKey } from "@/lib/server/gemini";
 import { enqueueRunExecution } from "@/lib/server/run-execution-coordinator";
@@ -419,6 +419,9 @@ function paidCostLabel(entry: PaidOperationCostEntry): string {
   }
   if (entry.id === lampEvaluationOperationId(2)) {
     return "Lamp final whole-video evaluation (Gemini)";
+  }
+  if (entry.kind === "lipsync") {
+    return "Lamp Final Lipsync-2-Pro repair (Replicate)";
   }
   if (entry.kind === "manifest") return "Scene manifest extraction (Gemini)";
   if (entry.kind === "anchor") {

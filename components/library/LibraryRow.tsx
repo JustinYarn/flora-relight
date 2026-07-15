@@ -152,7 +152,8 @@ function RowBody({ run }: { run: Run }) {
     ordered.find((it) => it.index === selectedIndex) ?? shipped;
   const fixes = activeFixes(run);
   const relit = shippedVideo(run);
-  const fixedTwoPass = run.workflowId === "lamp-v1";
+  const fixedTwoPass =
+    run.workflowMode === "lamp" || run.workflowId === "lamp-v1";
   const blindGradeLocked = isLampBlindGradeLocked(run);
 
   return (

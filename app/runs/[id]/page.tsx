@@ -7,7 +7,6 @@ import { useAppStore } from "@/lib/store";
 import { useRunDetails } from "@/lib/useRunDetails";
 import type { Iteration, Run, RunStatus } from "@/lib/types";
 import { Badge, EmptyState } from "@/components/ui";
-import { ShareButton } from "@/components/share/ShareButton";
 import { DownloadSideBySide } from "@/components/review/DownloadSideBySide";
 import { RunTabs } from "@/components/review/RunTabs";
 import { HeroComparison } from "@/components/review/HeroComparison";
@@ -140,7 +139,6 @@ export default function RunReviewPage() {
         <span className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto sm:flex-nowrap sm:gap-3">
           <RunTabs runId={run.id} active="review" journeyLocked={blindGradeLocked} />
           <DownloadSideBySide run={run} />
-          <ShareButton run={run} />
         </span>
       </header>
 

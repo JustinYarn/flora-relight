@@ -5,6 +5,7 @@ export interface LampBatchActualCosts {
   initialEvaluationUsd: number;
   finalGenerationUsd: number;
   finalEvaluationUsd: number;
+  lipsyncRepairUsd?: number;
 }
 
 /**
@@ -20,6 +21,7 @@ export function confirmedLampBatchActualMicros(
     costs.initialEvaluationUsd,
     costs.finalGenerationUsd,
     costs.finalEvaluationUsd,
+    costs.lipsyncRepairUsd ?? 0,
   ].map(usdToMicros);
   const total = parts.reduce((sum, value) => sum + value, 0);
   if (!Number.isSafeInteger(total)) {

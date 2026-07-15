@@ -1339,6 +1339,37 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
       };
     },
 
+    async setPaidOperationProviderId(
+      runId,
+      operationId,
+      inputHash,
+      providerOperationId
+    ) {
+      await ensureSchema();
+      const id = assertRunId(runId);
+      const opId = assertPaidOperationId(operationId);
+      if (!SHA256_RE.test(inputHash)) throw new Error("Invalid paid operation inputHash");
+      if (!providerOperationId) throw new Error("Provider operation id is required");
+      const now = Date.now();
+      const patch = JSON.stringify({ providerOperationId, updatedAt: now });
+      const rows = (await sql`
+        UPDATE paid_operations
+        SET data = data || ${patch}::jsonb
+        WHERE run_id = ${id}
+          AND operation_id = ${opId}
+          AND input_hash = ${inputHash}
+          AND status = 'in_progress'
+          AND (
+            data->>'providerOperationId' IS NULL OR
+            data->>'providerOperationId' = ${providerOperationId}
+          )
+        RETURNING data
+      `) as Array<{ data: PaidOperation }>;
+      return rows[0]
+        ? projectPaidOperationMedia(rows[0].data)
+        : this.getPaidOperation(id, opId);
+    },
+
     async completePaidOperation(runId, operationId, inputHash, result) {
       await ensureSchema();
       const id = assertRunId(runId);

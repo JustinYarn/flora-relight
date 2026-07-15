@@ -7,7 +7,10 @@ import type {
   ViolationSeverity,
   WorkflowMode,
 } from "@/lib/types";
-import { RELIGHT_BASE_PROMPT } from "./base-prompt.ts";
+import {
+  LAMP_RELIGHT_BASE_PROMPT,
+  RELIGHT_BASE_PROMPT,
+} from "./base-prompt.ts";
 
 /**
  * The Mega Prompt COMPILER.
@@ -81,10 +84,12 @@ function lightingDirectiveFrom(base: RelightBasePrompt): string {
 export function initialMegaPrompt(
   workflowMode: WorkflowMode = "lamp"
 ): MegaPrompt {
+  const base =
+    workflowMode === "lamp" ? LAMP_RELIGHT_BASE_PROMPT : RELIGHT_BASE_PROMPT;
   const mp: MegaPrompt = {
     version: 1,
-    base: RELIGHT_BASE_PROMPT,
-    lightingDirective: lightingDirectiveFrom(RELIGHT_BASE_PROMPT),
+    base,
+    lightingDirective: lightingDirectiveFrom(base),
     corrections: [],
     rendered: "",
   };

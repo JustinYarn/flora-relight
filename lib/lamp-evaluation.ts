@@ -7,6 +7,7 @@ import type {
   Correction,
   EvalDefinition,
   EvalResult,
+  GeminiProUsageSnapshot,
   IterationComposite,
   JudgeVerdict,
   MegaPrompt,
@@ -231,7 +232,9 @@ export interface LampEvaluationArtifact {
     | typeof LAMP_LEGACY_EVALUATOR_VERSION;
   iteration: number;
   evalResults: EvalResult[];
-  /** Fixed provider estimate recorded by the paid-operation journal. */
+  /** Exact token counters returned by GenerateContent (legacy v1 may omit). */
+  usage?: GeminiProUsageSnapshot;
+  /** Usage-derived provider charge recorded by the paid-operation journal. */
   costUsd: number;
 }
 
@@ -431,6 +434,7 @@ export function buildLampEvaluationArtifact(input: {
   iteration: number;
   audioVerified: boolean;
   previousResults?: EvalResult[];
+  usage: GeminiProUsageSnapshot;
   costUsd: number;
 }): LampEvaluationArtifact {
   if (
@@ -486,6 +490,7 @@ export function buildLampEvaluationArtifact(input: {
     version: LAMP_EVALUATOR_VERSION,
     iteration: input.iteration,
     evalResults: ordered,
+    usage: input.usage,
     costUsd: input.costUsd,
   };
 }
@@ -495,11 +500,17 @@ export function isLampEvaluationArtifact(
   iteration?: number
 ): value is LampEvaluationArtifact {
   if (!isRecord(value)) return false;
+  const usageValid =
+    isRecord(value.usage) &&
+    Number.isSafeInteger(value.usage.promptTokenCount) &&
+    Number.isSafeInteger(value.usage.candidatesTokenCount);
   if (
     (value.version !== LAMP_EVALUATOR_VERSION &&
       value.version !== LAMP_LEGACY_EVALUATOR_VERSION) ||
     !Number.isSafeInteger(value.iteration) ||
     !Array.isArray(value.evalResults) ||
+    (value.version === LAMP_EVALUATOR_VERSION && !usageValid) ||
+    (value.usage !== undefined && !usageValid) ||
     typeof value.costUsd !== "number" ||
     !Number.isFinite(value.costUsd)
   ) {
@@ -599,7 +610,10 @@ export function compileLampFinalPrompt(
   const finalPrompt = nextMegaPrompt(
     presentationSeed,
     firstEvaluation.evalResults.filter(
-      (result) => result.evalId !== "audio-integrity"
+      (result) =>
+        LAMP_VISUAL_EVAL_DEFS.some(
+          (definition) => definition.id === result.evalId
+        )
     )
   );
   return {

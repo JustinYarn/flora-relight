@@ -26,7 +26,7 @@ import {
   PRICE_TABLE,
 } from "../lib/cost.ts";
 import { initialMegaPrompt } from "../lib/prompts/mega-prompt.ts";
-import { RELIGHT_BASE_PROMPT } from "../lib/prompts/base-prompt.ts";
+import { LAMP_RELIGHT_BASE_PROMPT } from "../lib/prompts/base-prompt.ts";
 import {
   collectComparisons,
   aiPassRatePct,
@@ -54,10 +54,12 @@ import {
   planBatchBudget,
 } from "../lib/server/batch-budget.ts";
 import {
+  assertPaidOperationAuthorized,
   createSpendApproval,
   hasReusableLampApproval,
   lampMaximumMicros,
 } from "../lib/server/spend-approval.ts";
+import { LIPSYNC_OPERATION_ID } from "../lib/v2-sync.ts";
 import {
   assertBatchExecutionTransition,
   assertNewBatchExecution,
@@ -79,6 +81,13 @@ const EXPECTED_VISUAL_EVAL_IDS = [
   "temporal-stability",
   "hallucination-artifacts",
 ] as const;
+
+const GEMINI_USAGE = {
+  promptTokenCount: 10_000,
+  candidatesTokenCount: 1_000,
+  thoughtsTokenCount: 500,
+  totalTokenCount: 11_500,
+};
 
 function rawVisualResults() {
   return EXPECTED_VISUAL_EVAL_IDS.map((evalId, index) => ({
@@ -107,6 +116,7 @@ test("Lamp rejects a holistic evaluation with a missing visual check", () => {
         raw: { results },
         iteration: 1,
         audioVerified: true,
+        usage: GEMINI_USAGE,
         costUsd: 0.02,
       }),
     /omitted required checks: hallucination-artifacts/
@@ -123,6 +133,7 @@ test("Lamp rejects a holistic evaluation with a duplicate visual check", () => {
         raw: { results },
         iteration: 1,
         audioVerified: true,
+        usage: GEMINI_USAGE,
         costUsd: 0.02,
       }),
     /duplicate result identity-preservation/
@@ -137,6 +148,7 @@ test("Lamp accepts a non-passing check without an actionable correction", () => 
     raw: { results },
     iteration: 1,
     audioVerified: true,
+    usage: GEMINI_USAGE,
     costUsd: 0.02,
   });
 
@@ -171,6 +183,7 @@ test("Lamp compiles a valid v2 prompt when no check yields any correction", () =
     raw: { results },
     iteration: 1,
     audioVerified: true,
+    usage: GEMINI_USAGE,
     costUsd: 0.02,
   });
   assert.ok(
@@ -206,6 +219,7 @@ test("Lamp accepts exactly eight visual results and appends verified audio", () 
     raw: { results: rawVisualResults() },
     iteration: 1,
     audioVerified: true,
+    usage: GEMINI_USAGE,
     costUsd: 0.02,
   });
 
@@ -266,6 +280,7 @@ test("Lamp skin allows only extremely subtle beautification at 85/70 boundaries"
       },
       iteration: 1,
       audioVerified: true,
+      usage: GEMINI_USAGE,
       costUsd: 0.02,
     });
     const skin = artifact.evalResults.find(
@@ -316,6 +331,7 @@ test("Lamp skin allows only extremely subtle beautification at 85/70 boundaries"
       },
       iteration: 1,
       audioVerified: true,
+      usage: GEMINI_USAGE,
       costUsd: 0.02,
     });
     const cappedSkin = inconsistentAddedWrinkle.evalResults.find(
@@ -346,6 +362,7 @@ test("Lamp skin allows only extremely subtle beautification at 85/70 boundaries"
     },
     iteration: 1,
     audioVerified: true,
+    usage: GEMINI_USAGE,
     costUsd: 0.02,
   });
   assert.equal(
@@ -367,13 +384,15 @@ test("Lamp v2 reads legacy v1 artifacts through the current nine-check policy", 
     },
     iteration: 2,
     audioVerified: true,
+    usage: GEMINI_USAGE,
     costUsd: 0.02,
   });
   assert.equal(current.version, LAMP_EVALUATOR_VERSION);
 
   const legacy: LampEvaluationArtifact = {
-    ...current,
     version: LAMP_LEGACY_EVALUATOR_VERSION,
+    iteration: current.iteration,
+    costUsd: current.costUsd,
     evalResults: [
       ...current.evalResults.map((result) =>
         result.evalId === "skin-texture-age"
@@ -439,6 +458,7 @@ test("Lamp seals ordinary reads while allowing an explicit Grade reveal", () => 
     raw: { results: rawVisualResults() },
     iteration: 1,
     audioVerified: true,
+    usage: GEMINI_USAGE,
     costUsd: 0.02,
   });
   const finalArtifact = buildLampEvaluationArtifact({
@@ -446,6 +466,7 @@ test("Lamp seals ordinary reads while allowing an explicit Grade reveal", () => 
     iteration: 2,
     audioVerified: true,
     previousResults: initialArtifact.evalResults,
+    usage: GEMINI_USAGE,
     costUsd: 0.02,
   });
 
@@ -486,6 +507,7 @@ test("the first holistic evaluation compiles one v2 prompt with every correction
     raw: { results: rawVisualResults() },
     iteration: 1,
     audioVerified: true,
+    usage: GEMINI_USAGE,
     costUsd: 0.02,
   });
 
@@ -495,6 +517,7 @@ test("the first holistic evaluation compiles one v2 prompt with every correction
   assert.equal(initial.corrections.length, 0);
   assert.equal(finalPrompt.version, 2);
   assert.match(finalPrompt.rendered, /LAMP RELIGHT MEGA PROMPT v2/);
+  assert.doesNotMatch(finalPrompt.rendered, /\banchor\b/i);
   assert.equal(
     finalPrompt.corrections.filter((correction) => !correction.resolved).length,
     EXPECTED_VISUAL_EVAL_IDS.length
@@ -511,16 +534,17 @@ test("a persisted Lamp v1 keeps v2 stable across a later base-template deploy", 
     raw: { results: rawVisualResults() },
     iteration: 1,
     audioVerified: true,
+    usage: GEMINI_USAGE,
     costUsd: 0.02,
   });
   const beforeDeploy = compileLampFinalPrompt(
     persistedV1,
     firstEvaluation
   ).rendered;
-  const originalTask = RELIGHT_BASE_PROMPT.task;
+  const originalTask = LAMP_RELIGHT_BASE_PROMPT.task;
 
   try {
-    RELIGHT_BASE_PROMPT.task =
+    LAMP_RELIGHT_BASE_PROMPT.task =
       "DEPLOY-ONLY TEMPLATE CHANGE THAT MUST NOT ENTER AN EXISTING RUN";
     assert.notEqual(initialMegaPrompt().rendered, persistedV1);
 
@@ -531,35 +555,52 @@ test("a persisted Lamp v1 keeps v2 stable across a later base-template deploy", 
     assert.equal(afterDeploy, beforeDeploy);
     assert.doesNotMatch(afterDeploy, /DEPLOY-ONLY TEMPLATE CHANGE/);
   } finally {
-    RELIGHT_BASE_PROMPT.task = originalTask;
+    LAMP_RELIGHT_BASE_PROMPT.task = originalTask;
   }
 });
 
-test("Lamp cost is exactly two generations plus two holistic evaluations", () => {
+test("Lamp cost includes two generations, two evaluations, and one possible repair", () => {
   const durationSec = 7.5;
   const estimate = estimateLampRun(durationSec);
 
   assert.equal(LAMP_GENERATION_COUNT, 2);
   assert.equal(LAMP_EVALUATION_COUNT, 2);
-  assert.equal(estimate.items.length, 3);
+  assert.equal(estimate.items.length, 6);
 
-  const [generation, evaluation, localAudio] = estimate.items;
+  const [
+    generation,
+    generationInput,
+    evaluationInput,
+    evaluationOutput,
+    lipsync,
+    localAudio,
+  ] = estimate.items;
   assert.equal(generation.units, durationSec * 2);
   assert.equal(
     generation.usd,
     durationSec * 2 * PRICE_TABLE.omniFlashPerOutputSecond.usd
   );
-  assert.equal(evaluation.units, 2);
+  assert.equal(generationInput.provider, "omni");
+  assert.equal(evaluationInput.provider, "gemini");
+  assert.equal(evaluationOutput.provider, "gemini");
+  assert.ok(generationInput.usd > 0);
+  assert.ok(evaluationInput.usd > 0);
+  assert.ok(evaluationOutput.usd > 0);
+  assert.equal(lipsync.provider, "replicate");
+  assert.equal(lipsync.units, durationSec);
   assert.equal(
-    evaluation.usd,
-    2 * PRICE_TABLE.geminiJudgePerCall.usd
+    lipsync.usd,
+    durationSec * PRICE_TABLE.lipsync2ProPerOutputSecond.usd
   );
   assert.equal(localAudio.units, 2);
   assert.equal(localAudio.usd, 0);
   assert.equal(
     estimate.totalUsd,
     durationSec * 2 * PRICE_TABLE.omniFlashPerOutputSecond.usd +
-      2 * PRICE_TABLE.geminiJudgePerCall.usd
+      generationInput.usd +
+      evaluationInput.usd +
+      evaluationOutput.usd +
+      lipsync.usd
   );
 });
 
@@ -625,6 +666,28 @@ test("Lamp batch admission reserves and authorizes one exact two-pass run", () =
   assert.equal(approval.maxUsd, microsToUsd(reservation));
   assert.equal(hasReusableLampApproval(run, "batch", batchId, now + 1), true);
   assert.equal(hasReusableLampApproval(run, "single", undefined, now + 1), false);
+  assert.doesNotThrow(() =>
+    assertPaidOperationAuthorized(
+      run,
+      "lipsync",
+      2,
+      undefined,
+      LIPSYNC_OPERATION_ID,
+      now + 1
+    )
+  );
+  assert.throws(
+    () =>
+      assertPaidOperationAuthorized(
+        run,
+        "lipsync",
+        1,
+        undefined,
+        LIPSYNC_OPERATION_ID,
+        now + 1
+      ),
+    /at most one Lipsync-2-Pro repair/
+  );
   assert.equal(
     hasReusableLampApproval(run, "batch", "batch_wrong_fixture", now + 1),
     false
@@ -689,6 +752,16 @@ test("Lamp batch settlement counts both generations and both holistic evaluation
   });
   assert.equal(actualMicros, 1_540_000);
   assert.equal(actualMicros <= lampMaximumMicros(), true);
+  assert.equal(
+    confirmedLampBatchActualMicros({
+      initialGenerationUsd: 0.75,
+      initialEvaluationUsd: 0.02,
+      finalGenerationUsd: 0.75,
+      finalEvaluationUsd: 0.02,
+      lipsyncRepairUsd: 0.44,
+    }),
+    1_980_000
+  );
   assert.throws(
     () =>
       confirmedLampBatchActualMicros({
@@ -1036,6 +1109,7 @@ test("complete final applicable evals produce a coverage-aware AI pass rate", ()
     },
     iteration: 2,
     audioVerified: true,
+    usage: GEMINI_USAGE,
     costUsd: 0.02,
   });
   const run = {

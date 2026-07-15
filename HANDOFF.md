@@ -92,7 +92,7 @@ agreement.
   Normal run reads explicitly clear Final's AI projection. An exact-run,
   no-store reveal request can expose that already-saved evidence inside Grade
   without rerunning a provider. A successful human-grade save remains the reveal
-  boundary for Review, Journey, Results, and share/read surfaces.
+  boundary for Review, Journey, and Results.
 - **Deletion:** deleted run ids are tombstoned. Normal deletion is refused while
   an execution, batch membership, or provider journal is active or needs
   reconciliation.
@@ -152,6 +152,8 @@ Keep the established environment-variable names:
 - `BLOB_READ_WRITE_TOKEN`
 - `DATABASE_URL`
 - `GEMINI_API_KEY`
+- `SYNCNET_BASE_URL`
+- `REPLICATE_API_TOKEN`
 - `ANTHROPIC_API_KEY` (legacy/other evaluation paths; Lamp's holistic evaluator is
   Gemini-only)
 - `FLORA_WORKFLOW_SMOKE_ENABLED` (temporary provider-free probe flag)

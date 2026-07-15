@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
   FIRST_CUT_MAX_OUTPUT_SECONDS,
-  estimateLampRun,
   estimateRun,
+  lampRunReservationUsd,
 } from "../cost.ts";
 import {
   firstCutMaximumMicros,
@@ -11,6 +11,7 @@ import {
 } from "./batch-budget.ts";
 import { RELIGHT_WORKFLOW } from "../workflow-def.ts";
 import { lampEvaluationOperationId } from "../lamp-evaluation.ts";
+import { LIPSYNC_OPERATION_ID } from "../v2-sync.ts";
 import type {
   PaidOperation,
   Run,
@@ -25,9 +26,7 @@ const APPROVAL_CLOCK_SKEW_MS = 60_000;
 const LEGACY_MAX_ITERATIONS = 4;
 
 export function lampMaximumMicros(): number {
-  return usdToMicros(
-    estimateLampRun(FIRST_CUT_MAX_OUTPUT_SECONDS).totalUsd
-  );
+  return usdToMicros(lampRunReservationUsd(FIRST_CUT_MAX_OUTPUT_SECONDS));
 }
 
 function approvalLifetimeMs(source: SpendApproval["source"]): number {
@@ -211,17 +210,20 @@ export function assertPaidOperationAuthorized(
     );
   }
   if (approval.scope === "lamp_two_pass") {
-    if (
-      kind !== "judge" ||
-      evalId !== "lamp-holistic" ||
-      operationId !== lampEvaluationOperationId(iteration ?? 0)
-    ) {
+    const holisticEvaluation =
+      kind === "judge" &&
+      evalId === "lamp-holistic" &&
+      operationId === lampEvaluationOperationId(iteration ?? 0) &&
+      (iteration === 1 || iteration === 2);
+    const finalLipsyncRepair =
+      kind === "lipsync" &&
+      iteration === 2 &&
+      evalId === undefined &&
+      operationId === LIPSYNC_OPERATION_ID;
+    if (!holisticEvaluation && !finalLipsyncRepair) {
       throw new Error(
-        "Lamp authorizes only its two stable holistic evaluation operations; individual judges, manifests, and anchors are outside this workflow."
+        "Lamp authorizes its two holistic evaluations and at most one Lipsync-2-Pro repair for Final."
       );
-    }
-    if (iteration !== 1 && iteration !== 2) {
-      throw new Error("Lamp evaluation must belong to generation 1 or 2.");
     }
     return;
   }

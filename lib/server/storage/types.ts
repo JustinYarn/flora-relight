@@ -288,6 +288,14 @@ export interface StorageDriver {
    */
   claimPaidOperation(operation: PaidOperation): Promise<PaidOperationClaimResult>;
 
+  /** Persist an asynchronous provider handle before polling it. */
+  setPaidOperationProviderId(
+    runId: string,
+    operationId: string,
+    inputHash: string,
+    providerOperationId: string
+  ): Promise<PaidOperation | null>;
+
   /** Mark an in-progress claim complete and persist its replayable response. */
   completePaidOperation(
     runId: string,

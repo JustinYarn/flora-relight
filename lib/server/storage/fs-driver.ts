@@ -526,6 +526,39 @@ export function createFsDriver(): StorageDriver {
         return { claimed: true as const, operation };
       });
     },
+    async setPaidOperationProviderId(
+      runId,
+      operationId,
+      inputHash,
+      providerOperationId
+    ) {
+      const id = assertRunId(runId);
+      const opId = assertPaidOperationId(operationId);
+      if (!SHA256_RE.test(inputHash)) throw new Error("Invalid paid operation inputHash");
+      if (!providerOperationId) throw new Error("Provider operation id is required");
+      return withPaidOperationLock(async () => {
+        const operations = await readPaidOperations(id);
+        const index = operations.findIndex((item) => item.id === opId);
+        if (index < 0) return null;
+        const current = operations[index];
+        if (
+          current.inputHash !== inputHash ||
+          current.status !== "in_progress" ||
+          (current.providerOperationId &&
+            current.providerOperationId !== providerOperationId)
+        ) {
+          return current;
+        }
+        const updated: PaidOperation = {
+          ...current,
+          providerOperationId,
+          updatedAt: Date.now(),
+        };
+        operations[index] = updated;
+        await writeJsonAtomic(paidOperationsPath(id), operations);
+        return updated;
+      });
+    },
     async completePaidOperation(runId, operationId, inputHash, result) {
       const id = assertRunId(runId);
       const opId = assertPaidOperationId(operationId);

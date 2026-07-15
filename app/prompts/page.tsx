@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { useMemo, useState, type ReactNode } from "react";
 import { Badge, Card, SectionTitle } from "@/components/ui";
-import { RELIGHT_BASE_PROMPT } from "@/lib/prompts/base-prompt";
 import { MANIFEST_PROMPT } from "@/lib/prompts/manifest";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
@@ -336,7 +335,7 @@ export default function PromptsPage() {
   const [filter, setFilter] = useState<CheckFilter>("all");
   const [openId, setOpenId] = useState<string | null>(null);
 
-  const base = RELIGHT_BASE_PROMPT;
+  const base = mega.base;
   const isLamp = workflowMode === "lamp";
   const rubricCount = modeMap.orderedEvalDefs.filter(
     (definition) => definition.promptTemplate
