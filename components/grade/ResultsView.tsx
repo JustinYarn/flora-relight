@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import type { Run } from "@/lib/types";
 import { getEvalDef } from "@/lib/prompts/eval-defs";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
+import { PairPlayer } from "@/components/library/PairPlayer";
 import { SectionTitle, verdictColor } from "@/components/ui";
 import {
   aiPassRatePct,
@@ -13,6 +14,7 @@ import {
   collectComparisons,
   evalDefsForRuns,
   finalLampIteration,
+  finalLampVideo,
   humanVerdictWord,
   overallAgreementPct,
   perCheckStats,
@@ -61,7 +63,9 @@ function fmtGap(gap: number): string {
 }
 
 function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
   const final = finalLampIteration(run);
+  const relit = finalLampVideo(run);
   const aiResults = final?.evalResults ?? [];
   const definitions = evalDefsForRun(run);
   const definitionIds = new Set(definitions.map((definition) => definition.id));
@@ -71,7 +75,8 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
 
   return (
     <details
-      open={defaultOpen}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
       className="group rounded-xl bg-surface shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.16)]"
     >
       <summary className="flex min-h-14 cursor-pointer list-none flex-wrap items-center gap-x-4 gap-y-1 rounded-xl px-4 py-3 transition-[transform,background-color] duration-150 ease-out hover:bg-raised active:scale-[0.96] [&::-webkit-details-marker]:hidden">
@@ -95,6 +100,19 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
           ⌄
         </span>
       </summary>
+
+      {/* Mounted only while expanded so a long results list never preloads
+          every clip's media at once. */}
+      {open ? (
+        <div className="px-4 pb-1 [&>button]:max-w-none">
+          <PairPlayer
+            original={run.originalVideo}
+            relit={relit}
+            audible="relit"
+            relitLabel={`FINAL VIDEO · v${final?.index ?? 2}`}
+          />
+        </div>
+      ) : null}
 
       <div className="overflow-x-auto px-4 pb-4">
         <div className="min-w-[720px]">
