@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { useAppStore } from "@/lib/store";
 import { useRunDetails } from "@/lib/useRunDetails";
 import type { Iteration, Run, RunStatus } from "@/lib/types";
+import { isLampRun } from "@/lib/lamp-evaluation";
 import { Badge, EmptyState } from "@/components/ui";
 import { DownloadSideBySide } from "@/components/review/DownloadSideBySide";
 import { RunTabs } from "@/components/review/RunTabs";
@@ -37,10 +38,6 @@ const STATUS_LABEL: Record<RunStatus, string> = {
   "needs-changes": "needs changes",
   failed: "failed",
 };
-
-function isLampRun(run: Run): boolean {
-  return run.workflowMode === "lamp" || run.workflowId === "lamp-v1";
-}
 
 /** Resolve the evaluation attached to the delivered artifact for either workflow. */
 function finalIteration(run: Run): Iteration | undefined {

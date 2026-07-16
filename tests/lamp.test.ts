@@ -1152,3 +1152,47 @@ test("complete final applicable evals produce a coverage-aware AI pass rate", ()
   assert.equal(lampCompositeForResults(incomplete.iterations[0].evalResults), undefined);
   assert.equal(aiPassRatePct([incomplete]), undefined);
 });
+
+test("historical artifacts re-verdict under the current thresholds", () => {
+  // Policy pinned 2026-07-16: history is always presented under TODAY's
+  // rules. A judge that scored skin 86 under the old 88/75 prompt persisted
+  // "borderline"; the current Lamp policy (85/70) presents it as a pass.
+  const results = rawVisualResults().map((result) =>
+    result.evalId === "skin-texture-age"
+      ? {
+          ...result,
+          score: 86,
+          violations: [],
+        }
+      : result
+  );
+  const artifact = buildLampEvaluationArtifact({
+    raw: { results },
+    iteration: 1,
+    audioVerified: true,
+    usage: GEMINI_USAGE,
+    costUsd: 0.02,
+  });
+  const skin = artifact.evalResults.find(
+    (result) => result.evalId === "skin-texture-age"
+  );
+  assert.equal(skin?.verdict, "pass");
+  const composite = lampCompositeForResults(artifact.evalResults);
+  assert.ok(composite);
+  assert.ok(!composite.hardGateFailures?.includes("skin-texture-age"));
+});
+
+test("a duplicated check row invalidates the composite instead of scoring silently", () => {
+  const artifact = buildLampEvaluationArtifact({
+    raw: { results: rawVisualResults() },
+    iteration: 1,
+    audioVerified: true,
+    usage: GEMINI_USAGE,
+    costUsd: 0.02,
+  });
+  const duplicated = [
+    ...artifact.evalResults,
+    { ...artifact.evalResults.find((r) => r.evalId === "skin-texture-age")! },
+  ];
+  assert.equal(lampCompositeForResults(duplicated), undefined);
+});

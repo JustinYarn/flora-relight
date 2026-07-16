@@ -14,6 +14,7 @@ import type {
   Verdict,
   VideoAsset,
 } from "@/lib/types";
+import { isLampRun } from "@/lib/lamp-evaluation";
 
 /** Plain-English status meta shared by the Library rows and filter chips. */
 export const STATUS_META: Record<RunStatus, { color: string; label: string }> = {
@@ -31,7 +32,7 @@ export const STATUS_META: Record<RunStatus, { color: string; label: string }> = 
  */
 export function shippedIteration(run: Run): Iteration | undefined {
   const last = run.iterations[run.iterations.length - 1];
-  if (run.workflowId === "lamp-v1") {
+  if (isLampRun(run)) {
     return run.iterations.find((iteration) => iteration.index === 2) ?? last;
   }
   const bi = run.bestIterationIndex;

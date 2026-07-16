@@ -236,7 +236,16 @@ function CheckRow({
                 <DefinitionLine label="Method">{def.method}</DefinitionLine>
                 <DefinitionLine label="Weight">
                   <span className="tabular-nums">
-                    {def.weight.toFixed(2)} ({Math.round(def.weight * 100)}%)
+                    {def.weight.toFixed(2)} (
+                    {Math.round(
+                      (def.weight /
+                        (workflowMode === "lamp" ? LAMP_EVAL_DEFS : EVAL_DEFS).reduce(
+                          (sum, d) => sum + d.weight,
+                          0
+                        )) *
+                        100
+                    )}
+                    % of composite)
                   </span>
                 </DefinitionLine>
                 <DefinitionLine label="Pass">

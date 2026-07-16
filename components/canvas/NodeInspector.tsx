@@ -1107,7 +1107,7 @@ function AggregateSection({
           items={[
             {
               label: "Receives",
-              value: "Eight visual results returned together for the whole video",
+              value: "Every visual result returned together for the whole video",
               color: "var(--running)",
             },
             {
@@ -1140,7 +1140,7 @@ function AggregateSection({
                     {average ?? "—"}
                   </span>
                   <span className="text-2xs tabular-nums text-faint">
-                    {count}/8 visual
+                    {count} visual results
                   </span>
                 </div>
               </div>

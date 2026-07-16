@@ -1,4 +1,4 @@
-import type { EvalDefinition, WorkflowMode } from "@/lib/types";
+import type { EvalDefinition } from "@/lib/types";
 
 /**
  * EVAL_DEFS — the rubric library. The intellectual core of the eval loop.
@@ -577,15 +577,3 @@ export function getEvalDef(id: string): EvalDefinition {
   return def;
 }
 
-/** Rubric rows that a human can truthfully grade for the selected workflow. */
-export function humanGradeEvalDefsForMode(
-  workflowMode: WorkflowMode
-): EvalDefinition[] {
-  return workflowMode === "lamp"
-    ? EVAL_DEFS.filter(
-        (definition) =>
-          definition.id !== "temporal-alignment" &&
-          definition.id !== "lighting-match-to-anchor"
-      )
-    : EVAL_DEFS;
-}

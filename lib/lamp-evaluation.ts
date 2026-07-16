@@ -143,6 +143,16 @@ export const LAMP_COMPOSITE_PASS_THRESHOLD = 75;
 export function lampCompositeForResults(
   results: EvalResult[]
 ): IterationComposite | undefined {
+  // Duplicate detection must run on the RAW rows: normalization dedupes via
+  // find(), so a corrupted artifact with two rows for one check would
+  // otherwise silently score from whichever came first.
+  const lampIds = new Set(LAMP_EVAL_DEFS.map((definition) => definition.id));
+  const seen = new Set<string>();
+  for (const result of results) {
+    if (!lampIds.has(result.evalId)) continue;
+    if (seen.has(result.evalId)) return undefined;
+    seen.add(result.evalId);
+  }
   const normalizedResults = normalizeLampResultsForCurrentPolicy(results);
   const applicable = LAMP_EVAL_DEFS.map((definition) => {
     const matches = normalizedResults.filter(
@@ -293,6 +303,12 @@ function isAddedWrinkleViolation(violation: Violation): boolean {
  * Read old Lamp artifacts through today's nine-check policy without changing
  * their provider score or reasoning. Retired Flora-only rows are removed, and
  * deterministic verdict labels are recalculated from the active thresholds.
+ *
+ * POLICY (Justin, 2026-07-16): this re-grading of history is deliberate.
+ * Every artifact — regardless of the thresholds its judge was prompted
+ * with — is presented under the CURRENT rules, so verdicts stay comparable
+ * across the whole library after a policy change. Pinned by test
+ * "historical artifacts re-verdict under the current thresholds".
  */
 export function normalizeLampResultsForCurrentPolicy(
   results: EvalResult[]

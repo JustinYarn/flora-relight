@@ -15,6 +15,7 @@ import {
   verdictColor,
 } from "@/components/ui";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import { LAMP_EVAL_DEFS } from "@/lib/lamp-evaluation";
 import { formatTime, LOW_CONFIDENCE } from "@/lib/util";
 
 function severityColor(s: ViolationSeverity): string {
@@ -111,8 +112,16 @@ function EvalRowDetail({ def, result }: { def: EvalDefinition; result: EvalResul
         {result.verdicts.length === 1 && result.verdicts[0]?.judge === "gemini"
           ? "Lamp holistic Gemini whole-video evaluation"
           : def.method}
-        {def.hardGate ? " · must pass (hard gate)" : ""} · weight {def.weight.toFixed(2)}{" "}
-        · pass ≥ {def.passThreshold}
+        {def.hardGate ? " · must pass (hard gate)" : ""} ·{" "}
+        {Math.round(
+          (def.weight /
+            (result.verdicts.length === 1 && result.verdicts[0]?.judge === "gemini"
+              ? LAMP_EVAL_DEFS
+              : EVAL_DEFS
+            ).reduce((sum, d) => sum + d.weight, 0)) *
+            100
+        )}
+        % of composite · pass ≥ {def.passThreshold}
       </p>
     </div>
   );
@@ -253,7 +262,7 @@ export function EvalList({
         <div>
           <h2 className="text-balance text-sm font-medium text-ink">{sectionLabel}</h2>
           <p className="mt-1 text-pretty text-2xs text-faint">
-            Complete-video checks plus the server-verified source-audio result.
+            Rubric results plus the server-verified source-audio result.
           </p>
         </div>
         <span className="text-2xs tabular-nums text-muted">
