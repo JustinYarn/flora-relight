@@ -21,6 +21,57 @@ function requireNumber(
   return value;
 }
 
+/**
+ * SyncNet reads are free and idempotent, and they sit AFTER ~$4 of billed
+ * generation work — a transient blip here must not sink a paid run. Retry
+ * transient failures (429/5xx/network/timeout) on a short ladder before
+ * letting the step's own retries take over; 4xx besides 429 are permanent.
+ */
+const SYNC_RETRY_DELAYS_MS = [15_000, 45_000, 90_000];
+const SYNC_REQUEST_TIMEOUT_MS = 180_000;
+
+function isTransientSyncFailure(error: unknown, status?: number): boolean {
+  if (status !== undefined) return status === 429 || status >= 500;
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    error instanceof Error && error.name === "TimeoutError"
+  ) || /fetch failed|network|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket/i.test(message);
+}
+
+async function postAnalyzeWithRetry(form: FormData): Promise<Response> {
+  let lastError: unknown;
+  for (const delayMs of [...SYNC_RETRY_DELAYS_MS, null]) {
+    try {
+      const response = await fetch(analyzeUrl(), {
+        method: "POST",
+        body: form,
+        signal: AbortSignal.timeout(SYNC_REQUEST_TIMEOUT_MS),
+      });
+      if (
+        delayMs !== null &&
+        isTransientSyncFailure(undefined, response.status)
+      ) {
+        console.warn(
+          `[syncnet] transient HTTP ${response.status}; retrying in ${Math.round(delayMs / 1000)}s`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (delayMs === null || !isTransientSyncFailure(error)) throw error;
+      console.warn(
+        `[syncnet] transient failure (${error instanceof Error ? error.name : "error"}); retrying in ${Math.round(delayMs / 1000)}s`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("SyncNet analysis failed after retries.");
+}
+
 export async function analyzeVideoSync(
   videoPath: string
 ): Promise<SyncNetMetrics> {
@@ -39,10 +90,7 @@ export async function analyzeVideoSync(
   form.append("max_permitted_distance", "1000000");
   form.append("max_permitted_absolute_offset", "1000000");
 
-  const response = await fetch(analyzeUrl(), {
-    method: "POST",
-    body: form,
-  });
+  const response = await postAnalyzeWithRetry(form);
   const body = (await response.json().catch(() => null)) as unknown;
   if (!response.ok) {
     const message =

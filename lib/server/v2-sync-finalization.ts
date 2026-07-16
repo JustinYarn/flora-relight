@@ -2,7 +2,9 @@ import "server-only";
 
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { downloadTo } from "@/lib/server/gemini";
+import { createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import {
   audioStreamMd5,
   conformVideoDuration,
@@ -60,6 +62,32 @@ export type V2CandidateSyncCheck =
 export type V2LipsyncPollResult =
   | { done: false }
   | { done: true; outputUrl: string };
+
+/**
+ * Stream a Replicate delivery URL to disk. The Gemini Files downloader must
+ * never be used here: it parses its input as a Files-API name (split on
+ * "files/") and throws deterministically on any external https URL — which
+ * stranded billed repairs in reconcile_required before this helper existed.
+ */
+async function downloadReplicateOutput(
+  url: string,
+  destPath: string
+): Promise<void> {
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(
+      `Lipsync output download failed: HTTP ${response.status}${
+        response.body ? "" : " (empty body)"
+      }`
+    );
+  }
+  await pipeline(
+    Readable.fromWeb(response.body as import("stream/web").ReadableStream),
+    createWriteStream(destPath)
+  );
+}
 
 async function cleanupRemoteScratch(
   storage: StorageDriver,
@@ -314,7 +342,7 @@ export async function finalizeV2Lipsync(input: {
       rawPath = await mediaPath(storage, input.runId, RAW_LIPSYNC_NAME);
     } else {
       rawPath = await storage.mediaWritePath(input.runId, RAW_LIPSYNC_NAME);
-      await downloadTo(input.outputUrl, rawPath);
+      await downloadReplicateOutput(input.outputUrl, rawPath);
       await storage.putMediaFromFile(input.runId, RAW_LIPSYNC_NAME, rawPath);
     }
 
