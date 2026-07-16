@@ -11,6 +11,11 @@ import {
   LAMP_RELIGHT_BASE_PROMPT,
   RELIGHT_BASE_PROMPT,
 } from "./base-prompt.ts";
+import {
+  DEFAULT_RELIGHT_INTENSITY,
+  normalizeRelightIntensity,
+  relightLightingDirective,
+} from "../relight-intensity.ts";
 
 /**
  * The Mega Prompt COMPILER.
@@ -82,14 +87,22 @@ function lightingDirectiveFrom(base: RelightBasePrompt): string {
 
 /** Iteration 1: base + lighting, empty ledger. */
 export function initialMegaPrompt(
-  workflowMode: WorkflowMode = "lamp"
+  workflowMode: WorkflowMode = "lamp",
+  relightIntensity: number = DEFAULT_RELIGHT_INTENSITY
 ): MegaPrompt {
   const base =
     workflowMode === "lamp" ? LAMP_RELIGHT_BASE_PROMPT : RELIGHT_BASE_PROMPT;
+  const normalizedIntensity = normalizeRelightIntensity(relightIntensity);
   const mp: MegaPrompt = {
     version: 1,
     base,
-    lightingDirective: lightingDirectiveFrom(base),
+    // Keep the historical 75/100 prompt byte-identical so existing Lamp
+    // behavior and hashes remain the experiment's stable control condition.
+    lightingDirective:
+      workflowMode === "lamp" &&
+      normalizedIntensity !== DEFAULT_RELIGHT_INTENSITY
+        ? relightLightingDirective(normalizedIntensity)
+        : lightingDirectiveFrom(base),
     corrections: [],
     rendered: "",
   };

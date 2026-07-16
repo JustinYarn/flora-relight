@@ -4,6 +4,10 @@ import type {
   VideoAsset,
   WorkflowMode,
 } from "@/lib/types";
+import {
+  DEFAULT_RELIGHT_INTENSITY,
+  normalizeRelightIntensity,
+} from "@/lib/relight-intensity";
 import { workflowForMode } from "@/lib/workflow-def";
 import { uid } from "@/lib/util";
 
@@ -21,7 +25,8 @@ export function freshNodeStates(
 export function buildRun(
   video: VideoAsset,
   now = Date.now(),
-  workflowMode: WorkflowMode = "lamp"
+  workflowMode: WorkflowMode = "lamp",
+  relightIntensity = DEFAULT_RELIGHT_INTENSITY
 ): Run {
   const workflow = workflowForMode(workflowMode);
   return {
@@ -30,6 +35,9 @@ export function buildRun(
     id: video.runId ?? uid("run"),
     workflowId: workflow.id,
     workflowMode,
+    ...(workflowMode === "lamp"
+      ? { relightIntensity: normalizeRelightIntensity(relightIntensity) }
+      : {}),
     createdAt: now,
     originalVideo: video,
     status: "running",
@@ -48,9 +56,10 @@ export function buildRun(
 export function buildQueuedRun(
   video: VideoAsset,
   now = Date.now(),
-  workflowMode: WorkflowMode = "lamp"
+  workflowMode: WorkflowMode = "lamp",
+  relightIntensity = DEFAULT_RELIGHT_INTENSITY
 ): Run {
-  const run = buildRun(video, now, workflowMode);
+  const run = buildRun(video, now, workflowMode, relightIntensity);
   run.log.push({
     at: now,
     level: "info",

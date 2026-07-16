@@ -17,6 +17,10 @@ import type {
   ViolationSeverity,
 } from "@/lib/types";
 import { clamp, verdictFor } from "./util.ts";
+import {
+  DEFAULT_RELIGHT_INTENSITY,
+  parseRelightIntensityFromPrompt,
+} from "./relight-intensity.ts";
 
 /**
  * Lamp's complete evaluation and human-grading contract. This positive list is
@@ -130,7 +134,8 @@ export function evalDefsForRun(run: RunEvalScope): EvalDefinition[] {
   return isLampRun(run) ? LAMP_EVAL_DEFS : EVAL_DEFS;
 }
 
-export const LAMP_EVALUATOR_VERSION = "lamp-holistic-v2";
+export const LAMP_EVALUATOR_VERSION = "lamp-holistic-v3";
+export const LAMP_PREVIOUS_EVALUATOR_VERSION = "lamp-holistic-v2";
 export const LAMP_LEGACY_EVALUATOR_VERSION = "lamp-holistic-v1";
 export const LAMP_MAX_ITERATIONS = 2;
 export const LAMP_COMPOSITE_PASS_THRESHOLD = 75;
@@ -238,6 +243,7 @@ export interface LampModelEval {
 export interface LampEvaluationArtifact {
   version:
     | typeof LAMP_EVALUATOR_VERSION
+    | typeof LAMP_PREVIOUS_EVALUATOR_VERSION
     | typeof LAMP_LEGACY_EVALUATOR_VERSION;
   iteration: number;
   evalResults: EvalResult[];
@@ -521,10 +527,13 @@ export function isLampEvaluationArtifact(
     Number.isSafeInteger(value.usage.candidatesTokenCount);
   if (
     (value.version !== LAMP_EVALUATOR_VERSION &&
+      value.version !== LAMP_PREVIOUS_EVALUATOR_VERSION &&
       value.version !== LAMP_LEGACY_EVALUATOR_VERSION) ||
     !Number.isSafeInteger(value.iteration) ||
     !Array.isArray(value.evalResults) ||
-    (value.version === LAMP_EVALUATOR_VERSION && !usageValid) ||
+    ((value.version === LAMP_EVALUATOR_VERSION ||
+      value.version === LAMP_PREVIOUS_EVALUATOR_VERSION) &&
+      !usageValid) ||
     (value.usage !== undefined && !usageValid) ||
     typeof value.costUsd !== "number" ||
     !Number.isFinite(value.costUsd)
@@ -621,7 +630,11 @@ export function compileLampFinalPrompt(
   ) {
     throw new Error("Lamp final prompt requires the persisted initial bytes.");
   }
-  const presentationSeed = initialMegaPrompt("lamp");
+  const presentationSeed = initialMegaPrompt(
+    "lamp",
+    parseRelightIntensityFromPrompt(persistedInitialRendered) ??
+      DEFAULT_RELIGHT_INTENSITY
+  );
   const finalPrompt = nextMegaPrompt(
     presentationSeed,
     firstEvaluation.evalResults.filter(

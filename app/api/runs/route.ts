@@ -65,6 +65,10 @@ import {
   LegacyPublicMediaDeletionError,
 } from "@/lib/server/storage/blob-driver";
 import { ActiveRunDeletionError } from "@/lib/server/storage/run-deletion";
+import {
+  isRelightIntensity,
+  normalizeRelightIntensity,
+} from "@/lib/relight-intensity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -103,6 +107,9 @@ async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
       existingExecution?.executionId ??
       (workflowMode === "lamp" ? `lamp:${run.id}` : `first-cut:${run.id}`),
     source: "single",
+    ...(workflowMode === "lamp"
+      ? { relightIntensity: normalizeRelightIntensity(run.relightIntensity) }
+      : {}),
   });
 }
 
@@ -246,7 +253,8 @@ function mergeServerGeneratedVideos(
         candidate.iterations.push(iteration);
       } else {
         const recoveredPrompt = initialMegaPrompt(
-          persistedWorkflowMode(candidate)
+          persistedWorkflowMode(candidate),
+          candidate.relightIntensity
         );
         recoveredPrompt.version = operation.iteration;
         if (operation.renderedPrompt) {
@@ -595,7 +603,10 @@ function materializeServerResults(
     if (execution.iteration >= 1) {
       let iteration = materialized.iterations.find((item) => item.index === 1);
       if (!iteration) {
-        const megaPrompt = initialMegaPrompt(lamp ? "lamp" : "flora");
+        const megaPrompt = initialMegaPrompt(
+          lamp ? "lamp" : "flora",
+          materialized.relightIntensity
+        );
         // RunExecution revision 1 binds the exact prompt bytes before any
         // Workflow contender can start. The provider journal is a secondary
         // replay record, not the source of truth for an as-yet queued run.
@@ -1051,12 +1062,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     video?: unknown;
     approveLiveSpend?: unknown;
     workflowMode?: unknown;
+    relightIntensity?: unknown;
   };
   try {
     body = (await req.json()) as {
       video?: unknown;
       approveLiveSpend?: unknown;
       workflowMode?: unknown;
+      relightIntensity?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "Body must be JSON." }, { status: 400 });
@@ -1097,6 +1110,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   const workflowMode: WorkflowMode =
     body.workflowMode === "flora" ? "flora" : "lamp";
+  if (
+    body.relightIntensity !== undefined &&
+    !isRelightIntensity(body.relightIntensity)
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "relightIntensity must be a five-point step from 0 through 100.",
+      },
+      { status: 400 }
+    );
+  }
+  const relightIntensity =
+    workflowMode === "lamp"
+      ? normalizeRelightIntensity(body.relightIntensity)
+      : undefined;
   if (body.approveLiveSpend === true && !hasGeminiKey()) {
     return NextResponse.json(
       { error: "Gemini video generation is not configured." },
@@ -1164,13 +1193,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (existing) {
     const existingExecution = await storage.getRunExecution(video.runId);
     const existingMode = persistedWorkflowMode(existing);
-    const canAdoptWorkflowMode =
+    const canRetargetPreparedRun =
       existingExecution === null &&
       existing.spendApproval === undefined &&
       (existing.providerOperations?.length ?? 0) === 0 &&
       existing.iterations.length === 0 &&
       existing.humanGrade === undefined;
-    if (existingMode !== workflowMode && !canAdoptWorkflowMode) {
+    if (existingMode !== workflowMode && !canRetargetPreparedRun) {
       return NextResponse.json(
         {
           error: `This saved clip already belongs to ${
@@ -1178,6 +1207,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           }. Upload it again as a fresh ${
             workflowMode === "lamp" ? "Lamp" : "Flora"
           } run so approvals and artifacts cannot be mixed.`,
+        },
+        { status: 409 }
+      );
+    }
+    if (
+      workflowMode === "lamp" &&
+      normalizeRelightIntensity(existing.relightIntensity) !==
+        relightIntensity &&
+      !canRetargetPreparedRun
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "This saved clip already has a different relight strength bound to it. Upload it again as a fresh run so approvals and generated artifacts cannot be mixed.",
         },
         { status: 409 }
       );
@@ -1221,12 +1264,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: 409 }
       );
     }
-    if (existingMode !== workflowMode) {
+    if (
+      existingMode !== workflowMode ||
+      (workflowMode === "lamp" &&
+        canRetargetPreparedRun &&
+        existing.relightIntensity !== relightIntensity)
+    ) {
       const workflow = workflowForMode(workflowMode);
       updated = {
         ...updated,
         workflowId: workflow.id,
         workflowMode,
+        ...(relightIntensity !== undefined ? { relightIntensity } : {}),
         nodeStates: freshNodeStates(workflowMode),
       };
       await storage.putRun(updated);
@@ -1276,7 +1325,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     return NextResponse.json({ ok: true, created: false, run: updated });
   }
-  const run = buildRun(canonicalVideo, Date.now(), workflowMode);
+  const run = buildRun(
+    canonicalVideo,
+    Date.now(),
+    workflowMode,
+    relightIntensity
+  );
   if (body.approveLiveSpend === true) {
     run.spendApproval = createSpendApproval(
       canonicalVideo,
@@ -1376,6 +1430,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   persisted.originalVideo = current.originalVideo;
   persisted.workflowId = current.workflowId;
   persisted.workflowMode = current.workflowMode;
+  persisted.relightIntensity = current.relightIntensity;
   persisted.providerOperations = current.providerOperations;
   clearProviderTrustMarkers(persisted);
   stripIncomingUnverifiedRealArtifacts(persisted);

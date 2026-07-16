@@ -32,6 +32,11 @@ import type {
   VideoAsset,
   WorkflowMode,
 } from "@/lib/types";
+import {
+  DEFAULT_RELIGHT_INTENSITY,
+  normalizeRelightIntensity,
+  relightIntensityProfile,
+} from "@/lib/relight-intensity";
 import { runWorkflowMode, workflowModeLabel } from "@/lib/workflow-mode";
 import { parseOptionalPositiveBudgetUsd } from "@/lib/budget-input";
 
@@ -506,6 +511,9 @@ export default function DashboardPage() {
   const mode = useAppStore((s) => s.mode);
   const workflowMode = useAppStore((s) => s.workflowMode);
   const hydrated = useAppStore((s) => s.hydrated);
+  const [relightIntensity, setRelightIntensity] = useState(
+    DEFAULT_RELIGHT_INTENSITY
+  );
 
   /** Every run id that belongs to some batch — drives the "batch" row tag. */
   const batchRunIds = useMemo(
@@ -528,6 +536,7 @@ export default function DashboardPage() {
     video: VideoAsset;
     trimNote: string | null;
     workflowMode: WorkflowMode;
+    relightIntensity: number;
   } | null>(null);
   /** Server-discovered single uploads that have not become prepared Runs yet. */
   const [pendingSingleUploads, setPendingSingleUploads] = useState<
@@ -827,7 +836,7 @@ export default function DashboardPage() {
   }, []);
 
   const handleSingle = useCallback(
-    async (file: File) => {
+    async (file: File, selectedRelightIntensity: number) => {
       // Re-selecting the same interrupted single clip reuses its durable
       // reservation. Otherwise reserve a fresh canonical id; the Blob token
       // route commits that discoverable checkpoint before transfer begins.
@@ -886,13 +895,37 @@ export default function DashboardPage() {
       if (trimNote) setIngestInfo(trimNote);
 
       if (mode === "live") {
-        // Real spend ahead — route the auto-start through ConfirmSpend.
+        // Persist the exact pre-generation choice before opening confirmation.
+        // A refresh at the modal can then recover this run with the same
+        // strength instead of falling back to the current slider value.
         setLaunchError(null);
-        setPendingLaunch({ video, trimNote, workflowMode });
+        try {
+          await startRun(video, {
+            workflowMode,
+            relightIntensity: selectedRelightIntensity,
+            prepareOnly: true,
+          });
+        } catch (error) {
+          appendError(
+            error instanceof Error
+              ? error.message
+              : "The relight settings could not be saved before confirmation."
+          );
+          return;
+        }
+        setPendingLaunch({
+          video,
+          trimNote,
+          workflowMode,
+          relightIntensity: selectedRelightIntensity,
+        });
         return;
       }
       try {
-        const id = await startRun(video, { workflowMode });
+        const id = await startRun(video, {
+          workflowMode,
+          relightIntensity: selectedRelightIntensity,
+        });
         router.push(`/runs/${id}`);
       } catch (error) {
         appendError(
@@ -904,7 +937,7 @@ export default function DashboardPage() {
   );
 
   const handleMany = useCallback(
-    async (files: File[]) => {
+    async (files: File[], selectedRelightIntensity: number) => {
       const reservations = files.map((file) => ({
         runId: uid("run"),
         label: file.name,
@@ -912,7 +945,8 @@ export default function DashboardPage() {
       const batchId = createBatchDraft(
         reservations,
         `${workflowModeLabel(workflowMode)} batch ${new Date().toLocaleDateString()}`,
-        workflowMode
+        workflowMode,
+        selectedRelightIntensity
       );
       try {
         await persistBatchSnapshot();
@@ -987,6 +1021,8 @@ export default function DashboardPage() {
 
   const handleFiles = useCallback(
     async (files: File[]) => {
+      const selectedRelightIntensity =
+        normalizeRelightIntensity(relightIntensity);
       if (!hydrated) {
         setIngestError("Wait for saved history to finish loading before uploading.");
         return;
@@ -1019,22 +1055,44 @@ export default function DashboardPage() {
         });
         if (videos.length === 0) return;
         if (videos.length === 1) {
-          await handleSingle(videos[0]);
+          await handleSingle(videos[0], selectedRelightIntensity);
         } else {
-          await handleMany(videos);
+          await handleMany(videos, selectedRelightIntensity);
         }
       } finally {
         setIngesting(false);
         setProgress(null);
       }
     },
-    [appendError, handleMany, handleSingle, hydrated, ingesting, readiness]
+    [
+      appendError,
+      handleMany,
+      handleSingle,
+      hydrated,
+      ingesting,
+      readiness,
+      relightIntensity,
+    ]
   );
 
   const parsedBudget = useMemo(
     () => parseOptionalPositiveBudgetUsd(budgetInput),
     [budgetInput]
   );
+  const pendingLaunchProfile = pendingLaunch
+    ? relightIntensityProfile(pendingLaunch.relightIntensity)
+    : null;
+  const pendingBatchIntensity = pendingBatch
+    ? normalizeRelightIntensity(pendingBatch.relightIntensity)
+    : DEFAULT_RELIGHT_INTENSITY;
+  const pendingBatchProfile = pendingBatch
+    ? relightIntensityProfile(pendingBatchIntensity)
+    : null;
+  const intensityControlDisabled =
+    ingesting ||
+    launching !== null ||
+    pendingLaunch !== null ||
+    pendingBatchId !== null;
   const workflowCopy = MODE_COPY[workflowMode];
   const workflowFlow = workflowMode === "lamp" ? LAMP_FLOW : FLORA_FLOW;
   return (
@@ -1051,7 +1109,11 @@ export default function DashboardPage() {
             {workflowCopy.description}
           </p>
         </header>
-        <WorkflowModeSelector />
+        <WorkflowModeSelector
+          relightIntensity={relightIntensity}
+          onRelightIntensityChange={setRelightIntensity}
+          disabled={intensityControlDisabled}
+        />
       </div>
 
       <div className="grid gap-5 lg:grid-cols-5">
@@ -1218,6 +1280,9 @@ export default function DashboardPage() {
                 disabled={launching === "run"}
                 onClick={async () => {
                   setLaunchError(null);
+                  const savedRelightIntensity = normalizeRelightIntensity(
+                    resumableSingle.relightIntensity
+                  );
                   const approvalResume =
                     resumableSingle.serverExecution?.status ===
                     "user_action_required";
@@ -1227,6 +1292,7 @@ export default function DashboardPage() {
                     try {
                       const id = await startRun(resumableSingle.originalVideo, {
                         workflowMode: runWorkflowMode(resumableSingle),
+                        relightIntensity: savedRelightIntensity,
                       });
                       router.push(`/runs/${id}`);
                     } catch (error) {
@@ -1244,6 +1310,7 @@ export default function DashboardPage() {
                     video: resumableSingle.originalVideo,
                     trimNote: null,
                     workflowMode: runWorkflowMode(resumableSingle),
+                    relightIntensity: savedRelightIntensity,
                   });
                 }}
               >
@@ -1347,6 +1414,11 @@ export default function DashboardPage() {
             pendingLaunch.workflowMode === "lamp"
               ? [
                   `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
+                  ...(pendingLaunchProfile
+                    ? [
+                        `Lighting strength: ${pendingLaunch.relightIntensity}/100 — ${pendingLaunchProfile.label}. ${pendingLaunchProfile.description}`,
+                      ]
+                    : []),
                   `Estimated provider cost: ${formatUsd(estimateLampRun(pendingLaunch.video.durationSec).totalUsd)}`,
                   `Spend authorization: the server reserves ${formatReservationUsd(workflowReservationUsd("lamp"))} for exactly two video generations, two holistic evaluation calls, and at most one Lipsync-2-Pro repair. Actual cost is settled from provider usage and repaired output duration; there is no open-ended retry loop.`,
                   "For both Initial and Final, Lamp restores and verifies source audio. Final also runs through SyncNet before evaluation and is repaired once only when confidence is below 4 or distance is above 10.",
@@ -1376,6 +1448,7 @@ export default function DashboardPage() {
               const id = await startRun(pendingLaunch.video, {
                 approveLiveSpend: true,
                 workflowMode: pendingLaunch.workflowMode,
+                relightIntensity: pendingLaunch.relightIntensity,
               });
               setPendingLaunch(null);
               router.push(`/runs/${id}`);
@@ -1412,6 +1485,11 @@ export default function DashboardPage() {
                 0
               )
             )}`,
+            ...(pendingBatchProfile
+              ? [
+                  `Lighting strength for every clip: ${pendingBatchIntensity}/100 — ${pendingBatchProfile.label}. ${pendingBatchProfile.description}`,
+                ]
+              : []),
             pendingBatch.workflowMode === "lamp"
               ? "Every Lamp clip uses exactly two generations and two holistic evaluations, with at most one SyncNet-triggered Lipsync-2-Pro repair, then waits for its own human grade."
               : "Every Flora clip uses one generation and lands in the established human review queue.",
@@ -1453,6 +1531,7 @@ export default function DashboardPage() {
                 approveLiveSpend: mode === "live",
                 allowIncompleteUploads: pendingBatch.status === "uploading",
                 workflowMode: pendingBatch.workflowMode ?? "flora",
+                relightIntensity: pendingBatchIntensity,
               });
               if (id) {
                 setPendingBatchId(null);

@@ -71,6 +71,7 @@ test("a later browser batch snapshot cannot change the batch method", () => {
     id: "batch_mode_lock",
     name: "Lamp batch",
     workflowMode: "lamp",
+    relightIntensity: 25,
     createdAt: 1,
     updatedAt: 10,
     runIds: ["run_mode_lock"],
@@ -82,11 +83,13 @@ test("a later browser batch snapshot cannot change the batch method", () => {
     ...current,
     name: "stale browser snapshot",
     workflowMode: "flora",
+    relightIntensity: 95,
     updatedAt: 20,
   };
 
   const merged = mergeBatch(current, staleModeFlip);
   assert.equal(merged.workflowMode, "lamp");
+  assert.equal(merged.relightIntensity, 25);
   assert.equal(merged.status, "running");
 });
 

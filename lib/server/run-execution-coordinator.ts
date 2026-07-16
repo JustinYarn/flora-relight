@@ -2,6 +2,7 @@ import "server-only";
 
 import { start } from "workflow/api";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
+import { normalizeRelightIntensity } from "@/lib/relight-intensity";
 import {
   compileLampFinalPrompt,
   isLampEvaluationArtifact,
@@ -28,6 +29,8 @@ export interface EnqueueRunExecutionInput {
   batchId?: string;
   /** Batch coordinators bind one exact prompt for every member. */
   renderedPrompt?: string;
+  /** Auditable Lamp target represented by renderedPrompt. */
+  relightIntensity?: number;
 }
 
 export interface EnqueueRunExecutionResult {
@@ -159,6 +162,19 @@ export async function enqueueRunExecution(
   const storage = getStorage();
   const run = await storage.getRun(input.runId);
   if (!run) throw new Error("Run not found.");
+  const lamp = input.executionId.startsWith("lamp:");
+  const relightIntensity = lamp
+    ? normalizeRelightIntensity(
+        input.relightIntensity ?? run.relightIntensity
+      )
+    : undefined;
+  if (
+    lamp &&
+    input.relightIntensity !== undefined &&
+    relightIntensity !== normalizeRelightIntensity(run.relightIntensity)
+  ) {
+    throw new Error("The requested relight strength does not match this run.");
+  }
 
   let current = await storage.getRunExecution(input.runId);
   if (current) {
@@ -174,6 +190,14 @@ export async function enqueueRunExecution(
       current.renderedPrompt !== input.renderedPrompt
     ) {
       throw new Error("A different exact prompt is already bound to this run.");
+    }
+    if (
+      lamp &&
+      normalizeRelightIntensity(current.relightIntensity) !== relightIntensity
+    ) {
+      throw new Error(
+        "A different relight strength is already bound to this run."
+      );
     }
     if (current.status === "user_action_required") {
       if (
@@ -249,7 +273,8 @@ export async function enqueueRunExecution(
   const canonicalPrompt =
     input.renderedPrompt ??
     initialMegaPrompt(
-      input.executionId.startsWith("lamp:") ? "lamp" : "flora"
+      lamp ? "lamp" : "flora",
+      relightIntensity
     ).rendered;
   const created = current
     ? { created: false as const, execution: current }
@@ -263,6 +288,7 @@ export async function enqueueRunExecution(
         iteration: 0,
         renderedPrompt: canonicalPrompt,
         inputHash: runExecutionInputHash(canonicalPrompt),
+        ...(relightIntensity !== undefined ? { relightIntensity } : {}),
         revision: 1,
         startedAt: now,
         updatedAt: now,

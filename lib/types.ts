@@ -464,6 +464,8 @@ export interface RunExecution {
   inputHash: string;
   /** Exact first-cut provider prompt; retained for deployment-safe recovery. */
   renderedPrompt: string;
+  /** Lamp relight-strength target bound into renderedPrompt; absent on legacy records. */
+  relightIntensity?: number;
   source: "single" | "batch";
   batchId?: string;
   status: RunExecutionStatus;
@@ -632,11 +634,6 @@ export interface SpendApproval {
 /** One in-progress answer in the grading workspace. */
 export interface GradeDraftAnswer {
   points: HumanCheckGrade["points"];
-  /**
-   * Exact 0–100 input used by the isolated Lamp Slider Lab. The canonical
-   * five-button grader leaves this absent and continues to save HumanGrade.
-   */
-  numericScore?: number;
   /** Kept untrimmed while editing so autosave never changes what was typed. */
   note: string;
 }
@@ -675,6 +672,11 @@ export interface Run {
   workflowId: string;
   /** Persisted method discriminator; absent on legacy Flora records. */
   workflowMode?: WorkflowMode;
+  /**
+   * Requested Lamp relight strength from 0–100 in five-point steps.
+   * Missing legacy values resolve to the historical Lamp default.
+   */
+  relightIntensity?: number;
   createdAt: number;
   originalVideo: VideoAsset;
   status: RunStatus;
@@ -786,6 +788,8 @@ export interface BatchExecution {
   executionId: string;
   /** Persisted method discriminator; absent on legacy Flora executions. */
   workflowMode?: WorkflowMode;
+  /** Lamp relight-strength target shared by every member; absent on legacy records. */
+  relightIntensity?: number;
   /** Exact first-cut prompt shared by every admitted member. */
   renderedPrompt: string;
   /** Lowercase sha256 of renderedPrompt. */
@@ -823,6 +827,11 @@ export interface Batch {
   name: string;
   /** Persisted method discriminator; absent on legacy Flora batches. */
   workflowMode?: WorkflowMode;
+  /**
+   * One immutable Lamp relight-strength target for the whole batch.
+   * Missing legacy values resolve to the historical Lamp default.
+   */
+  relightIntensity?: number;
   createdAt: number;
   runIds: string[];
   concurrency: number;

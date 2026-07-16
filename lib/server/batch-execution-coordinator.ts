@@ -3,6 +3,7 @@ import "server-only";
 import { start } from "workflow/api";
 import { workflowRunLiveness } from "@/lib/server/dead-workflow-recovery";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
+import { normalizeRelightIntensity } from "@/lib/relight-intensity";
 import {
   batchApprovalStartedAt,
   batchApprovalScope,
@@ -115,11 +116,19 @@ function buildExecution(
   );
   const maximum =
     workflowMode === "lamp" ? lampMaximumMicros() : firstCutMaximumMicros();
-  const renderedPrompt = initialMegaPrompt(workflowMode).rendered;
+  const relightIntensity =
+    workflowMode === "lamp"
+      ? normalizeRelightIntensity(batch.relightIntensity)
+      : undefined;
+  const renderedPrompt = initialMegaPrompt(
+    workflowMode,
+    relightIntensity
+  ).rendered;
   return {
     batchId: batch.id,
     executionId: batchExecutionId(batch.id, workflowMode),
     workflowMode,
+    ...(relightIntensity !== undefined ? { relightIntensity } : {}),
     renderedPrompt,
     inputHash: runExecutionInputHash(renderedPrompt),
     status: "queued",
@@ -149,6 +158,9 @@ function assertExecutionMatchesBatch(
     execution.batchId !== batch.id ||
     execution.executionId !== batchExecutionId(batch.id, workflowMode) ||
     batchExecutionMode(execution) !== workflowMode ||
+    (workflowMode === "lamp" &&
+      normalizeRelightIntensity(execution.relightIntensity) !==
+        normalizeRelightIntensity(batch.relightIntensity)) ||
     execution.concurrency !== DURABLE_BATCH_CONCURRENCY ||
     execution.members.length !== batch.runIds.length
   ) {
@@ -209,7 +221,10 @@ export async function prepareBatchExecution(batch: Batch): Promise<BatchExecutio
   if (existing) {
     if (
       existing.executionId !== batchExecutionId(id, workflowMode) ||
-      batchExecutionMode(existing) !== workflowMode
+      batchExecutionMode(existing) !== workflowMode ||
+      (workflowMode === "lamp" &&
+        normalizeRelightIntensity(existing.relightIntensity) !==
+          normalizeRelightIntensity(batch.relightIntensity))
     ) {
       throw new Error("A different durable execution already owns this batch.");
     }
@@ -226,6 +241,13 @@ export async function prepareBatchExecution(batch: Batch): Promise<BatchExecutio
   assertCanonicalBatch(canonical);
   if (normalizedWorkflowMode(canonical.workflowMode) !== workflowMode) {
     throw new Error("The batch workflow mode changed before admission.");
+  }
+  if (
+    workflowMode === "lamp" &&
+    normalizeRelightIntensity(canonical.relightIntensity) !==
+      normalizeRelightIntensity(batch.relightIntensity)
+  ) {
+    throw new Error("The batch relight strength changed before admission.");
   }
   if (canonical.status !== "ready") {
     throw new Error("The batch execution plan must be prepared while ready.");
@@ -270,6 +292,9 @@ export async function prepareBatchExecution(batch: Batch): Promise<BatchExecutio
     if (
       created.execution.executionId !== batchExecutionId(id, workflowMode) ||
       batchExecutionMode(created.execution) !== workflowMode ||
+      (workflowMode === "lamp" &&
+        normalizeRelightIntensity(created.execution.relightIntensity) !==
+          normalizeRelightIntensity(plannedBatch.relightIntensity)) ||
       created.execution.concurrency !== DURABLE_BATCH_CONCURRENCY
     ) {
       throw new Error("A different durable execution already owns this batch.");
@@ -302,6 +327,9 @@ export async function enqueueBatchExecution(
     execution.executionId !==
       batchExecutionId(id, normalizedWorkflowMode(batch.workflowMode)) ||
     batchExecutionMode(execution) !== normalizedWorkflowMode(batch.workflowMode) ||
+    (batchExecutionMode(execution) === "lamp" &&
+      normalizeRelightIntensity(execution.relightIntensity) !==
+        normalizeRelightIntensity(batch.relightIntensity)) ||
     execution.concurrency !== DURABLE_BATCH_CONCURRENCY
   ) {
     throw new Error("A different durable execution already owns this batch.");

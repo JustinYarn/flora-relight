@@ -50,6 +50,10 @@ import {
   FLORA_RETIRED_BATCH_ERROR,
   floraRetiredForNewWork,
 } from "@/lib/workflow-mode";
+import {
+  isRelightIntensity,
+  normalizeRelightIntensity,
+} from "@/lib/relight-intensity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -60,6 +64,7 @@ interface StartBody {
   approveLiveSpend?: unknown;
   allowIncompleteUploads?: unknown;
   workflowMode?: unknown;
+  relightIntensity?: unknown;
 }
 
 function readyVideo(
@@ -97,13 +102,20 @@ function validateBody(body: StartBody): string | null {
   ) {
     return 'workflowMode must be either "flora" or "lamp".';
   }
+  if (
+    body.relightIntensity !== undefined &&
+    !isRelightIntensity(body.relightIntensity)
+  ) {
+    return "relightIntensity must be a five-point step from 0 through 100.";
+  }
   return null;
 }
 
 async function canonicalizeReadyRuns(
   storage: StorageDriver,
   batch: Batch,
-  workflowMode: WorkflowMode
+  workflowMode: WorkflowMode,
+  relightIntensity?: number
 ): Promise<Run[]> {
   const allowedRunIds = new Set(batch.runIds);
   const uploads = (batch.uploads ?? []).filter(
@@ -148,12 +160,20 @@ async function canonicalizeReadyRuns(
         ...updated,
         workflowId: workflow.id,
         workflowMode,
+        ...(workflowMode === "lamp"
+          ? { relightIntensity: normalizeRelightIntensity(relightIntensity) }
+          : {}),
         nodeStates: freshNodeStates(workflowMode),
       };
       await storage.putRun(canonicalRun);
       runs.push(canonicalRun);
     } else {
-      const run = buildQueuedRun(canonicalVideo, Date.now(), workflowMode);
+      const run = buildQueuedRun(
+        canonicalVideo,
+        Date.now(),
+        workflowMode,
+        relightIntensity
+      );
       await storage.putRun(run);
       runs.push(run);
     }
@@ -361,6 +381,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 409 }
     );
   }
+  const requestedRelightIntensity =
+    requestedMode === "lamp"
+      ? normalizeRelightIntensity(body.relightIntensity)
+      : undefined;
+  const persistedRelightIntensity =
+    persistedMode === "lamp"
+      ? normalizeRelightIntensity(existing.relightIntensity)
+      : undefined;
+  if (requestedRelightIntensity !== persistedRelightIntensity) {
+    return NextResponse.json(
+      {
+        error:
+          "The requested relight strength does not match this durable batch. Reload before starting it.",
+      },
+      { status: 409 }
+    );
+  }
   if (existing.status === "failed") {
     return NextResponse.json(
       { error: "This failed upload batch cannot be restarted automatically." },
@@ -456,7 +493,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     let preparedRuns = await canonicalizeReadyRuns(
       storage,
       startableBatch,
-      persistedMode
+      persistedMode,
+      persistedRelightIntensity
     );
     if (startableBatch.status === "uploading") {
       // An interrupted browser upload may leave a durable mix of ready and
@@ -485,13 +523,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         preparedRuns = await canonicalizeReadyRuns(
           storage,
           startableBatch,
-          persistedMode
+          persistedMode,
+          persistedRelightIntensity
         );
       }
     }
     const preparedBatch: Batch = {
       ...startableBatch,
       workflowMode: persistedMode,
+      ...(persistedRelightIntensity !== undefined
+        ? { relightIntensity: persistedRelightIntensity }
+        : {}),
       runIds: preparedRuns.map((run) => run.id),
       concurrency: DURABLE_BATCH_CONCURRENCY,
       budgetUsd:

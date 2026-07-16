@@ -147,6 +147,10 @@ export function mergeBatch(current: Batch | null, incoming: Batch): Batch {
     // upload receipts or presentation text, but it cannot turn a Flora draft
     // into Lamp (or vice versa), including after server admission.
     workflowMode: current.workflowMode,
+    // Relight strength is selected before upload and belongs to the same
+    // immutable batch identity. A stale tab cannot retarget already-prepared
+    // clips or change the exact prompt a later retry will bind.
+    relightIntensity: current.relightIntensity,
     status: advances ? incoming.status : current.status,
     runIds,
     uploads: mergeBatchUploads(current.uploads, incoming.uploads),

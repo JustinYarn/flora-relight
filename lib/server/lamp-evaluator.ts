@@ -29,6 +29,10 @@ import {
 import { getStorage } from "@/lib/server/storage";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
 import type { EvalResult } from "@/lib/types";
+import {
+  normalizeRelightIntensity,
+  relightIntensityProfile,
+} from "@/lib/relight-intensity";
 
 const VIOLATION_SCHEMA = {
   type: "object",
@@ -80,14 +84,63 @@ const RESPONSE_SCHEMA = {
   },
 } as const;
 
-function evaluatorPrompt(): string {
+function intensityAwareLightingRubric(relightIntensity: number): string {
+  const profile = relightIntensityProfile(relightIntensity);
+  return `ROLE
+You are a director of photography reviewing whether a source-faithful relight hit its explicitly requested creative strength.
+
+REQUESTED TARGET — authoritative
+- Relight strength: ${relightIntensity}/100
+- Profile: ${profile.label}
+- Facial-midtone lift target: approximately ${profile.faceLiftStops} stops relative to the source
+- Key-to-fill contrast target: approximately ${profile.keyFillRatio}:1
+- Intended look: ${profile.description}
+
+This numeric target is not a quality score. Judge the quality, believability, temporal stability, and accuracy of the candidate AT this requested strength. A faithful subtle daylight lift may earn a passing or excellent score at a low setting; a dramatic studio treatment at that same low setting is a failure. Likewise, a timid near-copy is a failure at a high setting.
+
+WHAT TO INSPECT ACROSS THE COMPLETE VIDEO
+1. Target strength: does the magnitude of the visible lighting change match ${relightIntensity}/100 rather than drifting weaker or stronger?
+2. Directional shaping: does the candidate create the profile's intended key/fill structure instead of applying only a flat global exposure change?
+3. Face lift: is the facial-midtone lift close to ${profile.faceLiftStops} stops, without clipping or crushed shadows?
+4. Contrast and separation: is the key-to-fill relationship close to ${profile.keyFillRatio}:1, with only the amount of rim/separation appropriate to ${profile.label}?
+5. Eyes and skin: are catchlights, skin color, texture, and highlight roll-off natural for this profile, with no beauty filtering or glow?
+6. Believability: could this illumination plausibly exist in the unchanged room, with no visible fixtures, halos, matte seams, or theatrical color?
+7. Temporal consistency: does the chosen strength, direction, exposure, and white balance hold through motion and speech from first frame to last?
+
+NAMED FAILURE FLAGS
+- too_weak_for_target: the overall relight falls materially below ${relightIntensity}/100
+- too_strong_for_target: the overall relight materially exceeds ${relightIntensity}/100
+- global_exposure_only: brightness changed without the requested directional modelling
+- beauty_glow: diffusion or bloom substitutes for lighting
+- over_warm: skin or neutrals carry an implausible orange cast
+- clipping: facial highlight detail is destroyed
+- halo_or_masking: visible matte, glow seam, or masking boundary
+
+SCORING ANCHORS
+- 95: The candidate precisely hits ${relightIntensity}/100 and the ${profile.label} profile across the full timeline, while remaining photorealistic and source-faithful.
+- 75: The intended profile is recognizable and better executed than the source, but strength modestly under- or overshoots, or direction, roll-off, separation, or stability is incomplete.
+- 40: The candidate substantially misses the requested strength/profile, is merely a global exposure change, or introduces harshness, clipping, color cast, glow, or compositing artifacts.
+
+Thresholds for this eval: pass ≥ 80, borderline ≥ 65, else fail.
+
+For every genuine lighting defect, the correction MUST begin "Within the requested ${relightIntensity}/100 relight strength," and repair execution without asking Final to increase or decrease the overall transformation beyond this target.`;
+}
+
+export function evaluatorPrompt(relightIntensity: number): string {
+  const normalizedIntensity = normalizeRelightIntensity(relightIntensity);
   const rubrics = LAMP_VISUAL_EVAL_DEFS.map((definition, index) => {
     // The canonical library is also used by Flora's sampled-frame loop. Lamp
     // keeps its criteria while removing that loop's input/output envelope.
-    const rubric = lampWholeVideoRubric(definition);
+    const intensityAware = definition.id === "lighting-quality-delta";
+    const rubric = intensityAware
+      ? intensityAwareLightingRubric(normalizedIntensity)
+      : lampWholeVideoRubric(definition);
+    const description = intensityAware
+      ? `Checks whether the relight is professionally executed at the requested ${normalizedIntensity}/100 strength, without under- or overshooting it.`
+      : definition.description;
     return [
       `CHECK ${index + 1}: ${definition.id} — ${definition.name}`,
-      definition.description,
+      description,
       `Pass threshold: ${definition.passThreshold}; borderline threshold: ${definition.borderlineThreshold}.`,
       rubric,
     ].join("\n");
@@ -152,6 +205,7 @@ export async function runLampHolisticEvaluation(input: {
   const storage = getStorage();
   const run = await storage.getRun(input.runId);
   if (!run) throw new Error("Run not found for Lamp evaluation.");
+  const relightIntensity = normalizeRelightIntensity(run.relightIntensity);
   const generation = run.providerOperations?.find(
     (operation) => operation.id === videoGenerationOperationId(input.iteration)
   );
@@ -166,7 +220,7 @@ export async function runLampHolisticEvaluation(input: {
     );
   }
 
-  const prompt = evaluatorPrompt();
+  const prompt = evaluatorPrompt(relightIntensity);
   const operationId = lampEvaluationOperationId(input.iteration);
   const claim = await beginPaidOperation({
     run,
@@ -181,6 +235,7 @@ export async function runLampHolisticEvaluation(input: {
       sourceUrl: run.originalVideo.url,
       candidateUrl: generation.result.videoUrl,
       generationPrompt: generation.renderedPrompt,
+      relightIntensity,
       audioVerified: generation.result.audioVerified,
       prompt,
     },
