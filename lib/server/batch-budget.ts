@@ -9,8 +9,22 @@ export const USD_MICROS = 1_000_000;
 /**
  * Hard server-owned live batch width. Browser and legacy Batch records are
  * presentation/input state only; they never get to widen provider dispatch.
+ *
+ * FLORA_BATCH_CONCURRENCY (1-4) narrows or widens the server default of 2.
+ * Observed live 2026-07-15: concurrency 2 can exceed a low-tier account's
+ * spend-based rolling-10-minute rate limit (Tier 1: $10/10min; thinner
+ * billing histories throttle lower), and throttled video interactions are
+ * admitted then killed upstream — every create dies with permanent read
+ * failures. Concurrency 1 (~$2-3 per 10min) stays under the limit.
+ * NOTE: a running BatchExecution binds the width it was created with; change
+ * this only between batches, never while one is dispatching.
  */
-export const DURABLE_BATCH_CONCURRENCY = 2;
+function configuredBatchConcurrency(): number {
+  const raw = Number(process.env.FLORA_BATCH_CONCURRENCY);
+  return Number.isInteger(raw) && raw >= 1 && raw <= 4 ? raw : 2;
+}
+
+export const DURABLE_BATCH_CONCURRENCY = configuredBatchConcurrency();
 
 export interface BatchBudgetMember {
   runId: string;
