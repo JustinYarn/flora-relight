@@ -1,6 +1,7 @@
 import "server-only";
 
 import { start } from "workflow/api";
+import { workflowRunLiveness } from "@/lib/server/dead-workflow-recovery";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import {
   batchApprovalStartedAt,
@@ -326,6 +327,45 @@ export async function enqueueBatchExecution(
       );
     }
     return { execution, enqueued: false };
+  }
+  if (execution.status === "running") {
+    // Dead-workflow adoption, step 2 of 2: when the bound parent workflow is
+    // provably dead (external cancel, engine loss, a local dev server that
+    // died with the process), release the binding and start a fresh
+    // contender that resumes dispatch from the durable member states.
+    // "alive" and "unknown" both fail open — a workflow that might still be
+    // writing keeps its binding.
+    if (execution.workflowRunId !== undefined) {
+      const liveness = await workflowRunLiveness(execution.workflowRunId);
+      if (liveness === "alive" || liveness === "unknown") {
+        return { execution, enqueued: false };
+      }
+      const released = await storage.advanceBatchExecution(
+        {
+          ...execution,
+          workflowRunId: undefined,
+          revision: execution.revision + 1,
+          updatedAt: Math.max(Date.now(), execution.updatedAt),
+        },
+        execution.revision
+      );
+      if (!released.advanced || !released.execution) {
+        return { execution: released.execution ?? execution, enqueued: false };
+      }
+      const adopted = await start(durableRelightBatch, [
+        { batchId: id, executionId: execution.executionId },
+      ]);
+      return {
+        execution: released.execution,
+        enqueued: true,
+        contenderWorkflowRunId: adopted.runId,
+      };
+    }
+    // Released (or never bound after a crash) — submit a contender directly.
+    const contender = await start(durableRelightBatch, [
+      { batchId: id, executionId: execution.executionId },
+    ]);
+    return { execution, enqueued: true, contenderWorkflowRunId: contender.runId };
   }
   if (execution.status !== "queued") {
     return { execution, enqueued: false };

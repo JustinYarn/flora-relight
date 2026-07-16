@@ -30,6 +30,7 @@ import {
   assertVideoGenerationAuthorized,
 } from "@/lib/server/spend-approval";
 import { confirmedLampBatchActualMicros } from "@/lib/server/lamp-batch-accounting";
+import { reconcileDeadWorkflowExecution } from "@/lib/server/dead-workflow-recovery";
 import { getStorage, type StorageDriver } from "@/lib/server/storage";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
 import type {
@@ -447,7 +448,11 @@ async function bindBatchExecution(
       skippedRunIds,
     };
   }
-  if (current.status !== "queued") {
+  // "queued" is the normal first bind; "running" without a workflowRunId is
+  // a dead-workflow adoption — the coordinator proved the old parent dead
+  // and released its binding, and this contender resumes from the durable
+  // member states exactly where dispatch stopped.
+  if (current.status !== "queued" && current.status !== "running") {
     return { status: "not_owner", skippedRunIds: [] };
   }
   const candidate: BatchExecution = {
@@ -816,6 +821,21 @@ async function reconcileBatchMembers(
           paidOperationsForBatch(storage, current, member.runId),
         ]);
         let child = initialChild;
+        // A child whose own workflow died (it shares the parent's process
+        // locally) would otherwise hold its member "running" forever. The
+        // adopter is lease-throttled, probes liveness, fails open on
+        // "unknown", and seals with honest provider probing when dead —
+        // after which classifyMember routes the member like any other
+        // reconciliation case and dispatch continues past it.
+        if (
+          child &&
+          child.status === "running" &&
+          child.workflowRunId &&
+          memberExecutionMatches(child, current, member.runId)
+        ) {
+          const adopted = await reconcileDeadWorkflowExecution(child, run);
+          if (adopted) child = adopted;
+        }
         const mode = batchExecutionMode(current);
         const completionReady =
           mode === "lamp"

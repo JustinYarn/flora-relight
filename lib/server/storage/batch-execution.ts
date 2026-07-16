@@ -337,6 +337,17 @@ export function assertBatchExecutionTransition(
     current,
     candidate
   );
+  // Dead-workflow adoption, step 1 of 2: a running execution whose bound
+  // workflow the coordinator PROVED dead (liveness probe, fail-open on
+  // unknown) releases its binding so a fresh contender can rebind via the
+  // normal claim path. Nothing but the binding itself may change here; the
+  // fencing that protects against a not-actually-dead writer is CAS
+  // revisions plus every step's ownsBatchExecution workflowRunId check.
+  const deadWorkflowRelease =
+    current.status === "running" &&
+    candidate.status === "running" &&
+    current.workflowRunId !== undefined &&
+    candidate.workflowRunId === undefined;
   if (
     candidate.batchId !== current.batchId ||
     candidate.executionId !== current.executionId ||
@@ -358,6 +369,7 @@ export function assertBatchExecutionTransition(
   }
   if (
     !approvalReplay &&
+    !deadWorkflowRelease &&
     current.workflowRunId !== undefined &&
     candidate.workflowRunId !== current.workflowRunId
   ) {
