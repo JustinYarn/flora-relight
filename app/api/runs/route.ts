@@ -51,6 +51,12 @@ import { hasGeminiKey } from "@/lib/server/gemini";
 import { v2SyncConfigIssue } from "@/lib/server/syncnet";
 import { enqueueRunExecution } from "@/lib/server/run-execution-coordinator";
 import { workflowRunLiveness } from "@/lib/server/dead-workflow-recovery";
+import {
+  FLORA_RETIRED_RUN_ERROR,
+  floraRetiredForNewWork,
+  runHasStartedWork,
+  runWorkflowMode,
+} from "@/lib/workflow-mode";
 import { isArchivedLostGenerationId } from "@/lib/lost-interaction";
 import { summarizeBatchExecution } from "@/lib/server/batch-execution-view";
 import { runExecutionInputHash } from "@/lib/server/run-execution-input";
@@ -69,7 +75,7 @@ const SAFE_RESPONSE_BYTES = 3_500_000;
 const ALL_EVAL_IDS = EVAL_DEFS.map((definition) => definition.id);
 
 function persistedWorkflowMode(run: Run): WorkflowMode {
-  return run.workflowMode ?? (run.workflowId === "lamp-v1" ? "lamp" : "flora");
+  return runWorkflowMode(run);
 }
 
 async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
@@ -1111,6 +1117,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const storage = getStorage();
+  const existing = await storage.getRun(video.runId);
+  // Flora admission requires a run that already carries real Flora work; a
+  // fresh run id or a never-started Flora draft is new work and is refused
+  // before the ingest read downloads and probes any media.
+  if (
+    floraRetiredForNewWork(
+      workflowMode,
+      existing && runHasStartedWork(existing)
+        ? persistedWorkflowMode(existing)
+        : null
+    )
+  ) {
+    return NextResponse.json({ error: FLORA_RETIRED_RUN_ERROR }, { status: 410 });
+  }
   let ingest;
   try {
     ingest = await readCanonicalIngestByRunId(video.runId);
@@ -1141,7 +1161,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     height: ingest.height,
     hasAudio: ingest.hasAudio,
   };
-  const existing = await storage.getRun(video.runId);
   if (existing) {
     const existingExecution = await storage.getRunExecution(video.runId);
     const existingMode = persistedWorkflowMode(existing);

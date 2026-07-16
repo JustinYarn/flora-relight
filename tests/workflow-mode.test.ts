@@ -3,7 +3,10 @@ import test from "node:test";
 
 import {
   DEFAULT_WORKFLOW_MODE,
+  floraRetiredForNewWork,
   parseWorkflowMode,
+  runHasStartedWork,
+  runWorkflowMode,
   workflowModeLabel,
 } from "../lib/workflow-mode.ts";
 import {
@@ -85,4 +88,52 @@ test("a later browser batch snapshot cannot change the batch method", () => {
   const merged = mergeBatch(current, staleModeFlip);
   assert.equal(merged.workflowMode, "lamp");
   assert.equal(merged.status, "running");
+});
+
+test("Flora is retired for new work but persisted Flora records may continue", () => {
+  assert.equal(floraRetiredForNewWork("flora", null), true);
+  assert.equal(floraRetiredForNewWork("flora", "lamp"), true);
+  assert.equal(floraRetiredForNewWork("flora", "flora"), false);
+  assert.equal(floraRetiredForNewWork("lamp", null), false);
+  assert.equal(floraRetiredForNewWork("lamp", "flora"), false);
+  assert.equal(floraRetiredForNewWork("lamp", "lamp"), false);
+});
+
+test("legacy records without a saved mode resolve it from the workflow id", () => {
+  assert.equal(runWorkflowMode({ workflowId: workflowForMode("lamp").id }), "lamp");
+  assert.equal(
+    runWorkflowMode({ workflowId: workflowForMode("flora").id }),
+    "flora"
+  );
+  assert.equal(runWorkflowMode({ workflowId: "relight-v0" }), "flora");
+  assert.equal(
+    runWorkflowMode({ workflowMode: "flora", workflowId: "lamp-v1" }),
+    "flora"
+  );
+});
+
+test("a run counts as started once any spend, provider, judged, or graded state exists", () => {
+  const pristine = {
+    spendApproval: undefined,
+    providerOperations: [],
+    iterations: [],
+    humanGrade: undefined,
+  };
+  assert.equal(runHasStartedWork(pristine), false);
+  assert.equal(
+    runHasStartedWork({ ...pristine, spendApproval: {} as never }),
+    true
+  );
+  assert.equal(
+    runHasStartedWork({ ...pristine, providerOperations: [{} as never] }),
+    true
+  );
+  assert.equal(
+    runHasStartedWork({ ...pristine, iterations: [{} as never] }),
+    true
+  );
+  assert.equal(
+    runHasStartedWork({ ...pristine, humanGrade: {} as never }),
+    true
+  );
 });

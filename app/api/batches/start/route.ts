@@ -46,6 +46,10 @@ import {
 } from "@/lib/server/spend-approval";
 import { getStorage, type StorageDriver } from "@/lib/server/storage";
 import { workflowForMode } from "@/lib/workflow-def";
+import {
+  FLORA_RETIRED_BATCH_ERROR,
+  floraRetiredForNewWork,
+} from "@/lib/workflow-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -375,6 +379,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   try {
     let existingExecution = await storage.getBatchExecution(existing.id);
+
+    // Flora may continue only where Flora work already started: a durable
+    // Flora execution, or a running/done record recovering a lost response.
+    // A never-started Flora draft must be recreated as Lamp.
+    const floraContinuationMode = existingExecution
+      ? batchExecutionMode(existingExecution)
+      : existing.status === "running" || existing.status === "done"
+        ? persistedMode
+        : null;
+    if (floraRetiredForNewWork(requestedMode, floraContinuationMode)) {
+      return NextResponse.json(
+        { error: FLORA_RETIRED_BATCH_ERROR },
+        { status: 410 }
+      );
+    }
 
     if (liveConfigured && body.approveLiveSpend !== true) {
       return NextResponse.json(

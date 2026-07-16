@@ -32,7 +32,7 @@ import type {
   VideoAsset,
   WorkflowMode,
 } from "@/lib/types";
-import { workflowModeLabel } from "@/lib/workflow-mode";
+import { runWorkflowMode, workflowModeLabel } from "@/lib/workflow-mode";
 import { parseOptionalPositiveBudgetUsd } from "@/lib/budget-input";
 
 const FLORA_FLOW = [
@@ -1204,7 +1204,7 @@ export default function DashboardPage() {
                 <p className="text-sm font-medium text-ink">
                   {resumableSingle.serverExecution?.status ===
                   "user_action_required"
-                    ? `${workflowModeLabel(resumableSingle.workflowMode ?? "lamp")} is paused for approval`
+                    ? `${workflowModeLabel(runWorkflowMode(resumableSingle))} is paused for approval`
                     : "Uploaded clip ready to generate"}
                 </p>
                 <p className="mt-0.5 truncate text-2xs text-faint">
@@ -1226,8 +1226,7 @@ export default function DashboardPage() {
                     setLaunching("run");
                     try {
                       const id = await startRun(resumableSingle.originalVideo, {
-                        workflowMode:
-                          resumableSingle.workflowMode ?? workflowMode,
+                        workflowMode: runWorkflowMode(resumableSingle),
                       });
                       router.push(`/runs/${id}`);
                     } catch (error) {
@@ -1244,8 +1243,7 @@ export default function DashboardPage() {
                   setPendingLaunch({
                     video: resumableSingle.originalVideo,
                     trimNote: null,
-                    workflowMode:
-                      resumableSingle.workflowMode ?? workflowMode,
+                    workflowMode: runWorkflowMode(resumableSingle),
                   });
                 }}
               >

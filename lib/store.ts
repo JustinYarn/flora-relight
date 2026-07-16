@@ -31,8 +31,6 @@ import {
 } from "@/lib/batch-recovery";
 import {
   DEFAULT_WORKFLOW_MODE,
-  parseWorkflowMode,
-  WORKFLOW_MODE_STORAGE_KEY,
 } from "@/lib/workflow-mode";
 
 /**
@@ -80,7 +78,7 @@ interface AppStore {
    * the server response must explicitly claim live run/batch ownership.
    */
   mode: "mock" | "live";
-  /** User-selected product workflow. Stored locally; provider mode is separate. */
+  /** Product workflow for new work. Always Lamp: Flora is retired. */
   workflowMode: WorkflowMode;
   /**
    * True once hydrate() has finished pulling persisted state (or confirmed
@@ -88,7 +86,6 @@ interface AppStore {
    */
   hydrated: boolean;
   setMode(mode: "mock" | "live"): void;
-  setWorkflowMode(mode: WorkflowMode): void;
   /**
    * One-time boot sync (called by lib/persist.ts startPersistence):
    *   1. GET /api/live/health → flips mode to "live" when the server says
@@ -388,35 +385,14 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   hydrated: false,
 
   setMode: (mode) => set({ mode }),
-  setWorkflowMode: (workflowMode) => {
-    set({ workflowMode, workflow: workflowForMode(workflowMode) });
-    if (typeof window !== "undefined") {
-      try {
-        window.localStorage.setItem(WORKFLOW_MODE_STORAGE_KEY, workflowMode);
-      } catch {
-        // Storage can be unavailable in private/locked-down browser contexts.
-        // The selection still remains active for this tab.
-      }
-    }
-  },
 
   hydrate: () => {
     if (typeof window === "undefined") return Promise.resolve(false); // client-only
     if (hydratePromise) return hydratePromise;
     const hydration = (async (): Promise<boolean> => {
-      try {
-        const savedWorkflowMode = parseWorkflowMode(
-          window.localStorage.getItem(WORKFLOW_MODE_STORAGE_KEY)
-        );
-        if (savedWorkflowMode) {
-          set({
-            workflowMode: savedWorkflowMode,
-            workflow: workflowForMode(savedWorkflowMode),
-          });
-        }
-      } catch {
-        // Keep the explicit Lamp default when browser storage is unavailable.
-      }
+      // The saved workflow-mode preference is intentionally not read back:
+      // Flora is retired for new work, so a stale saved "flora" must not
+      // resurrect it, and the Lamp default already covers everything else.
       // 1. Live-mode health check. A missing route means a mock-only static
       // environment; a transient/network/server failure must be retried so a
       // live deployment never silently boots with persistence disabled.
