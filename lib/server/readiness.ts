@@ -7,6 +7,7 @@
  */
 
 import { getFfmpegReadiness, type FfmpegReadiness } from "@/lib/server/ffmpeg";
+import { v2SyncConfigIssue } from "@/lib/server/syncnet";
 import {
   getStorageConfiguration,
   getStorage,
@@ -57,6 +58,12 @@ export interface AppReadiness {
     verification: ReadinessStorageVerification;
   };
   ffmpeg: FfmpegReadiness;
+  /** Lamp's V2 sync stack (SyncNet service + Replicate token), config-only probe. */
+  v2Sync: {
+    configured: boolean;
+    /** Human-readable configuration problem; absent when configured. */
+    issue?: string;
+  };
 }
 
 const VERIFICATION_CACHE_MS = 60_000;
@@ -149,6 +156,7 @@ export async function getAppReadiness(): Promise<AppReadiness> {
         ? "durability_required"
         : "verification_failed";
 
+  const v2SyncIssue = v2SyncConfigIssue();
   return {
     schema: "flora.readiness.v1",
     generatedAt: new Date().toISOString(),
@@ -175,5 +183,9 @@ export async function getAppReadiness(): Promise<AppReadiness> {
       verification,
     },
     ffmpeg,
+    v2Sync: {
+      configured: v2SyncIssue === null,
+      ...(v2SyncIssue === null ? {} : { issue: v2SyncIssue }),
+    },
   };
 }

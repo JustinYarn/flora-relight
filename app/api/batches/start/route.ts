@@ -35,6 +35,7 @@ import {
 } from "@/lib/server/batch-execution-coordinator";
 import { summarizeBatchExecution } from "@/lib/server/batch-execution-view";
 import { hasGeminiKey } from "@/lib/server/gemini";
+import { v2SyncConfigIssue } from "@/lib/server/syncnet";
 import { readCanonicalIngestByRunId } from "@/lib/server/ingest";
 import { isValidRunId } from "@/lib/server/runstore";
 import {
@@ -321,6 +322,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: "Gemini video generation is not configured." },
       { status: 503 }
     );
+  }
+  if (
+    body.approveLiveSpend === true &&
+    normalizedWorkflowMode(body.workflowMode as WorkflowMode | undefined) ===
+      "lamp"
+  ) {
+    // Refuse admission while the V2 sync stack is misconfigured — otherwise
+    // every audio-bearing member fails after both paid generations.
+    const syncIssue = v2SyncConfigIssue();
+    if (syncIssue) {
+      return NextResponse.json(
+        { error: `Lamp's final sync verification is not configured: ${syncIssue}` },
+        { status: 503 }
+      );
+    }
   }
   const storage = getStorage();
   const batches = await storage.getBatches();

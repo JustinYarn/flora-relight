@@ -48,6 +48,7 @@ import {
 } from "@/lib/lamp-evaluation";
 import { readCanonicalIngestByRunId } from "@/lib/server/ingest";
 import { hasGeminiKey } from "@/lib/server/gemini";
+import { v2SyncConfigIssue } from "@/lib/server/syncnet";
 import { enqueueRunExecution } from "@/lib/server/run-execution-coordinator";
 import { workflowRunLiveness } from "@/lib/server/dead-workflow-recovery";
 import { isArchivedLostGenerationId } from "@/lib/lost-interaction";
@@ -1095,6 +1096,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: "Gemini video generation is not configured." },
       { status: 503 }
     );
+  }
+  if (body.approveLiveSpend === true && workflowMode === "lamp") {
+    // The V2 sync check runs after both paid generations; a broken SyncNet /
+    // Replicate configuration must refuse admission here, not fail the run
+    // after ~$4 of spend.
+    const syncIssue = v2SyncConfigIssue();
+    if (syncIssue) {
+      return NextResponse.json(
+        { error: `Lamp's final sync verification is not configured: ${syncIssue}` },
+        { status: 503 }
+      );
+    }
   }
 
   const storage = getStorage();

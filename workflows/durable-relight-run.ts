@@ -234,13 +234,33 @@ async function finalizeV2WithSync(
   if (checkpoint.state !== "started") {
     throw new Error("V2 Lipsync repair has no durable prediction id.");
   }
-  for (let poll = 0; poll < MAX_POLLS; poll += 1) {
-    await sleep("8s");
-    const result = await pollV2LipsyncPredictionStep(
-      input,
-      workflowRunId,
-      checkpoint.predictionId
-    );
+  // Fast polling for the expected window, then a free 5-minute reconciliation
+  // cadence for up to seven days — a billed prediction slower than 20 minutes
+  // (model cold start, queue depth) must never be abandoned into manual
+  // reconciliation while polling costs nothing.
+  for (let poll = 0; poll < MAX_POLLS + MAX_RECONCILIATION_POLLS; poll += 1) {
+    await sleep(poll < MAX_POLLS ? "8s" : "5m");
+    let result: Awaited<ReturnType<typeof pollV2LipsyncPredictionStep>>;
+    try {
+      result = await pollV2LipsyncPredictionStep(
+        input,
+        workflowRunId,
+        checkpoint.predictionId
+      );
+    } catch (error) {
+      // A transient read failure must not abandon the billed prediction.
+      // Only a sealed journal (terminal provider status recorded by the
+      // poll itself) or a completed result ends the wait early.
+      const sealed = await readV2SyncCheckpointStep(input, workflowRunId);
+      if (sealed.state === "blocked") throw error;
+      if (sealed.state === "completed") {
+        if (!v2SyncPasses(sealed.result.postSync)) {
+          throw new Error("The completed Lipsync repair still fails SyncNet.");
+        }
+        return { videoUrl: sealed.result.videoUrl, audioVerified: true };
+      }
+      continue;
+    }
     if (!result.done) continue;
     const finalized = await finalizeV2LipsyncStep(
       input,
@@ -254,7 +274,9 @@ async function finalizeV2WithSync(
     }
     return { videoUrl: finalized.videoUrl, audioVerified: true };
   }
-  throw new Error("Lipsync-2-Pro remained unresolved after 20 minutes.");
+  throw new Error(
+    "Lipsync-2-Pro remained unresolved after the extended reconciliation window."
+  );
 }
 
 async function runGenerationAttempt(

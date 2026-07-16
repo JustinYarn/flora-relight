@@ -24,9 +24,11 @@ import {
   createLipsyncPrediction,
   getLipsyncPrediction,
   uploadLipsyncInputs,
+  LipsyncCreateRejectedError,
   type PreparedLipsyncInputs,
 } from "@/lib/server/replicate-lipsync";
-import { analyzeVideoSync } from "@/lib/server/syncnet";
+import { RAW_VIDEO_TRAILING_PADDING_TOLERANCE_SEC } from "@/lib/server/audio-integrity";
+import { analyzeVideoSync, v2SyncConfigIssue } from "@/lib/server/syncnet";
 import {
   getStorage,
   scratchMediaPath,
@@ -195,6 +197,39 @@ export async function prepareV2LipsyncInputs(
   }
 }
 
+/** Response-proven create rejections retry inside the held claim: 30/60/120s. */
+const CREATE_RETRY_DELAYS_MS = [30_000, 60_000, 120_000];
+
+async function createWithRejectionRetry(
+  prepared: PreparedLipsyncInputs
+): Promise<{ id: string }> {
+  let lastError: unknown;
+  for (const delayMs of [...CREATE_RETRY_DELAYS_MS, null]) {
+    try {
+      const prediction = await createLipsyncPrediction(prepared);
+      if (!prediction.id) {
+        throw new Error("Replicate returned no prediction id.");
+      }
+      return { id: prediction.id };
+    } catch (error) {
+      // Only response-proven rejections (4xx incl. 429) are retryable here:
+      // the server answered, so no prediction exists and no bill occurred.
+      // Ambiguous failures (network drop mid-create) must bubble and seal.
+      if (!(error instanceof LipsyncCreateRejectedError) || delayMs === null) {
+        throw error;
+      }
+      lastError = error;
+      console.warn(
+        `[lipsync] create rejected; retrying in ${Math.round(delayMs / 1000)}s — ${error.message.slice(0, 120)}`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Replicate Lipsync create failed after retries.");
+}
+
 export async function startV2LipsyncPrediction(input: {
   runId: string;
   prepared: PreparedLipsyncInputs;
@@ -202,6 +237,13 @@ export async function startV2LipsyncPrediction(input: {
 }): Promise<string> {
   if (v2SyncPasses(input.preSync)) {
     throw new Error("A passing V2 must not start a Lipsync repair.");
+  }
+  // Configuration failures must surface BEFORE the exactly-once claim is
+  // taken: a claim held for a request that provably cannot be sent would
+  // block every later attempt behind manual reconciliation.
+  const configIssue = v2SyncConfigIssue();
+  if (configIssue) {
+    throw new Error(`Lipsync repair is not configured: ${configIssue}`);
   }
   const storage = getStorage();
   const run = await storage.getRun(input.runId);
@@ -236,8 +278,7 @@ export async function startV2LipsyncPrediction(input: {
   }
 
   try {
-    const prediction = await createLipsyncPrediction(input.prepared);
-    if (!prediction.id) throw new Error("Replicate returned no prediction id.");
+    const prediction = await createWithRejectionRetry(input.prepared);
     await persistPaidOperationProviderId(claim.operation, prediction.id);
     return prediction.id;
   } catch (error) {
@@ -349,6 +390,21 @@ export async function finalizeV2Lipsync(input: {
     const rawProbe = await probe(rawPath);
     const run = await storage.getRun(input.runId);
     if (!run) throw new Error("Run not found while finalizing V2 Lipsync.");
+    // Billing ceiling, mirroring the generation path: the model may only
+    // bill for the authorized source duration plus container padding. A
+    // gross overrun (model looping/padding) seals as billing evidence
+    // instead of silently journaling an unbounded charge.
+    const billedCeilingSec =
+      run.originalVideo.durationSec + RAW_VIDEO_TRAILING_PADDING_TOLERANCE_SEC + 1;
+    if (rawProbe.durationSec > billedCeilingSec) {
+      await markPaidOperationReconcileRequired(
+        operation,
+        `Lipsync output ran ${rawProbe.durationSec.toFixed(2)}s against an authorized ceiling of ${billedCeilingSec.toFixed(2)}s (~$${lipsync2ProCostFromDuration(rawProbe.durationSec).toFixed(2)} billed).`
+      );
+      throw new Error(
+        "Lipsync output exceeded the authorized billing ceiling and was sealed for reconciliation."
+      );
+    }
     let conformedPath: string;
     if (await storage.mediaExists(input.runId, CONFORMED_NAME)) {
       conformedPath = await mediaPath(storage, input.runId, CONFORMED_NAME);
@@ -372,13 +428,25 @@ export async function finalizeV2Lipsync(input: {
       await storage.putMediaFromFile(input.runId, REPAIRED_NAME, repairedPath);
     }
 
-    await verifyRemuxedAudio({
-      sourceDurationSec: run.originalVideo.durationSec,
-      videoPath: conformedPath,
-      repairedPath,
-      audioPath,
-    });
-    const postSync = await analyzeVideoSync(repairedPath);
+    let postSync: SyncNetMetrics;
+    try {
+      await verifyRemuxedAudio({
+        sourceDurationSec: run.originalVideo.durationSec,
+        videoPath: conformedPath,
+        repairedPath,
+        audioPath,
+      });
+      postSync = await analyzeVideoSync(repairedPath);
+    } catch (error) {
+      // The repair itself billed; a deterministic verify failure (or a
+      // SyncNet outage outlasting its retry ladder) must not leave that
+      // charge invisible — seal with the billed amount as evidence.
+      await markPaidOperationReconcileRequired(
+        operation,
+        `${error instanceof Error ? error.message.slice(0, 300) : "V2 Lipsync verification failed."} Billed evidence: ${rawProbe.durationSec.toFixed(2)}s ≈ $${lipsync2ProCostFromDuration(rawProbe.durationSec).toFixed(2)}.`
+      );
+      throw error;
+    }
     const repairedUrl = await storage.publicMediaUrl(input.runId, REPAIRED_NAME);
     const baseResult: Omit<LipsyncOperationResult, "videoUrl"> = {
       predictionId: input.predictionId,

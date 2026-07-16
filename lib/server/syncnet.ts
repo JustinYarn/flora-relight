@@ -4,6 +4,8 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import type { SyncNetMetrics } from "@/lib/v2-sync";
 
+export { v2SyncConfigIssue } from "@/lib/server/v2-sync-config";
+
 function analyzeUrl(): string {
   const baseUrl = process.env.SYNCNET_BASE_URL?.trim();
   if (!baseUrl) throw new Error("SYNCNET_BASE_URL is not configured.");
