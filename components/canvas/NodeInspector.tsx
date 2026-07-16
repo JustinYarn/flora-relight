@@ -13,7 +13,6 @@ import type {
 import { EVAL_DEFS, getEvalDef } from "@/lib/prompts/eval-defs";
 import {
   LAMP_EVAL_DEFS,
-  getLampEvalDef,
   isLampRun,
 } from "@/lib/lamp-evaluation";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
@@ -389,7 +388,14 @@ function EvalSection({
   workflowMode: WorkflowMode;
 }) {
   const lamp = run ? isLampRun(run) : workflowMode === "lamp";
-  const definition = lamp ? getLampEvalDef(evalId) : getEvalDef(evalId);
+  // The node's evalId comes from the store-selected workflow graph while
+  // `lamp` follows the selected run — the two can disagree (Flora canvas,
+  // newest run is Lamp). Resolve from the Lamp registry only when the id
+  // exists there; otherwise fall back to the full library instead of
+  // crashing the Engine page on Flora-only nodes.
+  const definition = lamp
+    ? (LAMP_EVAL_DEFS.find((item) => item.id === evalId) ?? getEvalDef(evalId))
+    : getEvalDef(evalId);
   const attempts =
     run?.iterations.flatMap((iteration) => {
       const result = iteration.evalResults.find((item) => item.evalId === evalId);
