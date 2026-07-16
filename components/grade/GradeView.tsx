@@ -377,6 +377,15 @@ export function GradeView(
     () => gradeable.filter((run) => !run.humanGrade),
     [gradeable]
   );
+  const inFlightCount = useMemo(
+    () =>
+      runs.filter(
+        (run) =>
+          run.serverExecution?.status === "queued" ||
+          run.serverExecution?.status === "running"
+      ).length,
+    [runs]
+  );
   const queue = useMemo(() => {
     const skipped = draft?.skippedRunIds ?? [];
     // Skipped clips come back at the end, in the order they were skipped.
@@ -622,8 +631,18 @@ export function GradeView(
           )
         ) : gradeable.length === 0 ? (
           <EmptyState
-            title="Nothing to grade yet"
-            hint="Finish a Lamp run first — once Final and its AI evaluation are complete, the video lands here for grading."
+            title={
+              inFlightCount > 0
+                ? `${inFlightCount} ${inFlightCount === 1 ? "clip is" : "clips are"} still generating`
+                : "Nothing to grade yet"
+            }
+            hint={
+              inFlightCount > 0
+                ? "Finished videos land here automatically — each one becomes gradeable the moment its Final and AI evaluation complete."
+                : runs.length === 0
+                  ? "This workspace has no runs yet. Runs are graded where they were created — the deployed app and a local studio keep separate libraries, so a batch run locally will not appear here."
+                  : "Finish a Lamp run first — once Final and its AI evaluation are complete, the video lands here for grading."
+            }
             action={
               <Link
                 href="/"
