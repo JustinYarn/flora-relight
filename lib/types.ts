@@ -632,6 +632,11 @@ export interface SpendApproval {
 /** One in-progress answer in the grading workspace. */
 export interface GradeDraftAnswer {
   points: HumanCheckGrade["points"];
+  /**
+   * Exact 0–100 input used by the isolated Lamp Slider Lab. The canonical
+   * five-button grader leaves this absent and continues to save HumanGrade.
+   */
+  numericScore?: number;
   /** Kept untrimmed while editing so autosave never changes what was typed. */
   note: string;
 }

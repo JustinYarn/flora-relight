@@ -8,6 +8,7 @@ import { EmptyState } from "@/components/ui";
 import { finalLampIteration, isGradeable } from "@/components/grade/derive";
 import { ClipGrader } from "@/components/grade/ClipGrader";
 import { ResultsView } from "@/components/grade/ResultsView";
+import { SliderLab } from "@/components/grade/SliderLab";
 import { useGradeDraft } from "@/components/grade/useGradeDraft";
 import { formatRunDate } from "@/components/library/derive";
 import { markServerRunObserved } from "@/lib/persist";
@@ -26,7 +27,7 @@ import { mergeGradeFeedRuns } from "@/components/grade/run-feed";
  * dedicated atomic API write instead of the browser's whole-run sync path.
  */
 
-type Mode = "grade" | "results";
+type Mode = "grade" | "slider" | "results";
 
 function emptyClipDraft(): GradeClipDraft {
   return { answers: {}, overallNote: "" };
@@ -51,6 +52,9 @@ function ModeTabs({
     >
       <button className={cls("grade")} onClick={() => onChange("grade")}>
         Grade clips
+      </button>
+      <button className={cls("slider")} onClick={() => onChange("slider")}>
+        Slider lab
       </button>
       <button className={cls("results")} onClick={() => onChange("results")}>
         Results
@@ -559,6 +563,8 @@ export function GradeView(
         <p className="text-pretty text-2xs text-faint">
           {mode === "grade"
             ? "grade every active rubric row by eye — Lamp uses nine, and the completed final AI evaluation starts hidden until you reveal it"
+            : mode === "slider"
+              ? "experiment with exact 0–100 human scores without changing canonical grades or Lamp execution"
             : hasAutomatedResults
               ? "compare each final video first, then use the aggregate view to calibrate the method"
               : "your saved human grades — no final AI results are available to compare"}
@@ -577,6 +583,8 @@ export function GradeView(
         <p className="py-10 text-center text-2xs text-faint">
           {!hydrated ? "loading runs…" : "restoring saved grading work…"}
         </p>
+      ) : mode === "slider" ? (
+        <SliderLab runs={gradeable} />
       ) : mode === "grade" ? (
         requestedRunId &&
         appliedRequestedRunId.current !== requestedRunId &&

@@ -18,6 +18,10 @@ import type {
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { isValidRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
+import {
+  isSliderScoreForEval,
+  pointsForSliderScore,
+} from "@/lib/slider-grade";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,14 +52,18 @@ function parseDraftId(value: string | null): string | null {
   return isValidRunId(id) ? id : null;
 }
 
-function parseAnswer(value: unknown): GradeDraftAnswer | null {
+function parseAnswer(value: unknown, evalId: string): GradeDraftAnswer | null {
   if (!isRecord(value)) return null;
   const points = value.points;
+  const numericScore = value.numericScore;
   const note = value.note;
   if (
     !Number.isInteger(points) ||
     (points as number) < 1 ||
     (points as number) > 5 ||
+    (numericScore !== undefined &&
+      (!isSliderScoreForEval(evalId, numericScore) ||
+        pointsForSliderScore(numericScore) !== points)) ||
     typeof note !== "string" ||
     note.length > MAX_NOTE_LENGTH
   ) {
@@ -63,6 +71,7 @@ function parseAnswer(value: unknown): GradeDraftAnswer | null {
   }
   return {
     points: points as GradeDraftAnswer["points"],
+    ...(typeof numericScore === "number" ? { numericScore } : {}),
     note,
   };
 }
@@ -75,7 +84,7 @@ function parseClipDraft(value: unknown): GradeClipDraft | null {
   const answers: Record<string, GradeDraftAnswer> = {};
   for (const [evalId, candidate] of answerEntries) {
     if (!EVAL_IDS.has(evalId)) return null;
-    const answer = parseAnswer(candidate);
+    const answer = parseAnswer(candidate, evalId);
     if (!answer) return null;
     answers[evalId] = answer;
   }
