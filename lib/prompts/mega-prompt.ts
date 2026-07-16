@@ -15,6 +15,7 @@ import {
   DEFAULT_RELIGHT_INTENSITY,
   normalizeRelightIntensity,
   relightLightingDirective,
+  relightNegativeBlock,
 } from "../relight-intensity.ts";
 
 /**
@@ -90,19 +91,32 @@ export function initialMegaPrompt(
   workflowMode: WorkflowMode = "lamp",
   relightIntensity: number = DEFAULT_RELIGHT_INTENSITY
 ): MegaPrompt {
-  const base =
-    workflowMode === "lamp" ? LAMP_RELIGHT_BASE_PROMPT : RELIGHT_BASE_PROMPT;
   const normalizedIntensity = normalizeRelightIntensity(relightIntensity);
+  // Keep the historical 75/100 prompt byte-identical so existing Lamp
+  // behavior and hashes remain the experiment's stable control condition.
+  // Every other strength derives a base whose negative block is scoped to
+  // the requested band — the fixed negatives are what pinched the first
+  // slider's output range to nothing.
+  const intensityScoped =
+    workflowMode === "lamp" &&
+    normalizedIntensity !== DEFAULT_RELIGHT_INTENSITY;
+  const base = intensityScoped
+    ? {
+        ...LAMP_RELIGHT_BASE_PROMPT,
+        negative: relightNegativeBlock(
+          normalizedIntensity,
+          LAMP_RELIGHT_BASE_PROMPT.negative
+        ),
+      }
+    : workflowMode === "lamp"
+      ? LAMP_RELIGHT_BASE_PROMPT
+      : RELIGHT_BASE_PROMPT;
   const mp: MegaPrompt = {
     version: 1,
     base,
-    // Keep the historical 75/100 prompt byte-identical so existing Lamp
-    // behavior and hashes remain the experiment's stable control condition.
-    lightingDirective:
-      workflowMode === "lamp" &&
-      normalizedIntensity !== DEFAULT_RELIGHT_INTENSITY
-        ? relightLightingDirective(normalizedIntensity)
-        : lightingDirectiveFrom(base),
+    lightingDirective: intensityScoped
+      ? relightLightingDirective(normalizedIntensity)
+      : lightingDirectiveFrom(base),
     corrections: [],
     rendered: "",
   };

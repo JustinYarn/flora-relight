@@ -93,7 +93,7 @@ export function WorkflowModeSelector({
         >
           <span>
             <span className="block tabular-nums text-muted">0</span>
-            Natural daylight
+            Daylight lift
           </span>
           <span className="text-center">
             <span className="block tabular-nums text-muted">75</span>
@@ -101,16 +101,18 @@ export function WorkflowModeSelector({
           </span>
           <span className="text-right">
             <span className="block tabular-nums text-muted">100</span>
-            Max studio
+            Cinematic hero
           </span>
         </div>
 
         <p className="mt-2 text-pretty text-2xs leading-relaxed text-faint">
           <span className="tabular-nums">
-            Target +{profile.faceLiftStops} stops · {profile.keyFillRatio}:1
-          </span>{" "}
-          key-to-fill. Strength controls how far Lamp changes the lighting, not
-          whether the result is good.
+            Face +{profile.faceLiftStops} stops · key {profile.keyFillRatio}:1 ·
+            background {profile.backgroundStops > 0 ? "+" : ""}
+            {profile.backgroundStops} stops
+          </span>
+          . Strength sets how far Lamp transforms the lighting — and what the
+          AI critic demands — not whether the result is good.
         </p>
       </div>
     </section>

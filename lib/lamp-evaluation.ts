@@ -19,7 +19,10 @@ import type {
 import { clamp, verdictFor } from "./util.ts";
 import {
   DEFAULT_RELIGHT_INTENSITY,
+  isRelightLumaMeasurements,
   parseRelightIntensityFromPrompt,
+  relightMeasuredCalibrationCorrection,
+  type RelightLumaMeasurements,
 } from "./relight-intensity.ts";
 
 /**
@@ -134,8 +137,11 @@ export function evalDefsForRun(run: RunEvalScope): EvalDefinition[] {
   return isLampRun(run) ? LAMP_EVAL_DEFS : EVAL_DEFS;
 }
 
-export const LAMP_EVALUATOR_VERSION = "lamp-holistic-v3";
-export const LAMP_PREVIOUS_EVALUATOR_VERSION = "lamp-holistic-v2";
+export const LAMP_EVALUATOR_VERSION = "lamp-holistic-v4";
+export const LAMP_PREVIOUS_EVALUATOR_VERSIONS = [
+  "lamp-holistic-v3",
+  "lamp-holistic-v2",
+] as const;
 export const LAMP_LEGACY_EVALUATOR_VERSION = "lamp-holistic-v1";
 export const LAMP_MAX_ITERATIONS = 2;
 export const LAMP_COMPOSITE_PASS_THRESHOLD = 75;
@@ -243,7 +249,7 @@ export interface LampModelEval {
 export interface LampEvaluationArtifact {
   version:
     | typeof LAMP_EVALUATOR_VERSION
-    | typeof LAMP_PREVIOUS_EVALUATOR_VERSION
+    | (typeof LAMP_PREVIOUS_EVALUATOR_VERSIONS)[number]
     | typeof LAMP_LEGACY_EVALUATOR_VERSION;
   iteration: number;
   evalResults: EvalResult[];
@@ -251,6 +257,12 @@ export interface LampEvaluationArtifact {
   usage?: GeminiProUsageSnapshot;
   /** Usage-derived provider charge recorded by the paid-operation journal. */
   costUsd: number;
+  /**
+   * Deterministic region-luma deltas of this iteration's candidate vs the
+   * source (v4+, advisory). Persisted so Final-prompt recompiles stay
+   * byte-stable across deploys and replays.
+   */
+  measurements?: RelightLumaMeasurements;
 }
 
 const SEVERITIES: ViolationSeverity[] = ["critical", "major", "minor"];
@@ -457,6 +469,7 @@ export function buildLampEvaluationArtifact(input: {
   previousResults?: EvalResult[];
   usage: GeminiProUsageSnapshot;
   costUsd: number;
+  measurements?: RelightLumaMeasurements;
 }): LampEvaluationArtifact {
   if (
     !Number.isSafeInteger(input.iteration) ||
@@ -513,6 +526,10 @@ export function buildLampEvaluationArtifact(input: {
     evalResults: ordered,
     usage: input.usage,
     costUsd: input.costUsd,
+    ...(input.measurements !== undefined &&
+    isRelightLumaMeasurements(input.measurements)
+      ? { measurements: input.measurements }
+      : {}),
   };
 }
 
@@ -525,18 +542,22 @@ export function isLampEvaluationArtifact(
     isRecord(value.usage) &&
     Number.isSafeInteger(value.usage.promptTokenCount) &&
     Number.isSafeInteger(value.usage.candidatesTokenCount);
+  const knownVersion =
+    value.version === LAMP_EVALUATOR_VERSION ||
+    (LAMP_PREVIOUS_EVALUATOR_VERSIONS as readonly string[]).includes(
+      value.version as string
+    ) ||
+    value.version === LAMP_LEGACY_EVALUATOR_VERSION;
   if (
-    (value.version !== LAMP_EVALUATOR_VERSION &&
-      value.version !== LAMP_PREVIOUS_EVALUATOR_VERSION &&
-      value.version !== LAMP_LEGACY_EVALUATOR_VERSION) ||
+    !knownVersion ||
     !Number.isSafeInteger(value.iteration) ||
     !Array.isArray(value.evalResults) ||
-    ((value.version === LAMP_EVALUATOR_VERSION ||
-      value.version === LAMP_PREVIOUS_EVALUATOR_VERSION) &&
-      !usageValid) ||
+    (value.version !== LAMP_LEGACY_EVALUATOR_VERSION && !usageValid) ||
     (value.usage !== undefined && !usageValid) ||
     typeof value.costUsd !== "number" ||
-    !Number.isFinite(value.costUsd)
+    !Number.isFinite(value.costUsd) ||
+    (value.measurements !== undefined &&
+      !isRelightLumaMeasurements(value.measurements))
   ) {
     return false;
   }
@@ -610,6 +631,38 @@ function renderPersistedLampV2(
 }
 
 /**
+ * The deterministic calibration finding compiled from iteration 1's measured
+ * luma state. It rides the existing correction ledger (evalId + aspect are
+ * fixed, severity critical so it renders first) and is a pure function of the
+ * persisted artifact, so every recompile emits identical bytes.
+ */
+function measuredCalibrationEvalResult(
+  intensity: number,
+  measurements: RelightLumaMeasurements
+): EvalResult {
+  return {
+    evalId: "measured-intensity",
+    iteration: 1,
+    verdicts: [],
+    score: 0,
+    confidence: 1,
+    verdict: "fail",
+    violations: [
+      {
+        aspect: "measured-lift",
+        severity: "critical",
+        description:
+          "Deterministic region-luma measurement of the Initial take against the requested relight strength.",
+        correction: relightMeasuredCalibrationCorrection(
+          intensity,
+          measurements
+        ),
+      },
+    ],
+  };
+}
+
+/**
  * First-pass findings become the one and only corrected Lamp prompt.
  *
  * The provider-facing rendered bytes depend only on the exact persisted v1
@@ -630,20 +683,34 @@ export function compileLampFinalPrompt(
   ) {
     throw new Error("Lamp final prompt requires the persisted initial bytes.");
   }
+  const parsedIntensity = parseRelightIntensityFromPrompt(
+    persistedInitialRendered
+  );
   const presentationSeed = initialMegaPrompt(
     "lamp",
-    parseRelightIntensityFromPrompt(persistedInitialRendered) ??
-      DEFAULT_RELIGHT_INTENSITY
+    parsedIntensity ?? DEFAULT_RELIGHT_INTENSITY
   );
-  const finalPrompt = nextMegaPrompt(
-    presentationSeed,
-    firstEvaluation.evalResults.filter(
-      (result) =>
-        LAMP_VISUAL_EVAL_DEFS.some(
-          (definition) => definition.id === result.evalId
-        )
-    )
+  const visualResults = firstEvaluation.evalResults.filter((result) =>
+    LAMP_VISUAL_EVAL_DEFS.some((definition) => definition.id === result.evalId)
   );
+  // Calibration evidence (2026-07-16): with no corrections, the Final
+  // generation is a blind re-roll of the same prompt, and one live run
+  // regressed from an 89-pass Initial to a 55-fail Final purely on sampling
+  // variance. When the requested strength is explicit and the iteration-1
+  // artifact carries deterministic measurements, always anchor the Final to
+  // the measured state of the Initial. The default (75, no strength line)
+  // stays untouched as the experiment's control condition.
+  const measuredResults =
+    parsedIntensity !== null && firstEvaluation.measurements
+      ? [
+          ...visualResults,
+          measuredCalibrationEvalResult(
+            parsedIntensity,
+            firstEvaluation.measurements
+          ),
+        ]
+      : visualResults;
+  const finalPrompt = nextMegaPrompt(presentationSeed, measuredResults);
   return {
     ...finalPrompt,
     rendered: renderPersistedLampV2(
