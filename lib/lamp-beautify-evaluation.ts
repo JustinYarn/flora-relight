@@ -76,7 +76,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 90,
     borderlineThreshold: 75,
     allowedCorrectionActions: ["restore-identity"],
-    rubric: `Compare facial geometry, bone structure, distinctive features, apparent age, and recognizability throughout the complete source and candidate. Approved enhancement grants no permission to change who the person is: any frame that reads as a different, younger-by-design, or structurally reshaped person fails. Judge the worst moment, especially under head motion and expression changes.`,
+    rubric: `Compare facial geometry, bone structure, distinctive features, apparent age, and recognizability throughout the complete source and candidate. Approved enhancement grants no permission to change who the person is: any frame that reads as a different, younger-by-design, or structurally reshaped person fails. An approved expression-warmth entry may read gently warmer and more engaged than the source; that mood shift alone is not an identity violation, but caricature, a pasted grin, or geometry change is. Judge the worst moment, especially under head motion and expression changes.`,
   },
   {
     id: "enhancement-adherence",
@@ -108,7 +108,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 80,
     borderlineThreshold: 65,
     allowedCorrectionActions: ["complete-approved-enhancement"],
-    rubric: `Judge whether the subject reads as the same person on a well-prepared day at normal playback size. An enhancement plan should produce a visible but natural improvement; returning a near-copy because the changes were subtle is a failure. Do not reward maximal retouching: the best result applies the approved items convincingly while remaining entirely plausible as unedited footage.`,
+    rubric: `Judge whether the subject reads as the same person on their best, most enthusiastic day at normal playback size: noticeably brighter, warmer, and fresher than the source. An enhancement plan should produce a visible lift in warmth and energy; returning a near-copy because the changes were subtle is a failure. Do not reward maximal retouching or a forced mood: the best result is convincingly warmer while remaining entirely plausible as unedited footage of a genuinely good day.`,
   },
   {
     id: "natural-skin-texture",
@@ -122,7 +122,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 88,
     borderlineThreshold: 74,
     allowedCorrectionActions: ["repair-skin-texture"],
-    rubric: `Inspect skin at speech, motion, and lighting extremes. Enhancement may reduce temporary blemishes and shine, but pores, fine texture, complexion micro-variation, and natural specular response must survive everywhere. Plastic, waxy, blurred, poreless, or uniformly matte skin fails, as does invented texture that does not exist in the source.`,
+    rubric: `Inspect skin at speech, motion, and lighting extremes. Enhancement may reduce temporary blemishes and shine and may refine the visual appearance of pores at the approved intensity, but real texture, complexion micro-variation, and natural specular response must survive everywhere. Plastic, waxy, blurred, fully poreless, or uniformly matte skin fails, as does invented texture that does not exist in the source.`,
   },
   {
     id: "permanent-features-integrity",
@@ -136,7 +136,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 90,
     borderlineThreshold: 75,
     allowedCorrectionActions: ["restore-identity"],
-    rubric: `Build an inventory of permanent identity features — moles, scars, freckles, birthmarks, wrinkles consistent with age, facial-hair pattern — from the source, and verify each survives in the candidate at every corresponding moment. Fading, shrinking, or removing any permanent feature fails even when the overall result looks natural; these features are identity, not imperfections.`,
+    rubric: `Build an inventory of permanent identity features — moles, scars, freckles, birthmarks, wrinkles consistent with age, facial-hair pattern — from the source, and verify each survives in the candidate at every corresponding moment. Hair is fully locked in this workflow: any change to hairstyle, hairline, volume, color, or even stray flyaways fails. Fading, shrinking, or removing any permanent feature fails even when the overall result looks natural; these features are identity, not imperfections.`,
   },
   {
     id: "motion-lipsync",
@@ -150,7 +150,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 88,
     borderlineThreshold: 74,
     allowedCorrectionActions: ["restore-performance-lipsync"],
-    rubric: `Compare the complete timelines at corresponding moments. Every gesture, blink, posture shift, head turn, and mouth shape must follow the source trajectory and timing. Enhancement must not retime, smooth, reanimate, stabilize, or reinterpret the performance. One obvious lip-sync or motion discontinuity fails.`,
+    rubric: `Compare the complete timelines at corresponding moments. Every gesture, blink, posture shift, head turn, and spoken mouth shape must follow the source trajectory and timing; speech articulation and lip-sync must remain frame-accurate. When the plan approves expression-warmth, a gently warmer resting expression between and around those articulations is authorized and must not be penalized here — but any retiming, changed phoneme shapes, held smile through speech, or motion discontinuity fails.`,
   },
   {
     id: "background-integrity",

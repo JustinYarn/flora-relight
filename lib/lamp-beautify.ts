@@ -13,8 +13,12 @@ export const LAMP_BEAUTIFY_PLAN_VERSION = "lamp-beautify-plan-v1" as const;
 /**
  * The closed enhancement catalog. Plan items, corrections, and evaluation
  * all speak this vocabulary; nothing outside it can ever be authorized.
+ * "hair-tidy" is legacy: persisted plans keep parsing, but the planner no
+ * longer offers it — hair is fully locked as of the 2026-07-17 warmth
+ * rewrite, and "expression-warmth" is the headline trait.
  */
 export const LAMP_BEAUTIFY_CATALOG = [
+  "expression-warmth",
   "skin-evenness",
   "under-eye-softening",
   "teeth-brightening",
@@ -24,6 +28,18 @@ export const LAMP_BEAUTIFY_CATALOG = [
 
 export type LampBeautifyCategory = (typeof LAMP_BEAUTIFY_CATALOG)[number];
 
+/** What the planner may propose today — the catalog minus locked legacy ids. */
+export const LAMP_BEAUTIFY_ACTIVE_CATALOG = [
+  "expression-warmth",
+  "skin-evenness",
+  "under-eye-softening",
+  "teeth-brightening",
+  "eye-clarity",
+] as const;
+
+export type LampBeautifyActiveCategory =
+  (typeof LAMP_BEAUTIFY_ACTIVE_CATALOG)[number];
+
 /**
  * The intensity ladder mirrors the Lamp slider: 1 is deniable, 2 is visible
  * side-by-side yet natural in isolation, 3 is clearly camera-groomed while
@@ -32,11 +48,11 @@ export type LampBeautifyCategory = (typeof LAMP_BEAUTIFY_CATALOG)[number];
 export type LampBeautifyIntensity = 1 | 2 | 3;
 
 export const LAMP_BEAUTIFY_NO_OP_REGIONS = [
+  "expression",
   "skin",
   "under-eyes",
   "teeth",
   "eyes",
-  "hair",
 ] as const;
 
 export type LampBeautifyNoOpRegion =
@@ -579,6 +595,13 @@ export function createMockLampBeautifyPlan(
         "Static single-person webcam framing with ordinary on-camera presentation and mild temporary shine.",
       enhance: [
         {
+          id: "expression-warmth",
+          intensity: 2,
+          rationale:
+            "A gentle warmth lift reads as more engaged without changing the performance.",
+          evidence: "The resting expression sits flatter than the friendly tone of voice.",
+        },
+        {
           id: "skin-evenness",
           intensity: 1,
           rationale:
@@ -604,30 +627,34 @@ export function createMockLampBeautifyPlan(
 export const LAMP_BEAUTIFY_PLAN_PROMPT = `You are the planning stage for Lamp Beautify, a source-faithful on-camera touch-up workflow for short static-camera webcam or interview videos.
 
 GOAL
-Infer that the user chose this workflow because they want to look professionally camera-ready while remaining unmistakably themselves. Inspect the COMPLETE source timeline and propose bounded enhancement whenever it would genuinely improve on-camera presentation. The catalog is closed:
-- skin-evenness: reduce temporary blemishes, shine, or irritation. Pores, texture, permanent marks, moles, freckles, scars, and apparent age always remain.
-- under-eye-softening: subtly reduce dark circles or puffiness without erasing natural contours.
-- teeth-brightening: mild natural whitening within plausible enamel tones.
-- eye-clarity: slightly reduce visible redness and brighten sclera within realism.
-- hair-tidy: tame stray flyaways only; the hairstyle itself never changes.
+Infer that the user chose this workflow because they want to read as noticeably brighter, warmer, and more enthusiastic on camera — better rested, more engaged, gently more positive — while remaining unmistakably themselves having the same conversation. Inspect the COMPLETE source timeline and propose bounded enhancement whenever it would genuinely lift the subject's on-camera warmth and freshness. The catalog is closed:
+- expression-warmth: the headline trait. Gently bias the resting expression warmer — micro-lifts at the mouth corners, subtly brighter and more engaged eyes, a touch more life in the cheeks — riding on top of the real performance. Same words, same mouth shapes at the same timestamps, same gestures; genuine good mood, never a pasted or held smile. Propose it whenever the subject reads flat, tired, or more serious than a friendly professional conversation calls for.
+- skin-evenness: reduce temporary blemishes, shine, and irritation, and refine the visual appearance of pores for a fresher, tighter surface. Real texture survives; permanent marks and apparent age always remain.
+- under-eye-softening: subtly reduce dark circles or puffiness so the subject reads better rested.
+- teeth-brightening: mild natural whitening within plausible enamel tones, where the source genuinely shows teeth.
+- eye-clarity: reduce visible redness, brighten the sclera slightly, and let the eyes read a touch more awake within realism.
+
+HAIR IS LOCKED
+Hair is not in the catalog and can never be proposed, listed, or altered: hairstyle, hairline, volume, color, parting, and stray flyaways all remain exactly as filmed.
 
 INTENSITY
 Each approved item carries intensity 1, 2, or 3:
 1 subtle — barely perceptible, deniable.
 2 balanced — noticeable side-by-side, natural in isolation.
-3 polished — clearly groomed for camera, still physically plausible.
-Choose the lowest intensity that achieves a presentable result. Reserve 3 for pronounced issues.
+3 polished — clearly groomed and upbeat for camera, still physically plausible.
+This workflow wants a visible lift: prefer intensity 2 for the traits that drive warmth (expression-warmth, skin-evenness, under-eye-softening) unless the source argues otherwise, and reserve 1 for subjects who barely need it and 3 for pronounced flatness or fatigue.
 
 SAFETY BOUNDARY
 - Only the PRIMARY subject may be enhanced. Every other visible person is fully protected and never enhanced.
-- Never propose face reshaping, slimming, eye enlargement, nose or jaw changes, skin-tone shifts, de-aging, makeup invention, hairstyle changes, or wardrobe changes — these are outside the catalog and impossible to authorize.
-- Permanent identity features (moles, scars, freckles, wrinkles consistent with age, facial hair pattern) are never removal targets under any category.
-- The background, lighting, camera, framing, performance, and audio are completely out of scope for this workflow.
+- Speech articulation is sacred: expression-warmth never re-times, replaces, or reanimates the performance, never changes mouth shapes during speech, and never reveals teeth the source does not reveal at that moment.
+- Never propose face reshaping, slimming, eye enlargement, nose or jaw changes, skin-tone shifts, de-aging, makeup invention, hairstyle or hair changes, or wardrobe changes — these are outside the catalog and impossible to authorize.
+- Permanent identity features (moles, scars, freckles, wrinkles consistent with age, facial-hair pattern) are never removal targets under any category.
+- The background, lighting, camera, framing, and audio are completely out of scope for this workflow.
 - Anything you cannot establish confidently goes in uncertain with safeDefault "decline".
 - This v1 workflow supports only a static camera with at least one clearly visible person.
 
 NO-OP IS EXCEPTIONAL
-Do not choose exceptional-no-op merely because improvements would be subtle. Choose enhance whenever at least one catalog item at intensity 1 would make the subject read as better prepared for camera. An exceptional no-op is valid only when the subject is already fully camera-ready in every catalog region.
+Do not choose exceptional-no-op merely because improvements would be subtle. Choose enhance whenever at least one catalog item at intensity 1 would make the subject read as warmer or fresher on camera. An exceptional no-op is valid only when the subject is already fully camera-ready in every catalog region, including already reading as warm and engaged.
 
 OUTPUT
 Respond with strict JSON only. Use this schema:
@@ -637,12 +664,12 @@ Respond with strict JSON only. Use this schema:
     "visiblePeople": "single-person" | "multiple-people" | "none" | "uncertain"
   },
   "decision": "enhance" | "exceptional-no-op",
-  "subjectSummary": "<neutral summary of the subject's current on-camera presentation>",
+  "subjectSummary": "<neutral summary of the subject's current on-camera presentation and energy>",
   "enhance": [
     {
       "id": "<catalog category>",
       "intensity": 1 | 2 | 3,
-      "rationale": "<why this improves presentation>",
+      "rationale": "<why this improves warmth or freshness>",
       "evidence": "<what in the source motivates it>"
     }
   ],
@@ -661,11 +688,11 @@ Respond with strict JSON only. Use this schema:
     "confidence": <number from 0.95 to 1>,
     "summary": "<at least 20 words explaining why this rare exception is warranted>",
     "regionEvidence": [
+      { "region": "expression", "finding": "<specific finding>" },
       { "region": "skin", "finding": "<specific finding>" },
       { "region": "under-eyes", "finding": "<specific finding>" },
       { "region": "teeth", "finding": "<specific finding>" },
-      { "region": "eyes", "finding": "<specific finding>" },
-      { "region": "hair", "finding": "<specific finding>" }
+      { "region": "eyes", "finding": "<specific finding>" }
     ],
     "whyEnhancementWouldNotImprovePresentation": "<at least 12 words>"
   }

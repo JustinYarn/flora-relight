@@ -13,7 +13,7 @@ import {
 } from "@/lib/cost";
 import {
   buildLampBeautifyPlan,
-  LAMP_BEAUTIFY_CATALOG,
+  LAMP_BEAUTIFY_ACTIVE_CATALOG,
   LAMP_BEAUTIFY_NO_OP_REGIONS,
   LAMP_BEAUTIFY_PLAN_PROMPT,
   LAMP_BEAUTIFY_PLAN_VERSION,
@@ -72,7 +72,7 @@ const ENHANCE_ITEM_SCHEMA = {
   additionalProperties: false,
   required: ["id", "intensity", "rationale", "evidence"],
   properties: {
-    id: { type: "string", enum: [...LAMP_BEAUTIFY_CATALOG] },
+    id: { type: "string", enum: [...LAMP_BEAUTIFY_ACTIVE_CATALOG] },
     intensity: { type: "integer", enum: [1, 2, 3] },
     rationale: { type: "string" },
     evidence: { type: "string" },
@@ -84,7 +84,7 @@ const DECLINED_ITEM_SCHEMA = {
   additionalProperties: false,
   required: ["id", "reason"],
   properties: {
-    id: { type: "string", enum: [...LAMP_BEAUTIFY_CATALOG] },
+    id: { type: "string", enum: [...LAMP_BEAUTIFY_ACTIVE_CATALOG] },
     reason: { type: "string" },
   },
 } as const;
@@ -94,7 +94,7 @@ const UNCERTAIN_ITEM_SCHEMA = {
   additionalProperties: false,
   required: ["id", "uncertainty", "safeDefault"],
   properties: {
-    id: { type: "string", enum: [...LAMP_BEAUTIFY_CATALOG] },
+    id: { type: "string", enum: [...LAMP_BEAUTIFY_ACTIVE_CATALOG] },
     uncertainty: { type: "string" },
     safeDefault: { type: "string", enum: ["decline"] },
   },

@@ -7,7 +7,7 @@ import {
   buildLampBeautifyPlan,
   createMockLampBeautifyPlan,
   hashLampBeautifyPlan,
-  LAMP_BEAUTIFY_CATALOG,
+  LAMP_BEAUTIFY_ACTIVE_CATALOG,
   LAMP_BEAUTIFY_PLAN_PROMPT,
   lampBeautifyPlanRequiresGeneration,
   lampBeautifyPlansDifferOnlyByIntensity,
@@ -25,7 +25,11 @@ import {
   compileLampBeautifyFinalPrompt,
   initialLampBeautifyMegaPrompt,
   isPersistedInitialLampBeautifyPrompt,
+  LEGACY_V1_BEAUTIFY_BASE_PROMPT,
   renderLampBeautifyCorrection,
+  renderLampBeautifyMegaPrompt,
+  renderLampBeautifyPlanBlock,
+  renderLegacyLampBeautifyPlanBlockV1,
 } from "../lib/prompts/lamp-beautify.ts";
 import { BEAUTIFY_WORKFLOW } from "../lib/beautify-workflow-def.ts";
 import {
@@ -215,8 +219,9 @@ test("generation prompt renders only approved enhancements", () => {
 
   // Declined and uncertain categories never reach generation input — naming
   // them would seed the idea (the ring-light lesson from Lamp Background).
+  // The base contract may mention teeth in its own guardrails (the no-grin
+  // rule); only the declined CATEGORY must stay out.
   assert.doesNotMatch(rendered, /teeth-brightening/);
-  assert.doesNotMatch(rendered, /teeth/i);
   assert.doesNotMatch(rendered, /eye-clarity/);
 
   // The evaluator, by contrast, must see the full catalog decisions.
@@ -410,9 +415,13 @@ test("beautify eval weights, gates, and prompt wiring hold", () => {
     LAMP_BEAUTIFY_PLAN_PROMPT,
     /single-person and multiple-people scenes are both supported/
   );
-  for (const category of LAMP_BEAUTIFY_CATALOG) {
+  // The planner offers only the active catalog; hair is locked out entirely.
+  for (const category of LAMP_BEAUTIFY_ACTIVE_CATALOG) {
     assert.match(LAMP_BEAUTIFY_PLAN_PROMPT, new RegExp(category));
   }
+  assert.doesNotMatch(LAMP_BEAUTIFY_PLAN_PROMPT, /hair-tidy/);
+  assert.match(LAMP_BEAUTIFY_PLAN_PROMPT, /HAIR IS LOCKED/);
+  assert.match(LAMP_BEAUTIFY_PLAN_PROMPT, /expression-warmth: the headline trait/);
 });
 
 test("workflow mode plumbing recognizes beautify", () => {
@@ -504,11 +513,14 @@ test("the intensity slider overrides levels and nothing else", async () => {
         summary:
           "Every catalog region is already presentation ready and no enhancement at any intensity would make the subject read as better prepared for camera.",
         regionEvidence: [
+          {
+            region: "expression",
+            finding: "Already reads warm and engaged throughout.",
+          },
           { region: "skin", finding: "Even tone with no shine or blemishes." },
           { region: "under-eyes", finding: "No visible shadows or puffiness." },
           { region: "teeth", finding: "Natural tone during brief visibility." },
           { region: "eyes", finding: "Clear sclera without redness." },
-          { region: "hair", finding: "No flyaways around the silhouette." },
         ],
         whyEnhancementWouldNotImprovePresentation:
           "The subject already reads as fully camera ready in every catalog region today.",
@@ -522,4 +534,79 @@ test("the intensity slider overrides levels and nothing else", async () => {
     () => applyLampBeautifyIntensityOverride(noOp, 2),
     /applies only to an enhance decision/
   );
+});
+
+test("the warmth rewrite: hair locked, expression-warmth is the headline", () => {
+  const warm = approveLampBeautifyPlan(
+    buildLampBeautifyPlan({
+      raw: (() => {
+        const raw = enhanceRaw();
+        raw.enhance = [
+          {
+            id: "expression-warmth",
+            intensity: 2,
+            rationale:
+              "A gentle warmth lift reads as more engaged and enthusiastic.",
+            evidence: "The resting expression sits flatter than the tone of voice.",
+          },
+          raw.enhance[0]!,
+        ];
+        return raw;
+      })(),
+      planId: "plan-warmth-1",
+      runId: "run-warmth-1",
+      createdAt: CREATED_AT,
+    }),
+    CREATED_AT + 1_000
+  );
+  const rendered = initialLampBeautifyMegaPrompt(warm).rendered;
+
+  assert.match(rendered, /\[expression-warmth\] intensity 2 of 3/);
+  assert.match(rendered, /micro-lifts at the mouth corners/);
+  assert.match(rendered, /noticeably brighter, warmer, and more enthusiastic/);
+  assert.match(rendered, /Do not touch the hair in any way/);
+  assert.match(rendered, /Hair is fully locked/);
+  assert.match(rendered, /refine the visual appearance of pores/);
+  assert.match(rendered, /Do not break lip-sync/);
+  assert.match(rendered, /never a pasted or held smile/i);
+
+  // A post-freeze plan has no first-generation form — cleanly rejected.
+  assert.equal(
+    isPersistedInitialLampBeautifyPrompt(
+      warm,
+      rendered.replace("Decision: ENHANCE", "Decision: REDESIGN")
+    ),
+    false
+  );
+});
+
+test("hair-tidy era runs stay valid through the frozen first generation", () => {
+  // approvedPlan() is the pre-rewrite fixture: skin-evenness + hair-tidy.
+  const plan = approvedPlan();
+  const legacyBase = renderLampBeautifyMegaPrompt({
+    version: 1,
+    base: LEGACY_V1_BEAUTIFY_BASE_PROMPT,
+    plan,
+    corrections: [],
+  });
+  const legacyV1 = legacyBase.replace(
+    renderLampBeautifyPlanBlock(plan),
+    renderLegacyLampBeautifyPlanBlockV1(plan)
+  );
+
+  // The frozen bytes differ from a fresh compile and still prove the binding.
+  assert.notEqual(legacyV1, initialLampBeautifyMegaPrompt(plan).rendered);
+  assert.equal(isPersistedInitialLampBeautifyPrompt(plan, legacyV1), true);
+
+  // The v2 compiler — replayed on every read of an old run — accepts them.
+  const artifact = buildLampBeautifyEvaluationArtifact({
+    raw: allPassRaw(),
+    plan,
+    iteration: 1,
+    audioVerified: true,
+    costUsd: 0,
+  });
+  const final = compileLampBeautifyFinalPrompt(legacyV1, plan, artifact);
+  assert.equal(final.version, 2);
+  assert.match(final.rendered, /LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v2/);
 });
