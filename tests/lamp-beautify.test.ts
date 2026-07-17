@@ -31,6 +31,7 @@ import {
   LEGACY_V2_BEAUTIFY_BASE_PROMPT,
   LEGACY_V3_BEAUTIFY_BASE_PROMPT,
   LEGACY_V4_BEAUTIFY_BASE_PROMPT,
+  LEGACY_V5_BEAUTIFY_BASE_PROMPT,
   renderLampBeautifyCorrection,
   renderLampBeautifyMegaPrompt,
   renderLegacyLampBeautifyCorrectionV1,
@@ -38,6 +39,7 @@ import {
   renderLegacyLampBeautifyPlanBlockV1,
   renderLegacyLampBeautifyPlanBlockV2,
   renderLegacyLampBeautifyPlanBlockV3,
+  renderLegacyLampBeautifyPlanBlockV5,
 } from "../lib/prompts/lamp-beautify.ts";
 import { BEAUTIFY_WORKFLOW } from "../lib/beautify-workflow-def.ts";
 import {
@@ -705,6 +707,10 @@ test("frozen generations are byte-pinned — an in-place edit fails here first",
     pin(LEGACY_V4_BEAUTIFY_BASE_PROMPT),
     "746c1d89fedbf1dcc9f3041b71fd6211a15d89e7762630331f1f5041420fa2b8"
   );
+  assert.equal(
+    pin(LEGACY_V5_BEAUTIFY_BASE_PROMPT),
+    "44cd85ade6dbb334a3b12126fca9ec55c845759d051c3e1cc04babee77d02bc4"
+  );
 
   // Block renderers, pinned through a fixed fixture that exercises every
   // active category and all three intensity lines. The fixture is literal on
@@ -730,6 +736,10 @@ test("frozen generations are byte-pinned — an in-place edit fails here first",
       createdAt: CREATED_AT,
     }),
     CREATED_AT + 1_000
+  );
+  assert.equal(
+    pin(renderLegacyLampBeautifyPlanBlockV5(pinPlan)),
+    "c3afababb8b249bcc2825e57bf9533b9593514a926862513e5942f4a0213ed38"
   );
   assert.equal(
     pin(renderLegacyLampBeautifyPlanBlockV3(pinPlan)),
