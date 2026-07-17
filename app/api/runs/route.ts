@@ -33,12 +33,15 @@ import {
   createSpendApproval,
   hasReusableFirstCutApproval,
   hasReusableLampBackgroundPlanApproval,
+  hasReusableLampBeautifyPlanApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
 import {
   estimateFirstCut,
   estimateLampBackgroundPlan,
   estimateLampBackgroundTwoPass,
+  estimateLampBeautifyPlan,
+  estimateLampBeautifyTwoPass,
   estimateLampRun,
   estimateRun,
 } from "@/lib/cost";
@@ -71,6 +74,32 @@ import {
   isLampBackgroundPlanArtifact,
   runLampBackgroundPlanner,
 } from "@/lib/server/lamp-background-planner";
+import {
+  createMockLampBeautifyPlan,
+  hashLampBeautifyPlan,
+  lampBeautifyPlanRequiresGeneration,
+  lampBeautifyPlansDifferOnlyByIntensity,
+  parseLampBeautifyPlan,
+  type LampBeautifyPlan,
+} from "@/lib/lamp-beautify";
+import {
+  isLampBeautifyEvaluationArtifact,
+  isLampBeautifyRun,
+  lampBeautifyPromptForRun,
+  projectLampBeautifyEvaluationForRead,
+} from "@/lib/lamp-beautify-read";
+import {
+  lampBeautifyEvaluationOperationId,
+  lampBeautifyPlanOperationId,
+} from "@/lib/lamp-beautify-operations";
+import {
+  compileLampBeautifyFinalPromptCandidates,
+  initialLampBeautifyMegaPrompt,
+} from "@/lib/prompts/lamp-beautify";
+import {
+  isLampBeautifyPlanArtifact,
+  runLampBeautifyPlanner,
+} from "@/lib/server/lamp-beautify-planner";
 import {
   compileLampFinalPrompt,
   isLampEvaluationArtifact,
@@ -219,6 +248,107 @@ async function prepareLampBackgroundPlan(input: {
   return { ok: true, run: updated, plan: artifact.plan };
 }
 
+async function prepareLampBeautifyPlan(input: {
+  run: Run;
+  mock: boolean;
+}): Promise<
+  | { ok: true; run: Run; plan: LampBeautifyPlan }
+  | { ok: false; status: number; message: string; run: Run }
+> {
+  const storage = getStorage();
+  const failPlan = async (message: string): Promise<Run> => {
+    const failed: Run = {
+      ...input.run,
+      status: "failed",
+      nodeStates: {
+        ...input.run.nodeStates,
+        plan: {
+          nodeId: "plan",
+          status: "failed",
+          detail: message,
+        },
+      },
+      log: [
+        ...input.run.log,
+        {
+          at: Date.now(),
+          nodeId: "plan",
+          level: "error",
+          message,
+        },
+      ],
+    };
+    await storage.putRun(failed);
+    return failed;
+  };
+  if (input.run.beautifyPlan) {
+    try {
+      const plan = parseLampBeautifyPlan(input.run.beautifyPlan);
+      if (plan.runId !== input.run.id) {
+        throw new Error("The saved enhancement plan belongs to a different run.");
+      }
+      return { ok: true, run: input.run, plan };
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "The saved Lamp Beautify plan is invalid.";
+      return {
+        ok: false,
+        status: 409,
+        message,
+        run: await failPlan(message),
+      };
+    }
+  }
+  if (input.mock) {
+    const plan = createMockLampBeautifyPlan(input.run.id, Date.now());
+    const updated = { ...input.run, beautifyPlan: plan };
+    await storage.putRun(updated);
+    return { ok: true, run: updated, plan };
+  }
+  let artifact;
+  try {
+    artifact = await runLampBeautifyPlanner(input.run.id);
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Lamp Beautify planning could not be completed safely.";
+    return {
+      ok: false,
+      status: 502,
+      message,
+      run: await failPlan(message),
+    };
+  }
+  if (!isLampBeautifyPlanArtifact(artifact)) {
+    const message = "Lamp Beautify planning returned an invalid artifact.";
+    return {
+      ok: false,
+      status: 502,
+      message,
+      run: await failPlan(message),
+    };
+  }
+  if (artifact.status !== "ready") {
+    const message = artifact.reason;
+    return {
+      ok: false,
+      status: artifact.status === "unsupported" ? 422 : 502,
+      message,
+      run: await failPlan(message),
+    };
+  }
+  const updated = {
+    ...input.run,
+    beautifyPlan: artifact.plan,
+    live: true,
+  };
+  await storage.putRun(updated);
+  return { ok: true, run: updated, plan: artifact.plan };
+}
+
 async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
   const approval = run.spendApproval;
   if (!approval) throw new Error("Live spend approval was not persisted.");
@@ -237,6 +367,18 @@ async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
   }
   const backgroundPlan =
     workflowMode === "background" ? run.backgroundCleanupPlan : undefined;
+  const beautifyPlan =
+    workflowMode === "beautify" ? run.beautifyPlan : undefined;
+  const beautifyPlanHash =
+    beautifyPlan?.approval.status === "approved"
+      ? await hashLampBeautifyPlan(beautifyPlan)
+      : undefined;
+  const beautifyRenderedPrompt =
+    workflowMode === "beautify" &&
+    beautifyPlan?.approval.status === "approved" &&
+    lampBeautifyPlanRequiresGeneration(beautifyPlan)
+      ? initialLampBeautifyMegaPrompt(beautifyPlan).rendered
+      : undefined;
   const approvedPlanHash =
     backgroundPlan?.approval.status === "approved"
       ? await hashLampBackgroundCleanupPlan(backgroundPlan)
@@ -258,13 +400,18 @@ async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
         ? `lamp:${run.id}`
         : workflowMode === "background"
           ? `lamp-background:${run.id}`
-          : `first-cut:${run.id}`),
+          : workflowMode === "beautify"
+            ? `lamp-beautify:${run.id}`
+            : `first-cut:${run.id}`),
     source: "single",
-    ...(existingExecution?.renderedPrompt || backgroundRenderedPrompt
+    ...(existingExecution?.renderedPrompt ||
+    backgroundRenderedPrompt ||
+    beautifyRenderedPrompt
       ? {
           renderedPrompt:
             existingExecution?.renderedPrompt ??
-            backgroundRenderedPrompt!,
+            backgroundRenderedPrompt ??
+            beautifyRenderedPrompt!,
         }
       : {}),
     ...(workflowMode === "background"
@@ -274,6 +421,15 @@ async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
             lampBackgroundPlanOperationId(),
           approvedPlanHash:
             existingExecution?.approvedPlanHash ?? approvedPlanHash,
+        }
+      : {}),
+    ...(workflowMode === "beautify"
+      ? {
+          planOperationId:
+            existingExecution?.planOperationId ??
+            lampBeautifyPlanOperationId(),
+          approvedPlanHash:
+            existingExecution?.approvedPlanHash ?? beautifyPlanHash,
         }
       : {}),
   });
@@ -639,6 +795,190 @@ function lampBackgroundFinalPrompt(
   );
 }
 
+interface LampBeautifyEvaluationProjection {
+  plan: PaidOperation | null;
+  planHash: string | null;
+  first: PaidOperation | null;
+  final: PaidOperation | null;
+}
+
+async function readLampBeautifyEvaluationProjection(
+  storage: ReturnType<typeof getStorage>,
+  runId: string
+): Promise<LampBeautifyEvaluationProjection> {
+  const [run, plan, first, final] = await Promise.all([
+    storage.getRun(runId),
+    storage.getPaidOperation(runId, lampBeautifyPlanOperationId()),
+    storage.getPaidOperation(runId, lampBeautifyEvaluationOperationId(1)),
+    storage.getPaidOperation(runId, lampBeautifyEvaluationOperationId(2)),
+  ]);
+  // The execution binds the hash of the plan AS APPROVED — the human
+  // intensity dial may legitimately move it away from the journal draft, so
+  // the read-side binding hashes the run's approved copy, and the draft is
+  // compared modulo intensity in lampBeautifyPlanBindingValid.
+  let planHash: string | null = null;
+  if (
+    plan?.status === "completed" &&
+    isLampBeautifyPlanArtifact(plan.result) &&
+    plan.result.status === "ready"
+  ) {
+    try {
+      planHash =
+        run?.beautifyPlan !== undefined
+          ? await hashLampBeautifyPlan(parseLampBeautifyPlan(run.beautifyPlan))
+          : await hashLampBeautifyPlan(plan.result.plan);
+    } catch {
+      planHash = null;
+    }
+  }
+  return { plan, planHash, first, final };
+}
+
+function lampBeautifyArtifact(
+  operation: PaidOperation | null,
+  iteration: 1 | 2
+) {
+  return operation?.status === "completed" &&
+    isLampBeautifyEvaluationArtifact(operation.result, iteration)
+    ? operation.result
+    : undefined;
+}
+
+function isLampBeautifyExecution(
+  execution: RunExecution | null | undefined
+): boolean {
+  return Boolean(execution?.executionId.startsWith("lamp-beautify:"));
+}
+
+function lampBeautifyPlanBindingValid(
+  run: Run,
+  execution: RunExecution,
+  evaluations: LampBeautifyEvaluationProjection
+): boolean {
+  try {
+    const approvedPlan = parseLampBeautifyPlan(run.beautifyPlan);
+    const planArtifact = evaluations.plan?.result;
+    if (
+      approvedPlan.approval.status !== "approved" ||
+      !lampBeautifyPlanRequiresGeneration(approvedPlan) ||
+      execution.planOperationId !== lampBeautifyPlanOperationId() ||
+      typeof execution.approvedPlanHash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(execution.approvedPlanHash) ||
+      execution.approvedPlanHash !== evaluations.planHash ||
+      evaluations.plan?.status !== "completed" ||
+      !isLampBeautifyPlanArtifact(planArtifact) ||
+      planArtifact.status !== "ready"
+    ) {
+      return false;
+    }
+    // The approved copy may differ from the journal draft only by the human
+    // intensity dial — the same rule the server-side validator enforces.
+    return lampBeautifyPlansDifferOnlyByIntensity(
+      planArtifact.plan,
+      approvedPlan
+    );
+  } catch {
+    return false;
+  }
+}
+
+function lampBeautifyFinalPromptCandidates(
+  run: Run,
+  execution: RunExecution,
+  evaluations: LampBeautifyEvaluationProjection
+) {
+  const first = lampBeautifyArtifact(evaluations.first, 1);
+  if (!first || !run.beautifyPlan) return undefined;
+  return compileLampBeautifyFinalPromptCandidates(
+    execution.renderedPrompt,
+    run.beautifyPlan,
+    first
+  );
+}
+
+function providerOperationMatchesLampBeautifyExecution(
+  operation: ProviderOperation,
+  run: Run,
+  execution: RunExecution,
+  evaluations: LampBeautifyEvaluationProjection
+): boolean {
+  if (
+    operation.kind !== "video_generation" ||
+    !lampBeautifyPlanBindingValid(run, execution, evaluations)
+  ) {
+    return false;
+  }
+  if (operation.iteration === 1) {
+    return (
+      operation.renderedPrompt === execution.renderedPrompt &&
+      execution.inputHash === runExecutionInputHash(execution.renderedPrompt)
+    );
+  }
+  if (operation.iteration !== 2) return false;
+  try {
+    // A legacy run's final pass billed under the correction vocabulary of
+    // its era — any faithful compile of the immutable inputs is a match.
+    return (
+      lampBeautifyFinalPromptCandidates(run, execution, evaluations)?.some(
+        (candidate) => candidate.rendered === operation.renderedPrompt
+      ) ?? false
+    );
+  } catch {
+    return false;
+  }
+}
+
+function mergeLampBeautifyEvaluationResults(
+  candidate: Run,
+  execution: RunExecution,
+  evaluations: LampBeautifyEvaluationProjection,
+  hideFinalEvaluation: boolean
+): void {
+  if (!candidate.beautifyPlan) return;
+  const first = lampBeautifyArtifact(evaluations.first, 1);
+  const final = lampBeautifyArtifact(evaluations.final, 2);
+  // Show the form the provider journal proves was billed; fall back to the
+  // current vocabulary only when no journal entry pins it.
+  const finalPromptCandidates = final
+    ? lampBeautifyFinalPromptCandidates(candidate, execution, evaluations)
+    : undefined;
+  const billedFinalOperation = candidate.providerOperations?.find(
+    (operation) =>
+      operation.kind === "video_generation" && operation.iteration === 2
+  );
+  const finalPrompt = finalPromptCandidates
+    ? (finalPromptCandidates.find(
+        (compiled) => compiled.rendered === billedFinalOperation?.renderedPrompt
+      ) ?? finalPromptCandidates[0])
+    : undefined;
+  for (const iteration of candidate.iterations) {
+    if (iteration.index === 1 && first) {
+      const projection = projectLampBeautifyEvaluationForRead({
+        iteration: 1,
+        artifact: first,
+        beautifyPlan: candidate.beautifyPlan,
+        humanGradeSaved: candidate.humanGrade !== undefined,
+      });
+      iteration.evalResults = projection.evalResults;
+      if (projection.composite) iteration.composite = projection.composite;
+    }
+    if (iteration.index === 2) {
+      if (finalPrompt) {
+        iteration.megaPrompt = lampBeautifyPromptForRun(finalPrompt);
+      }
+      const projection = projectLampBeautifyEvaluationForRead({
+        iteration: 2,
+        artifact: final,
+        beautifyPlan: candidate.beautifyPlan,
+        humanGradeSaved: candidate.humanGrade !== undefined,
+        hideFinalEvaluation,
+      });
+      iteration.evalResults = projection.evalResults;
+      if (projection.composite) iteration.composite = projection.composite;
+    }
+  }
+}
+
 function providerOperationMatchesLampExecution(
   operation: ProviderOperation,
   execution: RunExecution,
@@ -782,6 +1122,15 @@ function paidCostLabel(entry: PaidOperationCostEntry): string {
   if (entry.id === lampBackgroundEvaluationOperationId(2)) {
     return "Lamp Background Final whole-video evaluation (Gemini)";
   }
+  if (entry.id === lampBeautifyPlanOperationId()) {
+    return "Lamp Beautify enhancement plan (Gemini)";
+  }
+  if (entry.id === lampBeautifyEvaluationOperationId(1)) {
+    return "Lamp Beautify Initial whole-video critique (Gemini)";
+  }
+  if (entry.id === lampBeautifyEvaluationOperationId(2)) {
+    return "Lamp Beautify Final whole-video evaluation (Gemini)";
+  }
   if (entry.id === lampEvaluationOperationId(1)) {
     return "Lamp whole-video critique (Gemini)";
   }
@@ -813,7 +1162,13 @@ function materializeServerResults(
     first: null,
     final: null,
   },
-  hideFinalEvaluation = false
+  hideFinalEvaluation = false,
+  beautifyEvaluations: LampBeautifyEvaluationProjection = {
+    plan: null,
+    planHash: null,
+    first: null,
+    final: null,
+  }
 ): Run {
   const materialized: Run = {
     ...run,
@@ -827,6 +1182,7 @@ function materializeServerResults(
   clearProviderTrustMarkers(materialized);
   const lamp = isLampExecution(execution);
   const background = isLampBackgroundExecution(execution);
+  const beautify = isLampBeautifyExecution(execution);
   const firstCutOperation = firstCutProviderOperation(materialized);
   const secondCutOperation = materialized.providerOperations?.find(
     (operation) =>
@@ -858,6 +1214,19 @@ function materializeServerResults(
                 materialized,
                 execution,
                 backgroundEvaluations
+              )))) ||
+        (beautify &&
+          (!lampBeautifyPlanBindingValid(
+            materialized,
+            execution,
+            beautifyEvaluations
+          ) ||
+            (secondCutOperation &&
+              !providerOperationMatchesLampBeautifyExecution(
+                secondCutOperation,
+                materialized,
+                execution,
+                beautifyEvaluations
               )))))
   );
   const durableExecution = executionBindingMismatch
@@ -893,6 +1262,13 @@ function materializeServerResults(
                   materialized,
                   execution,
                   backgroundEvaluations
+                )
+            : beautify
+              ? providerOperationMatchesLampBeautifyExecution(
+                  operation,
+                  materialized,
+                  execution,
+                  beautifyEvaluations
                 )
             : operation.iteration === 1 &&
               providerOperationMatchesExecution(operation, execution))
@@ -944,7 +1320,21 @@ function materializeServerResults(
             };
           })()
         : estimateLampBackgroundPlan()
-      : estimateRun(materialized.originalVideo.durationSec);
+      : isLampBeautifyRun(materialized)
+        ? materialized.beautifyPlan?.approval.status === "approved" &&
+          materialized.beautifyPlan.decision === "enhance"
+          ? (() => {
+              const plan = estimateLampBeautifyPlan();
+              const touchUp = estimateLampBeautifyTwoPass(
+                materialized.originalVideo.durationSec
+              );
+              return {
+                totalUsd: plan.totalUsd + touchUp.totalUsd,
+                items: [...plan.items, ...touchUp.items],
+              };
+            })()
+          : estimateLampBeautifyPlan()
+        : estimateRun(materialized.originalVideo.durationSec);
     materialized.cost = {
       estimatedUsd:
         materialized.cost?.estimatedUsd ??
@@ -957,14 +1347,21 @@ function materializeServerResults(
     const execution = durableExecution;
     const lamp = isLampExecution(execution);
     const background = isLampBackgroundExecution(execution);
-    const twoPass = lamp || background;
+    const beautify = isLampBeautifyExecution(execution);
+    const twoPass = lamp || background || beautify;
     const budgetSkipped = execution.error?.startsWith("BATCH_BUDGET_SKIPPED") === true;
-    const estimate = background
+    const estimate = background || beautify
       ? (() => {
-          const plan = estimateLampBackgroundPlan();
-          const cleanup = estimateLampBackgroundTwoPass(
-            materialized.originalVideo.durationSec
-          );
+          const plan = background
+            ? estimateLampBackgroundPlan()
+            : estimateLampBeautifyPlan();
+          const cleanup = background
+            ? estimateLampBackgroundTwoPass(
+                materialized.originalVideo.durationSec
+              )
+            : estimateLampBeautifyTwoPass(
+                materialized.originalVideo.durationSec
+              );
           return {
             totalUsd: plan.totalUsd + cleanup.totalUsd,
             items: [...plan.items, ...cleanup.items],
@@ -1021,7 +1418,15 @@ function materializeServerResults(
                 prompt.rendered = execution.renderedPrompt;
                 return lampBackgroundPromptForRun(prompt);
               })()
-            : initialMegaPrompt(lamp ? "lamp" : "flora");
+            : beautify && materialized.beautifyPlan
+              ? (() => {
+                  const prompt = initialLampBeautifyMegaPrompt(
+                    materialized.beautifyPlan
+                  );
+                  prompt.rendered = execution.renderedPrompt;
+                  return lampBeautifyPromptForRun(prompt);
+                })()
+              : initialMegaPrompt(lamp ? "lamp" : "flora");
         // RunExecution revision 1 binds the exact prompt bytes before any
         // Workflow contender can start. The provider journal is a secondary
         // replay record, not the source of truth for an as-yet queued run.
@@ -1085,7 +1490,9 @@ function materializeServerResults(
         secondCutOperation.result &&
         (lamp
           ? lampArtifact(lampEvaluations.final, 2)
-          : lampBackgroundArtifact(backgroundEvaluations.final, 2))
+          : beautify
+            ? lampBeautifyArtifact(beautifyEvaluations.final, 2)
+            : lampBackgroundArtifact(backgroundEvaluations.final, 2))
       ) {
         iteration.status = "ungraded";
       } else if (
@@ -1213,6 +1620,128 @@ function materializeServerResults(
               : terminal
                 ? `${logKey}: durable Lamp Background execution stopped before a gradeable artifact was confirmed${safeExecutionError ? ` — ${safeExecutionError}` : ""}`
                 : `${logKey}: durable server Workflow owns Lamp Background's approved two-pass cleanup; this browser may close safely`;
+        materialized.log.push({
+          at: execution.updatedAt,
+          nodeId:
+            execution.status === "awaiting_review" ? "review" : "final",
+          level: terminal
+            ? "error"
+            : execution.status === "user_action_required"
+              ? "warn"
+              : "info",
+          message,
+        });
+      }
+      return materialized;
+    }
+    if (beautify) {
+      mergeLampBeautifyEvaluationResults(
+        materialized,
+        execution,
+        beautifyEvaluations,
+        hideFinalEvaluation && durableExecution.status === "awaiting_review"
+      );
+
+      const firstEvaluation = lampBeautifyArtifact(
+        beautifyEvaluations.first,
+        1
+      );
+      const finalEvaluation = lampBeautifyArtifact(
+        beautifyEvaluations.final,
+        2
+      );
+      const terminal =
+        execution.status === "failed" ||
+        execution.status === "reconcile_required";
+      const paused = execution.status === "user_action_required";
+      materialized.nodeStates.plan = {
+        nodeId: "plan",
+        status: "succeeded",
+        detail: "human-approved enhance / declined / uncertain contract",
+      };
+      // Completed evidence outranks the terminal flag: a sealed run must not
+      // repaint stages that finished and billed (their journals prove it).
+      materialized.nodeStates.initial = {
+        nodeId: "initial",
+        status: firstEvaluation
+          ? "succeeded"
+          : terminal
+            ? "failed"
+            : execution.iteration >= 1 &&
+                (execution.phase === "video_generation" ||
+                  execution.phase === "finalizing")
+              ? "running"
+              : paused
+                ? "queued"
+                : "queued",
+        detail: firstEvaluation
+          ? "Initial generated, source audio finalized, and ready for correction"
+          : paused
+            ? "paused before the next authorized paid operation"
+            : "source-faithful touch-up from the approved plan",
+      };
+      materialized.nodeStates.critique = {
+        nodeId: "critique",
+        status: firstEvaluation
+          ? "succeeded"
+          : terminal
+            ? "failed"
+            : execution.phase === "evaluating" && execution.iteration === 1
+              ? "running"
+              : "queued",
+        detail: firstEvaluation
+          ? "whole Initial checked against the exact approved plan"
+          : "awaiting the first whole-video evaluation",
+      };
+      materialized.nodeStates.final = {
+        nodeId: "final",
+        status: finalEvaluation
+          ? "succeeded"
+          : terminal
+            ? "failed"
+            : execution.iteration >= 2 &&
+                (execution.phase === "video_generation" ||
+                  execution.phase === "finalizing" ||
+                  execution.phase === "evaluating")
+              ? "running"
+              : "queued",
+        detail: finalEvaluation
+          ? "Final generated and evaluated from the saved correction brief"
+          : paused
+            ? "paused; renew the exact enhancement approval to resume"
+            : "one correction pass from the immutable source",
+      };
+      materialized.nodeStates.review = {
+        nodeId: "review",
+        status: materialized.humanGrade
+          ? "succeeded"
+          : execution.status === "awaiting_review"
+            ? "queued"
+            : "idle",
+        detail: materialized.humanGrade
+          ? materialized.humanGrade.shipIt
+            ? "human grade saved — ship"
+            : "human grade saved — do not ship"
+          : "blind human grade required; approved plan remains visible",
+      };
+
+      delete materialized.bestIterationIndex;
+      delete materialized.finalVideo;
+      delete materialized.fallback;
+      const logKey = `server execution ${execution.executionId}`;
+      if (!materialized.log.some((entry) => entry.message.includes(logKey))) {
+        const safeExecutionError = execution.error
+          ?.replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 240);
+        const message =
+          execution.status === "awaiting_review"
+            ? `${logKey}: Lamp Beautify completed Initial, whole-video critique, Final, and the saved Final evaluation — awaiting blind human grading`
+            : execution.status === "user_action_required"
+              ? `${logKey}: paused before the next paid operation; renew the same exact enhancement approval to resume without rebilling completed journals`
+              : terminal
+                ? `${logKey}: durable Lamp Beautify execution stopped before a gradeable artifact was confirmed${safeExecutionError ? ` — ${safeExecutionError}` : ""}`
+                : `${logKey}: durable server Workflow owns Lamp Beautify's approved two-pass touch-up; this browser may close safely`;
         materialized.log.push({
           at: execution.updatedAt,
           nodeId:
@@ -1528,12 +2057,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       execution,
       lampEvaluations,
       backgroundEvaluations,
+      beautifyEvaluations,
     ] = await Promise.all([
       storage.getRun(requestedId),
       storage.listPaidOperationCosts(requestedId),
       storage.getRunExecution(requestedId),
       readLampEvaluationProjection(storage, requestedId),
       readLampBackgroundEvaluationProjection(storage, requestedId),
+      readLampBeautifyEvaluationProjection(storage, requestedId),
     ]);
     const run = storedRun
       ? materializeServerResults(
@@ -1542,7 +2073,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           execution,
           lampEvaluations,
           backgroundEvaluations,
-          hideFinalEvaluation
+          hideFinalEvaluation,
+          beautifyEvaluations
         )
       : null;
     if (!run) return NextResponse.json({ error: "Run not found." }, { status: 404 });
@@ -1582,11 +2114,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         execution,
         lampEvaluations,
         backgroundEvaluations,
+        beautifyEvaluations,
       ] = await Promise.all([
         storage.listPaidOperationCosts(run.id),
         storage.getRunExecution(run.id),
         readLampEvaluationProjection(storage, run.id),
         readLampBackgroundEvaluationProjection(storage, run.id),
+        readLampBeautifyEvaluationProjection(storage, run.id),
       ]);
       return compactRun(
         materializeServerResults(
@@ -1595,7 +2129,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           execution,
           lampEvaluations,
           backgroundEvaluations,
-          hideFinalEvaluation
+          hideFinalEvaluation,
+          beautifyEvaluations
         )
       );
     })
@@ -1699,12 +2234,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     body.workflowMode !== undefined &&
     body.workflowMode !== "flora" &&
     body.workflowMode !== "lamp" &&
-    body.workflowMode !== "background"
+    body.workflowMode !== "background" &&
+    body.workflowMode !== "beautify"
   ) {
     return NextResponse.json(
       {
         error:
-          'workflowMode must be "flora", "lamp", or "background".',
+          'workflowMode must be "flora", "lamp", "background", or "beautify".',
       },
       { status: 400 }
     );
@@ -1714,15 +2250,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       ? "flora"
       : body.workflowMode === "lamp"
         ? "lamp"
-        : "background";
+        : body.workflowMode === "background"
+          ? "background"
+          : "beautify";
   if (
     body.approveLiveSpend === true &&
-    workflowMode === "background"
+    (workflowMode === "background" || workflowMode === "beautify")
   ) {
     return NextResponse.json(
       {
         error:
-          "Approve the source-specific Lamp Background cleanup plan before authorizing the two-pass generation.",
+          workflowMode === "background"
+            ? "Approve the source-specific Lamp Background cleanup plan before authorizing the two-pass generation."
+            : "Approve the source-specific Lamp Beautify enhancement plan before authorizing the two-pass generation.",
       },
       { status: 409 }
     );
@@ -1736,11 +2276,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 503 }
     );
   }
-  if (body.approvePlanSpend === true && workflowMode !== "background") {
+  if (
+    body.approvePlanSpend === true &&
+    workflowMode !== "background" &&
+    workflowMode !== "beautify"
+  ) {
     return NextResponse.json(
       {
         error:
-          "Cleanup-plan spend applies only to Lamp Background runs.",
+          "Plan spend applies only to Lamp Background and Lamp Beautify runs.",
       },
       { status: 400 }
     );
@@ -1770,6 +2314,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       {
         error:
           "Approve the one-call cleanup-plan analysis before starting a live Lamp Background run.",
+      },
+      { status: 400 }
+    );
+  }
+  if (
+    workflowMode === "beautify" &&
+    body.mock !== true &&
+    body.approvePlanSpend !== true &&
+    !existing?.beautifyPlan
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "Approve the one-call enhancement-plan analysis before starting a live Lamp Beautify run.",
       },
       { status: 400 }
     );
@@ -1856,7 +2414,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         ? hasReusableLampApproval(existing)
         : workflowMode === "background"
           ? hasReusableLampBackgroundPlanApproval(existing)
-          : hasReusableFirstCutApproval(existing, "single")) &&
+          : workflowMode === "beautify"
+            ? hasReusableLampBeautifyPlanApproval(existing)
+            : hasReusableFirstCutApproval(existing, "single")) &&
       existing.originalVideo.runId === canonicalVideo.runId &&
       existing.originalVideo.url === canonicalVideo.url &&
       Math.abs(existing.originalVideo.durationSec - canonicalVideo.durationSec) <=
@@ -1876,7 +2436,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               ? "lamp_two_pass"
               : workflowMode === "background"
                 ? "background_plan"
-                : "first_cut"
+                : workflowMode === "beautify"
+                  ? "beautify_plan"
+                  : "first_cut"
           )
         : undefined
     );
@@ -1898,6 +2460,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     if (workflowMode === "background") {
       const prepared = await prepareLampBackgroundPlan({
+        run: updated,
+        mock: body.mock === true,
+      });
+      if (!prepared.ok) {
+        return NextResponse.json(
+          { error: prepared.message, run: prepared.run },
+          { status: prepared.status }
+        );
+      }
+      return NextResponse.json({
+        ok: true,
+        created: false,
+        run: prepared.run,
+        planReviewRequired:
+          prepared.plan.approval.status !== "approved",
+        serverOwned: body.mock !== true,
+      });
+    }
+    if (workflowMode === "beautify") {
+      const prepared = await prepareLampBeautifyPlan({
         run: updated,
         mock: body.mock === true,
       });
@@ -1975,12 +2557,37 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         ? "lamp_two_pass"
         : workflowMode === "background"
           ? "background_plan"
-          : "first_cut"
+          : workflowMode === "beautify"
+            ? "beautify_plan"
+            : "first_cut"
     );
   }
   await storage.putRun(run);
   if (workflowMode === "background") {
     const prepared = await prepareLampBackgroundPlan({
+      run,
+      mock: body.mock === true,
+    });
+    if (!prepared.ok) {
+      return NextResponse.json(
+        { error: prepared.message, run: prepared.run },
+        { status: prepared.status }
+      );
+    }
+    return NextResponse.json(
+      {
+        ok: true,
+        created: true,
+        run: prepared.run,
+        planReviewRequired:
+          prepared.plan.approval.status !== "approved",
+        serverOwned: body.mock !== true,
+      },
+      { status: 201 }
+    );
+  }
+  if (workflowMode === "beautify") {
+    const prepared = await prepareLampBeautifyPlan({
       run,
       mock: body.mock === true,
     });
@@ -2169,13 +2776,19 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
 
   const storage = getStorage();
-  const [current, execution, lampEvaluations, backgroundEvaluations] =
-    await Promise.all([
-      storage.getRun(id),
-      storage.getRunExecution(id),
-      readLampEvaluationProjection(storage, id),
-      readLampBackgroundEvaluationProjection(storage, id),
-    ]);
+  const [
+    current,
+    execution,
+    lampEvaluations,
+    backgroundEvaluations,
+    beautifyEvaluations,
+  ] = await Promise.all([
+    storage.getRun(id),
+    storage.getRunExecution(id),
+    readLampEvaluationProjection(storage, id),
+    readLampBackgroundEvaluationProjection(storage, id),
+    readLampBeautifyEvaluationProjection(storage, id),
+  ]);
   if (!current) {
     return NextResponse.json({ error: "Run not found." }, { status: 404 });
   }
@@ -2184,17 +2797,24 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     [],
     execution,
     lampEvaluations,
-    backgroundEvaluations
+    backgroundEvaluations,
+    false,
+    beautifyEvaluations
   );
   const authoritativeExecution = materialized.serverExecution;
   const background = authoritativeExecution
     ? isLampBackgroundExecution(authoritativeExecution)
     : isLampBackgroundRun(materialized);
-  const lamp = !background &&
+  const beautify =
+    !background &&
+    (authoritativeExecution
+      ? isLampBeautifyExecution(authoritativeExecution)
+      : isLampBeautifyRun(materialized));
+  const lamp = !background && !beautify &&
     (authoritativeExecution
       ? isLampExecution(authoritativeExecution)
       : persistedWorkflowMode(materialized) === "lamp");
-  const twoPass = lamp || background;
+  const twoPass = lamp || background || beautify;
   const grade = parseHumanGrade({
     value: body.humanGrade,
     requiredEvalIds: background
@@ -2287,18 +2907,22 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       freshExecution,
       freshLampEvaluations,
       freshBackgroundEvaluations,
+      freshBeautifyEvaluations,
     ] = await Promise.all([
       storage.listPaidOperationCosts(id),
       storage.getRunExecution(id),
       readLampEvaluationProjection(storage, id),
       readLampBackgroundEvaluationProjection(storage, id),
+      readLampBeautifyEvaluationProjection(storage, id),
     ]);
     const conflictRun = materializeServerResults(
       result.current!,
       paidCosts,
       freshExecution,
       freshLampEvaluations,
-      freshBackgroundEvaluations
+      freshBackgroundEvaluations,
+      false,
+      freshBeautifyEvaluations
     );
     return NextResponse.json(
       {
@@ -2316,18 +2940,22 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     freshExecution,
     freshLampEvaluations,
     freshBackgroundEvaluations,
+    freshBeautifyEvaluations,
   ] = await Promise.all([
     storage.listPaidOperationCosts(id),
     storage.getRunExecution(id),
     readLampEvaluationProjection(storage, id),
     readLampBackgroundEvaluationProjection(storage, id),
+    readLampBeautifyEvaluationProjection(storage, id),
   ]);
   const savedRun = materializeServerResults(
     result.run,
     paidCosts,
     freshExecution,
     freshLampEvaluations,
-    freshBackgroundEvaluations
+    freshBackgroundEvaluations,
+    false,
+    freshBeautifyEvaluations
   );
   return NextResponse.json(
     { ok: true, run: compactRun(savedRun) },

@@ -25,6 +25,11 @@ import {
   LAMP_EVAL_DEFS,
 } from "../../lib/lamp-evaluation.ts";
 import {
+  isLampBeautifyRun,
+  lampBeautifyCompositeForResults,
+  LAMP_BEAUTIFY_UI_EVAL_DEFS,
+} from "../../lib/lamp-beautify-read.ts";
+import {
   isLampBackgroundRun,
   lampBackgroundCompositeForResults,
   LAMP_BACKGROUND_UI_EVAL_DEFS,
@@ -81,9 +86,18 @@ export function isGradeable(run: Run): boolean {
     run.backgroundCleanupPlan.decision === "exceptional-no-op" &&
     run.status === "awaiting-review" &&
     v?.url === run.originalVideo.url;
+  const approvedBeautifyNoOp =
+    isLampBeautifyRun(run) &&
+    run.beautifyPlan?.approval.status === "approved" &&
+    run.beautifyPlan.runId === run.id &&
+    run.beautifyPlan.decision === "exceptional-no-op" &&
+    run.status === "awaiting-review" &&
+    v?.url === run.originalVideo.url;
   return (
     (!run.serverExecution || run.serverExecution.status === "awaiting_review") &&
-    (serverVerifiedArtifact || approvedBackgroundNoOp) &&
+    (serverVerifiedArtifact ||
+      approvedBackgroundNoOp ||
+      approvedBeautifyNoOp) &&
     v !== undefined &&
     !v.simulatedFilter
   );
@@ -92,7 +106,9 @@ export function isGradeable(run: Run): boolean {
 /** Lamp's human grade and comparison target is strictly v2. */
 export function finalLampIteration(run: Run): Iteration | undefined {
   const second = run.iterations.find((iteration) => iteration.index === 2);
-  if (isLampRun(run) || isLampBackgroundRun(run)) return second;
+  if (isLampRun(run) || isLampBackgroundRun(run) || isLampBeautifyRun(run)) {
+    return second;
+  }
   // Legacy Flora records keep their historical fallback behavior.
   return second ?? run.iterations.at(-1);
 }
@@ -110,12 +126,20 @@ export function needsLampHumanGrade(run: Run): boolean {
     run.backgroundCleanupPlan.runId === run.id &&
     run.backgroundCleanupPlan.decision === "exceptional-no-op" &&
     run.status === "awaiting-review";
+  const beautifyNoOp =
+    isLampBeautifyRun(run) &&
+    run.beautifyPlan?.approval.status === "approved" &&
+    run.beautifyPlan.runId === run.id &&
+    run.beautifyPlan.decision === "exceptional-no-op" &&
+    run.status === "awaiting-review";
   return (
     ((run.serverExecution !== undefined &&
       (run.serverExecution.executionId.startsWith("lamp:") ||
-        run.serverExecution.executionId.startsWith("lamp-background:")) &&
+        run.serverExecution.executionId.startsWith("lamp-background:") ||
+        run.serverExecution.executionId.startsWith("lamp-beautify:")) &&
       run.serverExecution.status === "awaiting_review") ||
-      backgroundNoOp) &&
+      backgroundNoOp ||
+      beautifyNoOp) &&
     run.humanGrade === undefined
   );
 }
@@ -224,16 +248,22 @@ export function perCheckStats(
 
 /** Preserve each method's registry; mixed sets use the stable union by id. */
 export function evalDefsForRuns(runs: Run[]): EvalDefinition[] {
-  if (runs.length === 0) return LAMP_BACKGROUND_UI_EVAL_DEFS;
+  if (runs.length === 0) return LAMP_BEAUTIFY_UI_EVAL_DEFS;
   const registries: readonly EvalDefinition[][] = [
     ...(runs.some(
-      (run) => !isLampRun(run) && !isLampBackgroundRun(run)
+      (run) =>
+        !isLampRun(run) &&
+        !isLampBackgroundRun(run) &&
+        !isLampBeautifyRun(run)
     )
       ? [EVAL_DEFS]
       : []),
     ...(runs.some((run) => isLampRun(run)) ? [LAMP_EVAL_DEFS] : []),
     ...(runs.some((run) => isLampBackgroundRun(run))
       ? [LAMP_BACKGROUND_UI_EVAL_DEFS]
+      : []),
+    ...(runs.some((run) => isLampBeautifyRun(run))
+      ? [LAMP_BEAUTIFY_UI_EVAL_DEFS]
       : []),
   ];
   const definitions = new Map<string, EvalDefinition>();
@@ -316,6 +346,9 @@ export function aiPassRatePct(gradedRuns: Run[]): number | undefined {
   const scored = gradedRuns
     .map((run) => {
       const final = finalLampIteration(run);
+      if (isLampBeautifyRun(run)) {
+        return lampBeautifyCompositeForResults(final?.evalResults ?? []);
+      }
       if (isLampBackgroundRun(run)) {
         return lampBackgroundCompositeForResults(final?.evalResults ?? []);
       }

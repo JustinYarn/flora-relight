@@ -60,6 +60,30 @@ import {
   compileLampBackgroundFinalPrompt,
   initialLampBackgroundMegaPrompt,
 } from "@/lib/prompts/lamp-background";
+import {
+  lampBeautifyPlanRequiresGeneration,
+  parseLampBeautifyPlan,
+  type LampBeautifyPlan,
+} from "@/lib/lamp-beautify";
+import {
+  buildLampBeautifyEvaluationArtifact,
+  LAMP_BEAUTIFY_VISUAL_EVAL_DEFS,
+  type LampBeautifyEvalId,
+  type LampBeautifyEvaluationArtifact,
+} from "@/lib/lamp-beautify-evaluation";
+import {
+  lampBeautifyArtifactResultsForRun,
+  lampBeautifyCompositeForResults,
+  lampBeautifyPromptForRun,
+} from "@/lib/lamp-beautify-read";
+import {
+  compileLampBeautifyFinalPrompt,
+  initialLampBeautifyMegaPrompt,
+} from "@/lib/prompts/lamp-beautify";
+import {
+  estimateLampBeautifyPlan,
+  estimateLampBeautifyTwoPass,
+} from "@/lib/cost";
 import { initialMegaPrompt, nextMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { runWorkflowMode } from "@/lib/workflow-mode";
 import { extractFrames } from "@/lib/frames";
@@ -912,6 +936,349 @@ async function runLampBackgroundMockWorkflow(input: {
   );
 }
 
+type MockLampBeautifyRawResult = {
+  evalId: LampBeautifyEvalId;
+  score: number;
+  confidence: number;
+  violations: Array<{
+    aspect: string;
+    severity: "critical" | "major" | "minor";
+    description: string;
+    correctionAction?: string;
+    planItemIds?: string[];
+  }>;
+  reasoning: string;
+};
+
+function mockLampBeautifyEvaluation(
+  beautifyPlan: LampBeautifyPlan,
+  iteration: 1 | 2,
+  previous?: LampBeautifyEvaluationArtifact
+): LampBeautifyEvaluationArtifact {
+  const enhanceIds = beautifyPlan.enhance.map((item) => item.id);
+  const initialScores: Partial<Record<LampBeautifyEvalId, number>> = {
+    "identity-preservation": 97,
+    "enhancement-adherence": 66,
+    "enhancement-quality": 62,
+    "natural-skin-texture": 90,
+    "permanent-features-integrity": 96,
+    "motion-lipsync": 95,
+    "background-integrity": 97,
+    "other-people-untouched": 96,
+    "lighting-camera-fidelity": 95,
+    "enhancement-temporal-stability": 73,
+  };
+  const finalScores: Partial<Record<LampBeautifyEvalId, number>> = {
+    "identity-preservation": 98,
+    "enhancement-adherence": 95,
+    "enhancement-quality": 91,
+    "natural-skin-texture": 94,
+    "permanent-features-integrity": 97,
+    "motion-lipsync": 97,
+    "background-integrity": 97,
+    "other-people-untouched": 97,
+    "lighting-camera-fidelity": 95,
+    "enhancement-temporal-stability": 93,
+  };
+  const results: MockLampBeautifyRawResult[] =
+    LAMP_BEAUTIFY_VISUAL_EVAL_DEFS.map((definition) => {
+      const score =
+        (iteration === 1 ? initialScores : finalScores)[definition.id] ?? 95;
+      const violations: MockLampBeautifyRawResult["violations"] = [];
+      if (iteration === 1) {
+        if (definition.id === "enhancement-adherence") {
+          violations.push({
+            aspect: "approved-enhancement-unapplied",
+            severity: "major",
+            description:
+              "The simulated Initial leaves an approved enhancement effectively unapplied.",
+            correctionAction: "complete-approved-enhancement",
+            planItemIds: enhanceIds,
+          });
+        } else if (definition.id === "enhancement-quality") {
+          violations.push({
+            aspect: "improvement-too-subtle",
+            severity: "major",
+            description:
+              "The simulated Initial does not yet read as convincingly camera-ready.",
+            correctionAction: "complete-approved-enhancement",
+            planItemIds: enhanceIds,
+          });
+        } else if (definition.id === "enhancement-temporal-stability") {
+          violations.push({
+            aspect: "enhancement-flicker",
+            severity: "major",
+            description:
+              "The simulated Initial shows an approved enhancement pulsing across frames.",
+            correctionAction: "complete-approved-enhancement",
+            planItemIds: enhanceIds,
+          });
+        } else if (definition.id === "natural-skin-texture") {
+          violations.push({
+            aspect: "texture-softening",
+            severity: "minor",
+            description:
+              "The simulated Initial slightly softens pore texture under the key light.",
+            correctionAction: "repair-skin-texture",
+            planItemIds: [],
+          });
+        }
+      }
+      return {
+        evalId: definition.id,
+        score,
+        confidence: iteration === 1 ? 0.88 : 0.93,
+        violations,
+        reasoning:
+          iteration === 1
+            ? `Simulated Initial whole-video evidence for ${definition.id}; no evaluation provider was called.`
+            : `Simulated Final whole-video evidence for ${definition.id}; no evaluation provider was called.`,
+      };
+    });
+  return buildLampBeautifyEvaluationArtifact({
+    raw: { results },
+    plan: beautifyPlan,
+    iteration,
+    audioVerified: true,
+    previousResults: previous?.evalResults,
+    costUsd: 0,
+  });
+}
+
+/**
+ * Zero-cost Lamp Beautify rehearsal. It uses the production plan,
+ * evaluator-artifact, and deterministic prompt compiler contracts, while the
+ * generated mock assets retain neutral source pixels so a touch-up rehearsal
+ * can never masquerade as a real enhancement.
+ */
+async function runLampBeautifyMockWorkflow(input: {
+  runId: string;
+  original: VideoAsset;
+  beautifyPlan: LampBeautifyPlan;
+  instant: boolean;
+  pace: (minMs?: number, maxMs?: number) => Promise<void>;
+}): Promise<void> {
+  const { runId, original, beautifyPlan, instant, pace } = input;
+  const plan = parseLampBeautifyPlan(beautifyPlan);
+  if (plan.approval.status !== "approved") {
+    throw new Error(
+      "Lamp Beautify mock execution requires an approved enhancement plan."
+    );
+  }
+  if (plan.runId !== runId) {
+    throw new Error(
+      "Lamp Beautify mock execution requires an enhancement plan bound to this run."
+    );
+  }
+  if (!lampBeautifyPlanRequiresGeneration(plan)) {
+    const current = getRun(runId);
+    if (
+      current?.status !== "awaiting-review" ||
+      current.finalVideo?.kind !== "final" ||
+      current.finalVideo.url !== original.url
+    ) {
+      throw new Error(
+        "Approved exceptional no-op plans must be materialized as the exact source before the mock engine is invoked."
+      );
+    }
+    setNode(runId, "plan", "succeeded", "exceptional no-op approved");
+    setNode(runId, "initial", "skipped", "generation not authorized");
+    setNode(runId, "critique", "skipped", "generation not authorized");
+    setNode(runId, "final", "skipped", "exact source delivered");
+    setNode(runId, "review", "running", "awaiting your human grade");
+    log(
+      runId,
+      "info",
+      "Lamp Beautify exceptional no-op preserved: the exact source remains the final and no generation was dispatched.",
+      "review"
+    );
+    return;
+  }
+
+  const providers = getProviders("mock", { instant });
+  const planningEstimate = estimateLampBeautifyPlan();
+  const touchUpEstimate = estimateLampBeautifyTwoPass(original.durationSec);
+  const estimate = {
+    totalUsd: planningEstimate.totalUsd + touchUpEstimate.totalUsd,
+    items: [...planningEstimate.items, ...touchUpEstimate.items],
+  };
+  const encode = (iteration: number) =>
+    encodeScenarioIteration(original.id, iteration);
+
+  mutateRun(runId, (run) => {
+    run.live = false;
+    run.beautifyPlan = plan;
+    run.iterations = [];
+    run.cost = {
+      estimatedUsd: estimate.totalUsd,
+      actualUsd: 0,
+      items: estimate.items.map((item) => ({
+        label: item.label,
+        usd: item.usd,
+        estimated: true,
+      })),
+    };
+    delete run.bestIterationIndex;
+    delete run.finalVideo;
+    delete run.fallback;
+  });
+
+  setNode(runId, "plan", "running");
+  await pace(80, 180);
+  setNode(
+    runId,
+    "plan",
+    "succeeded",
+    `${plan.enhance.length} enhance · ${plan.declined.length} declined · ${plan.uncertain.length} uncertain`
+  );
+  log(
+    runId,
+    "info",
+    "Human-approved enhancement plan locked. Declined, uncertain, and unlisted content remain protected.",
+    "plan"
+  );
+
+  setNode(runId, "initial", "running", "generation 1 of 2");
+  const initialPrompt = initialLampBeautifyMegaPrompt(plan);
+  const initialPresentationPrompt = lampBeautifyPromptForRun(initialPrompt);
+  mutateRun(runId, (run) => {
+    run.iterations.push({
+      index: 1,
+      megaPrompt: initialPresentationPrompt,
+      beforeFrames: [],
+      afterFrames: [],
+      evalResults: [],
+      status: "running",
+    });
+  });
+  const initialGenerated = await providers.videoGen.generate({
+    originalVideo: original,
+    megaPrompt: initialPresentationPrompt,
+    seed: 133743,
+    iteration: encode(1),
+  });
+  const initialVideo: VideoAsset = {
+    ...initialGenerated.video,
+    url: original.url,
+    label: "Lamp Beautify Initial — simulated touch-up",
+    simulatedFilter: "none",
+  };
+  patchIteration(runId, 1, (iteration) => {
+    iteration.generatedVideo = initialVideo;
+  });
+  setNode(runId, "initial", "succeeded", "simulated Initial saved");
+
+  setNode(runId, "critique", "running", "whole-video plan check");
+  await pace(180, 340);
+  const initialArtifact = mockLampBeautifyEvaluation(plan, 1);
+  const initialResults = lampBeautifyArtifactResultsForRun(
+    initialArtifact,
+    plan
+  );
+  const initialComposite = lampBeautifyCompositeForResults(initialResults);
+  if (!initialComposite || initialComposite.passed) {
+    throw new Error(
+      "Lamp Beautify mock Initial must retain its intentional enhancement-gate failure."
+    );
+  }
+  patchIteration(runId, 1, (iteration) => {
+    iteration.evalResults = initialResults;
+    iteration.composite = initialComposite;
+    iteration.status = "failed";
+  });
+  const corrections = initialArtifact.evalResults.flatMap((result) =>
+    result.violations.filter((violation) => violation.correction)
+  ).length;
+  setNode(
+    runId,
+    "critique",
+    "succeeded",
+    `${corrections} plan-bound corrections compiled`
+  );
+  log(
+    runId,
+    "warn",
+    "The simulated Initial failed enhancement gates. Only structured corrections tied to approved catalog items will enter Final.",
+    "critique"
+  );
+
+  setNode(runId, "final", "running", "generation 2 of 2");
+  const finalPrompt = compileLampBeautifyFinalPrompt(
+    initialPrompt.rendered,
+    plan,
+    initialArtifact
+  );
+  if (finalPrompt.corrections.length === 0) {
+    throw new Error(
+      "Lamp Beautify mock Final requires at least one approved plan-bound correction."
+    );
+  }
+  const finalPresentationPrompt = lampBeautifyPromptForRun(finalPrompt);
+  mutateRun(runId, (run) => {
+    run.iterations.push({
+      index: 2,
+      megaPrompt: finalPresentationPrompt,
+      beforeFrames: [],
+      afterFrames: [],
+      evalResults: [],
+      status: "running",
+    });
+  });
+  const finalGenerated = await providers.videoGen.generate({
+    originalVideo: original,
+    megaPrompt: finalPresentationPrompt,
+    seed: 133743,
+    iteration: encode(2),
+  });
+  const finalGeneratedVideo: VideoAsset = {
+    ...finalGenerated.video,
+    url: original.url,
+    label: "Lamp Beautify Final — simulated touch-up",
+    simulatedFilter: "none",
+  };
+  const finalArtifact = mockLampBeautifyEvaluation(plan, 2, initialArtifact);
+  const finalResults = lampBeautifyArtifactResultsForRun(finalArtifact, plan);
+  const finalComposite = lampBeautifyCompositeForResults(finalResults);
+  if (!finalComposite?.passed) {
+    throw new Error(
+      "Lamp Beautify mock Final must pass every enhancement and preservation gate."
+    );
+  }
+  patchIteration(runId, 2, (iteration) => {
+    iteration.generatedVideo = finalGeneratedVideo;
+    iteration.evalResults = finalResults;
+    iteration.composite = finalComposite;
+    iteration.status = "ungraded";
+  });
+  setNode(
+    runId,
+    "final",
+    "succeeded",
+    finalComposite?.passed ? "simulated Final passed" : "simulated Final saved"
+  );
+
+  const finalVideo: VideoAsset = {
+    ...finalGeneratedVideo,
+    id: uid("video"),
+    kind: "final",
+    hasAudio: original.hasAudio,
+    label: original.hasAudio
+      ? "Lamp Beautify Final — source audio restored"
+      : "Lamp Beautify Final — source silence preserved",
+  };
+  setNode(runId, "review", "running", "awaiting your blind human grade");
+  mutateRun(runId, (run) => {
+    run.finalVideo = finalVideo;
+    run.status = "awaiting-review";
+  });
+  log(
+    runId,
+    "info",
+    "Lamp Beautify demo complete: Initial failed, approved plan-bound corrections drove Final, and the saved Final evaluation is ready for blind-grade reveal. Actual provider spend: $0.00.",
+    "review"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The engine
 // ---------------------------------------------------------------------------
@@ -938,6 +1305,32 @@ export async function runWorkflow(
     throw new Error(
       "Live browser execution is disabled. Durable server Workflows own all provider dispatch."
     );
+  }
+  if (workflowMode === "beautify") {
+    try {
+      if (!run0.beautifyPlan) {
+        throw new Error(
+          "Lamp Beautify mock execution cannot start without an enhancement plan."
+        );
+      }
+      await runLampBeautifyMockWorkflow({
+        runId,
+        original,
+        beautifyPlan: run0.beautifyPlan,
+        instant,
+        pace,
+      });
+    } catch (error) {
+      log(runId, "error", `Lamp Beautify demo error: ${errText(error)}`);
+      mutateRun(runId, (run) => {
+        run.status = "failed";
+        for (const state of Object.values(run.nodeStates)) {
+          if (state.status === "running") state.status = "failed";
+          if (state.status === "queued") state.status = "idle";
+        }
+      });
+    }
+    return;
   }
   if (workflowMode === "background") {
     try {

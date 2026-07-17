@@ -354,6 +354,26 @@ export function lampBackgroundTwoPassReservationUsd(
   );
 }
 
+/**
+ * Lamp Beautify mirrors Lamp Background's provider call shapes exactly — one
+ * Gemini Pro whole-video planning call, two Omni generations, two holistic
+ * evaluations, at most one Lipsync repair — so its money math is shared by
+ * construction rather than duplicated into drift-prone copies.
+ */
+export const LAMP_BEAUTIFY_GENERATION_COUNT = LAMP_BACKGROUND_GENERATION_COUNT;
+export const LAMP_BEAUTIFY_GEMINI_MAX_OUTPUT_TOKENS =
+  LAMP_BACKGROUND_GEMINI_MAX_OUTPUT_TOKENS;
+
+export function lampBeautifyPlanReservationUsd(): number {
+  return lampBackgroundPlanReservationUsd();
+}
+
+export function lampBeautifyTwoPassReservationUsd(
+  durationSec: number
+): number {
+  return lampBackgroundTwoPassReservationUsd(durationSec);
+}
+
 /** Price a completed Lipsync-2-Pro repair from its actual output duration. */
 export function lipsync2ProCostFromDuration(durationSec: number): number {
   if (!Number.isFinite(durationSec) || durationSec <= 0) {
@@ -659,6 +679,23 @@ export function estimateLampBackgroundTwoPass(
       usd: 0,
     },
   ]);
+}
+
+/** Same call shape as the cleanup plan: one Gemini Pro whole-video proposal. */
+export function estimateLampBeautifyPlan(): CostEstimate {
+  return estimateLampBackgroundPlan();
+}
+
+/**
+ * Lamp Beautify execution after plan approval — identical provider shapes to
+ * Lamp Background's two-pass (two Omni generations, two holistic evaluations,
+ * at most one Final Lipsync repair). Planning is priced and approved
+ * separately.
+ */
+export function estimateLampBeautifyTwoPass(
+  durationSec: number
+): CostEstimate {
+  return estimateLampBackgroundTwoPass(durationSec);
 }
 
 /**

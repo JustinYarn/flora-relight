@@ -382,7 +382,7 @@ export interface WorkflowDefinition {
  * interpreted from their workflow id so existing Flora and Lamp runs keep
  * their original execution semantics after Lamp Background is introduced.
  */
-export type WorkflowMode = "flora" | "lamp" | "background";
+export type WorkflowMode = "flora" | "lamp" | "background" | "beautify";
 
 export type NodeRunStatus =
   | "idle"
@@ -634,7 +634,9 @@ export interface SpendApproval {
     | "first_cut"
     | "lamp_two_pass"
     | "background_plan"
-    | "background_two_pass";
+    | "background_two_pass"
+    | "beautify_plan"
+    | "beautify_two_pass";
   batchId?: string;
   /** Canonical durable ingest identity and facts this approval was priced for. */
   runId: string;
@@ -707,6 +709,7 @@ export interface Run {
    * planner journal; mock plans remain drafts until explicitly approved.
    */
   backgroundCleanupPlan?: import("./lamp-background").LampBackgroundCleanupPlan;
+  beautifyPlan?: import("./lamp-beautify").LampBeautifyPlan;
   iterations: Iteration[];
   /** Legacy best-of tracking. Lamp leaves this unset because v2 is always Final. */
   bestIterationIndex?: number;

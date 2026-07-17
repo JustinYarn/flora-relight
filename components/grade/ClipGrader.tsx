@@ -17,6 +17,7 @@ import { PairPlayer } from "@/components/library/PairPlayer";
 import { formatRunDate } from "@/components/library/derive";
 import { EvalList } from "@/components/review/EvalList";
 import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
+import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
 import {
   finalLampIteration,
   finalLampVideo,
@@ -335,6 +336,11 @@ export function ClipGrader({
       {run.backgroundCleanupPlan?.approval.status === "approved" ? (
         <div className="mt-4">
           <BackgroundPlanReview run={run} interactive={false} compact />
+        </div>
+      ) : null}
+      {run.beautifyPlan?.approval.status === "approved" ? (
+        <div className="mt-4">
+          <BeautifyPlanReview run={run} interactive={false} compact />
         </div>
       ) : null}
 

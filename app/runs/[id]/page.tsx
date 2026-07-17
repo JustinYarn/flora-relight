@@ -26,6 +26,7 @@ import { LostGenerationRecovery } from "@/components/review/LostGenerationRecove
 import { WorkflowRail } from "@/components/review/WorkflowRail";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
+import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
 
 const STATUS_COLOR: Record<RunStatus, string> = {
   running: "var(--running)",
@@ -99,7 +100,9 @@ export default function RunReviewPage() {
     run.backgroundCleanupPlan?.approval.status === "approved" &&
     run.backgroundCleanupPlan.decision === "exceptional-no-op";
   const planAwaitingApproval =
-    backgroundRun && run.backgroundCleanupPlan?.approval.status === "draft";
+    (backgroundRun && run.backgroundCleanupPlan?.approval.status === "draft") ||
+    (run.workflowMode === "beautify" &&
+      run.beautifyPlan?.approval.status === "draft");
   // Default to the delivered v2 final; mid-flight, follow the newest stage.
   const autoKey = run.finalVideo ? "final" : latest ? `iter-${latest.index}` : null;
   const activeKey = userSelected ?? autoKey;
@@ -158,6 +161,7 @@ export default function RunReviewPage() {
       <div className="xl:flex xl:items-start xl:gap-10">
         <div className="min-w-0 xl:flex-1">
           <BackgroundPlanReview run={run} />
+          <BeautifyPlanReview run={run} />
 
           {/* HERO — original next to relit, one shared transport. While the
           selected attempt is still generating, the relit slot becomes the
@@ -173,7 +177,7 @@ export default function RunReviewPage() {
               ) : planAwaitingApproval ? (
                 <div className="flex h-full w-full items-center justify-center bg-raised px-6 text-center text-2xs leading-relaxed text-faint">
                   nothing is generating yet — approve the plan above to start
-                  the two-pass cleanup; no provider spend happens until then
+                  the two-pass edit; no provider spend happens until then
                 </div>
               ) : undefined
             }
@@ -182,7 +186,8 @@ export default function RunReviewPage() {
           {planAwaitingApproval ? (
             <p className="mt-4 text-pretty text-xs leading-relaxed text-faint">
               Generation is paused here. Approving the plan above is the only
-              action that can authorize cleanup or the rare exact-source no-op.
+              action that can authorize the planned edit or a supported
+              exact-source no-op.
             </p>
           ) : (
             <>

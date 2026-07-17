@@ -31,6 +31,15 @@ import {
 } from "@/lib/lamp-background";
 import { lampBackgroundNoOpPromptForRun } from "@/lib/lamp-background-read";
 import {
+  applyLampBeautifyIntensityOverride,
+  approveLampBeautifyPlan,
+  hashLampBeautifyPlan,
+  lampBeautifyPlanRequiresGeneration,
+  type LampBeautifyIntensity,
+  type LampBeautifyPlan,
+} from "@/lib/lamp-beautify";
+import { lampBeautifyNoOpPromptForRun } from "@/lib/lamp-beautify-read";
+import {
   isRecoverableBatchRun,
   isTerminalRun,
   summarizeBatchRecovery,
@@ -118,6 +127,13 @@ interface AppStore {
    * the fixed two-pass flow; exceptional no-op plans deliver the exact source
    * without authorizing generation.
    */
+  approveBeautifyPlan(
+    runId: string,
+    opts?: {
+      approveLiveSpend?: boolean;
+      intensityOverride?: LampBeautifyIntensity;
+    }
+  ): Promise<void>;
   approveBackgroundPlan(
     runId: string,
     opts?: { approveLiveSpend?: boolean }
@@ -192,6 +208,67 @@ function appendRunLog(runId: string, message: string): void {
         : r
     ),
   }));
+}
+
+/** Provider-free exceptional no-op settlement for the beautify mock. */
+function materializeMockBeautifyNoOp(
+  run: Run,
+  approvedPlan: LampBeautifyPlan
+): Run {
+  const finalVideo: VideoAsset = {
+    ...run.originalVideo,
+    id: `lamp-beautify-no-op-${run.id}`,
+    kind: "final",
+    label: "Lamp Beautify demo — approved unchanged source",
+  };
+  const nodeStates = { ...run.nodeStates };
+  for (const nodeId of ["initial", "critique", "final"] as const) {
+    nodeStates[nodeId] = {
+      nodeId,
+      status: "skipped",
+      detail: "approved exceptional no-op — no generation",
+    };
+  }
+  nodeStates.plan = {
+    nodeId: "plan",
+    status: "succeeded",
+    detail: "exceptional no-op approved",
+  };
+  nodeStates.review = {
+    nodeId: "review",
+    status: "queued",
+    detail: "exact source ready for human grade",
+  };
+  return {
+    ...run,
+    workflowId: "lamp-beautify-v1",
+    workflowMode: "beautify",
+    beautifyPlan: approvedPlan,
+    iterations: [
+      {
+        index: 2,
+        megaPrompt: lampBeautifyNoOpPromptForRun(approvedPlan),
+        generatedVideo: finalVideo,
+        beforeFrames: [],
+        afterFrames: [],
+        evalResults: [],
+        status: "ungraded",
+      },
+    ],
+    finalVideo,
+    status: "awaiting-review",
+    nodeStates,
+    log: [
+      ...run.log,
+      {
+        at: Date.now(),
+        nodeId: "review",
+        level: "info" as const,
+        message:
+          "Lamp Beautify plan approved as an exceptional no-op. The exact source is ready for human grading; no generation was dispatched.",
+      },
+    ],
+  };
 }
 
 /** Provider-free exceptional no-op settlement for the mock workflow. */
@@ -665,6 +742,117 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       );
     }
     return run.id;
+  },
+
+  approveBeautifyPlan: async (runId, opts) => {
+    const run = get().runs.find((item) => item.id === runId);
+    if (!run || run.workflowMode !== "beautify") {
+      throw new Error("Lamp Beautify run not found.");
+    }
+    const plan = run.beautifyPlan;
+    if (!plan) {
+      throw new Error("This run does not have an enhancement plan to approve.");
+    }
+    const resumingPausedLiveTouchUp =
+      get().mode === "live" &&
+      plan.approval.status === "approved" &&
+      (run.serverExecution?.status === "user_action_required" ||
+        run.serverExecution === undefined);
+    if (plan.approval.status === "approved" && !resumingPausedLiveTouchUp) {
+      return;
+    }
+
+    const override =
+      opts?.intensityOverride !== undefined && plan.decision === "enhance"
+        ? opts.intensityOverride
+        : undefined;
+    if (get().mode === "live") {
+      const hashedPlan =
+        override !== undefined
+          ? applyLampBeautifyIntensityOverride(plan, override)
+          : plan;
+      const planHash = await hashLampBeautifyPlan(hashedPlan);
+      const response = await fetch("/api/beautify-plan/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runId,
+          planHash,
+          approveLiveSpend: opts?.approveLiveSpend === true,
+          ...(override !== undefined
+            ? { intensityOverride: override }
+            : {}),
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { run?: Run; serverOwned?: boolean; error?: string }
+        | null;
+      if (!response.ok || !payload?.run) {
+        throw new Error(
+          payload?.error ??
+            `Enhancement-plan approval failed (${response.status}).`
+        );
+      }
+      if (payload.serverOwned !== true) {
+        throw new Error(
+          "The live server did not claim the approved enhancement, so browser execution was refused."
+        );
+      }
+      set((state) => ({
+        runs: state.runs.map((item) =>
+          item.id === runId ? payload.run! : item
+        ),
+      }));
+      return;
+    }
+
+    const approvedPlan = approveLampBeautifyPlan(
+      override !== undefined
+        ? applyLampBeautifyIntensityOverride(plan, override)
+        : plan,
+      Date.now()
+    );
+    if (!lampBeautifyPlanRequiresGeneration(approvedPlan)) {
+      set((state) => ({
+        runs: state.runs.map((item) =>
+          item.id === runId
+            ? materializeMockBeautifyNoOp(item, approvedPlan)
+            : item
+        ),
+      }));
+      return;
+    }
+    set((state) => ({
+      runs: state.runs.map((item) =>
+        item.id === runId
+          ? {
+              ...item,
+              beautifyPlan: approvedPlan,
+              nodeStates: {
+                ...item.nodeStates,
+                plan: {
+                  nodeId: "plan",
+                  status: "succeeded",
+                  detail: `${approvedPlan.enhance.length} enhancement${
+                    approvedPlan.enhance.length === 1 ? "" : "s"
+                  } approved`,
+                },
+              },
+              log: [
+                ...item.log,
+                {
+                  at: Date.now(),
+                  nodeId: "plan",
+                  level: "info" as const,
+                  message:
+                    "Enhancement plan approved. Starting the fixed two-pass Lamp Beautify demo.",
+                },
+              ],
+            }
+          : item
+      ),
+    }));
+    void runWorkflow(runId);
   },
 
   approveBackgroundPlan: async (runId, opts) => {

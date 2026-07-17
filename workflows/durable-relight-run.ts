@@ -21,6 +21,22 @@ import {
   validateLampBackgroundExecutionBinding,
 } from "@/lib/server/lamp-background-execution";
 import { runLampBackgroundHolisticEvaluation } from "@/lib/server/lamp-background-evaluator";
+import {
+  isLampBeautifyEvaluationArtifact,
+} from "@/lib/lamp-beautify-read";
+import {
+  lampBeautifyEvaluationOperationId,
+} from "@/lib/lamp-beautify-operations";
+import type {
+  LampBeautifyEvalResult,
+  LampBeautifyEvaluationArtifact,
+} from "@/lib/lamp-beautify-evaluation";
+import type { LampBeautifyPlan } from "@/lib/lamp-beautify";
+import { compileLampBeautifyFinalPrompt } from "@/lib/prompts/lamp-beautify";
+import {
+  validateLampBeautifyExecutionBinding,
+} from "@/lib/server/lamp-beautify-execution";
+import { runLampBeautifyHolisticEvaluation } from "@/lib/server/lamp-beautify-evaluator";
 import { runLampHolisticEvaluation } from "@/lib/server/lamp-evaluator";
 import type { PreparedLipsyncInputs } from "@/lib/server/replicate-lipsync";
 import { getStorage } from "@/lib/server/storage";
@@ -56,6 +72,7 @@ import {
 import {
   assertVideoGenerationAuthorized,
   hasReusableLampBackgroundApproval,
+  hasReusableLampBeautifyApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
 import {
@@ -129,6 +146,10 @@ export async function durableRelightRun(
       workflowMode === "background"
         ? await readBoundBackgroundPlan(input, workflowRunId)
         : undefined;
+    const beautifyPlan =
+      workflowMode === "beautify"
+        ? await readBoundBeautifyPlan(input, workflowRunId)
+        : undefined;
     const first = await runGenerationAttempt(
       input,
       workflowRunId,
@@ -153,7 +174,28 @@ export async function durableRelightRun(
     let backgroundFirstEvaluation:
       | LampBackgroundEvaluationArtifact
       | undefined;
-    if (workflowMode === "background") {
+    let beautifyFirstEvaluation:
+      | LampBeautifyEvaluationArtifact
+      | undefined;
+    if (workflowMode === "beautify") {
+      if (!beautifyPlan) {
+        throw new Error(
+          "Lamp Beautify lost its approved enhancement plan before evaluation."
+        );
+      }
+      beautifyFirstEvaluation = await evaluateBeautifyAttemptWithRecovery(
+        input,
+        workflowRunId,
+        1,
+        beautifyPlan,
+        []
+      );
+      finalRenderedPrompt = compileLampBeautifyFinalPrompt(
+        input.renderedPrompt,
+        beautifyPlan,
+        beautifyFirstEvaluation
+      ).rendered;
+    } else if (workflowMode === "background") {
       if (!backgroundPlan) {
         throw new Error(
           "Lamp Background lost its approved cleanup plan before evaluation."
@@ -198,7 +240,15 @@ export async function durableRelightRun(
     // The judge therefore sees the Final exactly as generated; a later
     // Lipsync repair only revises the mouth region under the same URL.
     await enterEvaluationPhaseWithRecovery(input, workflowRunId, 2);
-    if (workflowMode === "background") {
+    if (workflowMode === "beautify") {
+      await evaluateBeautifyAttemptWithRecovery(
+        input,
+        workflowRunId,
+        2,
+        beautifyPlan!,
+        beautifyFirstEvaluation!.evalResults
+      );
+    } else if (workflowMode === "background") {
       await evaluateBackgroundAttemptWithRecovery(
         input,
         workflowRunId,
@@ -215,7 +265,13 @@ export async function durableRelightRun(
       );
     }
     const effectiveFinal = await finalizeV2WithSync(input, workflowRunId);
-    if (workflowMode === "background") {
+    if (workflowMode === "beautify") {
+      await settleBeautifyExecution(
+        input,
+        workflowRunId,
+        finalRenderedPrompt
+      );
+    } else if (workflowMode === "background") {
       await settleBackgroundExecution(
         input,
         workflowRunId,
@@ -250,7 +306,22 @@ export async function durableRelightRun(
       return { runId: input.runId, executionId: input.executionId, status: "awaiting_review" };
     }
     if (failure === "two_pass_completed") {
-      if (workflowMode === "background") {
+      if (workflowMode === "beautify") {
+        const [plan, firstEvaluation] = await Promise.all([
+          readBoundBeautifyPlan(input, workflowRunId),
+          readCompletedBeautifyEvaluation(input.runId, 1),
+        ]);
+        const finalPrompt = compileLampBeautifyFinalPrompt(
+          input.renderedPrompt,
+          plan,
+          firstEvaluation
+        );
+        await settleBeautifyExecution(
+          input,
+          workflowRunId,
+          finalPrompt.rendered
+        );
+      } else if (workflowMode === "background") {
         const [cleanupPlan, firstEvaluation] = await Promise.all([
           readBoundBackgroundPlan(input, workflowRunId),
           readCompletedBackgroundEvaluation(input.runId, 1),
@@ -331,6 +402,43 @@ async function readBoundBackgroundPlan(
 }
 
 readBoundBackgroundPlan.maxRetries = 2;
+
+async function readBoundBeautifyPlan(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<LampBeautifyPlan> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    !execution.executionId.startsWith("lamp-beautify:")
+  ) {
+    throw new Error(
+      "Durable run execution no longer owns the approved Lamp Beautify plan."
+    );
+  }
+  const planOperation = execution.planOperationId
+    ? await storage.getPaidOperation(
+        input.runId,
+        execution.planOperationId
+      )
+    : null;
+  return validateLampBeautifyExecutionBinding({
+    run,
+    execution,
+    planOperation,
+  });
+}
+
+readBoundBeautifyPlan.maxRetries = 2;
 
 interface EffectiveV2 {
   videoUrl: string;
@@ -974,18 +1082,26 @@ async function prepareAttempt(
     throw new Error("Run not found during Lamp preparation.");
   }
   const workflowMode = workflowModeFromExecutionId(execution.executionId);
-  if (workflowMode === "background") {
+  if (workflowMode === "background" || workflowMode === "beautify") {
     const planOperation = execution.planOperationId
       ? await getStorage().getPaidOperation(
           input.runId,
           execution.planOperationId
         )
       : null;
-    await validateLampBackgroundExecutionBinding({
-      run,
-      execution,
-      planOperation,
-    });
+    if (workflowMode === "beautify") {
+      await validateLampBeautifyExecutionBinding({
+        run,
+        execution,
+        planOperation,
+      });
+    } else {
+      await validateLampBackgroundExecutionBinding({
+        run,
+        execution,
+        planOperation,
+      });
+    }
   }
   try {
     assertVideoGenerationAuthorized(run, iteration);
@@ -994,7 +1110,13 @@ async function prepareAttempt(
     // example, a missing prior completion), not something another user click
     // can repair. Only an absent/expired/mismatched Lamp grant is resumable.
     const reusableApproval =
-      workflowMode === "background"
+      workflowMode === "beautify"
+        ? hasReusableLampBeautifyApproval(
+            run,
+            execution.source,
+            execution.batchId
+          )
+        : workflowMode === "background"
         ? hasReusableLampBackgroundApproval(
             run,
             execution.source,
@@ -1525,6 +1647,190 @@ async function evaluateBackgroundAttemptWithRecovery(
   );
 }
 
+async function evaluateBeautifyAttempt(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  plan: LampBeautifyPlan,
+  previousResults: LampBeautifyEvalResult[]
+): Promise<LampBeautifyEvaluationArtifact> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.status !== "running" ||
+    execution.phase !== "evaluating" ||
+    execution.iteration !== iteration ||
+    !execution.executionId.startsWith("lamp-beautify:")
+  ) {
+    throw new Error(
+      "Durable run execution no longer owns Lamp Beautify evaluation."
+    );
+  }
+  const planOperation = execution.planOperationId
+    ? await storage.getPaidOperation(
+        input.runId,
+        execution.planOperationId
+      )
+    : null;
+  const boundPlan = await validateLampBeautifyExecutionBinding({
+    run,
+    execution,
+    planOperation,
+  });
+  if (boundPlan.id !== plan.id) {
+    throw new Error(
+      "Lamp Beautify evaluation plan changed after Workflow binding."
+    );
+  }
+  try {
+    return await runLampBeautifyHolisticEvaluation({
+      runId: input.runId,
+      iteration,
+      plan: boundPlan,
+      previousResults,
+    });
+  } catch (error) {
+    if (error instanceof PaidOperationAuthorizationError) {
+      throw new Error(`${LAMP_USER_ACTION_REQUIRED_PREFIX}${error.message}`);
+    }
+    throw error;
+  }
+}
+
+evaluateBeautifyAttempt.maxRetries = 0;
+
+type BeautifyEvaluationCheckpoint =
+  | { state: "unclaimed" }
+  | { state: "completed"; result: LampBeautifyEvaluationArtifact }
+  | { state: "ambiguous" };
+
+async function readBeautifyEvaluationCheckpoint(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  planId: string
+): Promise<BeautifyEvaluationCheckpoint> {
+  "use step";
+  const storage = getStorage();
+  const [execution, operation] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getPaidOperation(
+      input.runId,
+      lampBeautifyEvaluationOperationId(iteration)
+    ),
+  ]);
+  if (
+    !execution ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.status !== "running" ||
+    execution.phase !== "evaluating" ||
+    execution.iteration !== iteration ||
+    !execution.executionId.startsWith("lamp-beautify:")
+  ) {
+    return { state: "ambiguous" };
+  }
+  if (!operation) return { state: "unclaimed" };
+  if (
+    operation.status === "completed" &&
+    isLampBeautifyEvaluationArtifact(operation.result, iteration) &&
+    operation.result.planId === planId
+  ) {
+    return { state: "completed", result: operation.result };
+  }
+  return { state: "ambiguous" };
+}
+
+readBeautifyEvaluationCheckpoint.maxRetries = 2;
+
+async function readBeautifyEvaluationCheckpointWithRecovery(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  planId: string
+): Promise<BeautifyEvaluationCheckpoint> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS; attempt += 1) {
+    try {
+      return await readBeautifyEvaluationCheckpoint(
+        input,
+        workflowRunId,
+        iteration,
+        planId
+      );
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep("5m");
+  }
+  throw (lastError instanceof Error
+    ? lastError
+    : new Error(
+        `Lamp Beautify evaluation ${iteration} checkpoint could not be read within seven days.`
+      ));
+}
+
+async function evaluateBeautifyAttemptWithRecovery(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  plan: LampBeautifyPlan,
+  previousResults: LampBeautifyEvalResult[]
+): Promise<LampBeautifyEvaluationArtifact> {
+  let checkpoint = await readBeautifyEvaluationCheckpointWithRecovery(
+    input,
+    workflowRunId,
+    iteration,
+    plan.id
+  );
+  for (
+    let attempt = 0;
+    checkpoint.state === "unclaimed" &&
+    attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      return await evaluateBeautifyAttempt(
+        input,
+        workflowRunId,
+        iteration,
+        plan,
+        previousResults
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        isLampUserActionRequiredError(error)
+      ) {
+        throw error;
+      }
+      checkpoint = await readBeautifyEvaluationCheckpointWithRecovery(
+        input,
+        workflowRunId,
+        iteration,
+        plan.id
+      );
+      if (checkpoint.state === "completed") return checkpoint.result;
+      if (checkpoint.state === "ambiguous") throw error;
+      await sleep("5m");
+    }
+  }
+  if (checkpoint.state === "completed") return checkpoint.result;
+  throw new Error(
+    checkpoint.state === "ambiguous"
+      ? `Lamp Beautify evaluation ${iteration} has an ambiguous paid operation and requires reconciliation.`
+      : `Lamp Beautify evaluation ${iteration} could not cross its pre-claim boundary within seven days.`
+  );
+}
+
 async function recordProviderWorkflowRunning(
   input: DurableRelightRunInput,
   workflowRunId: string,
@@ -1708,6 +2014,28 @@ async function readCompletedBackgroundEvaluation(
 
 readCompletedBackgroundEvaluation.maxRetries = 2;
 
+async function readCompletedBeautifyEvaluation(
+  runId: string,
+  iteration: 1 | 2
+): Promise<LampBeautifyEvaluationArtifact> {
+  "use step";
+  const operation = await getStorage().getPaidOperation(
+    runId,
+    lampBeautifyEvaluationOperationId(iteration)
+  );
+  if (
+    operation?.status !== "completed" ||
+    !isLampBeautifyEvaluationArtifact(operation.result, iteration)
+  ) {
+    throw new Error(
+      `Completed Lamp Beautify evaluation ${iteration} could not be recovered.`
+    );
+  }
+  return operation.result;
+}
+
+readCompletedBeautifyEvaluation.maxRetries = 2;
+
 async function settleLegacyFirstCut(
   input: DurableRelightRunInput,
   workflowRunId: string
@@ -1878,6 +2206,98 @@ async function settleBackgroundExecution(
 }
 
 settleBackgroundExecution.maxRetries = 4;
+
+async function settleBeautifyExecution(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  finalRenderedPrompt: string
+): Promise<void> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run, firstEvaluation, finalEvaluation, lipsync] =
+    await Promise.all([
+      storage.getRunExecution(input.runId),
+      storage.getRun(input.runId),
+      storage.getPaidOperation(
+        input.runId,
+        lampBeautifyEvaluationOperationId(1)
+      ),
+      storage.getPaidOperation(
+        input.runId,
+        lampBeautifyEvaluationOperationId(2)
+      ),
+      storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+    ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    !execution.executionId.startsWith("lamp-beautify:") ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    execution.inputHash !== runExecutionInputHash(input.renderedPrompt)
+  ) {
+    throw new Error(
+      "Lamp Beautify settlement no longer owns its durable execution."
+    );
+  }
+  const planOperation = execution.planOperationId
+    ? await storage.getPaidOperation(
+        input.runId,
+        execution.planOperationId
+      )
+    : null;
+  const plan = await validateLampBeautifyExecutionBinding({
+    run,
+    execution,
+    planOperation,
+  });
+  const operation = run.providerOperations?.find(
+    (item) => item.id === videoGenerationOperationId(2)
+  );
+  if (
+    operation?.status !== "completed" ||
+    !operation.result ||
+    !operation.result.audioVerified ||
+    operation.renderedPrompt !== finalRenderedPrompt ||
+    firstEvaluation?.status !== "completed" ||
+    !isLampBeautifyEvaluationArtifact(firstEvaluation.result, 1) ||
+    firstEvaluation.result.planId !== plan.id ||
+    finalEvaluation?.status !== "completed" ||
+    !isLampBeautifyEvaluationArtifact(finalEvaluation.result, 2) ||
+    finalEvaluation.result.planId !== plan.id ||
+    (lipsync !== null &&
+      (lipsync.status !== "completed" ||
+        !isLipsyncOperationResult(lipsync.result) ||
+        !v2SyncVerdict(
+          lipsync.result.postSync,
+          run.originalVideo.syncBaseline ?? null
+        ).pass))
+  ) {
+    throw new Error(
+      "Lamp Beautify's Final artifact and both plan-bound evaluations are not durably journaled against this execution."
+    );
+  }
+  const expectedFinalPrompt = compileLampBeautifyFinalPrompt(
+    input.renderedPrompt,
+    plan,
+    firstEvaluation.result
+  ).rendered;
+  if (expectedFinalPrompt !== finalRenderedPrompt) {
+    throw new Error(
+      "Lamp Beautify's Final prompt no longer reproduces from its approved plan and Initial evaluation."
+    );
+  }
+  await settleExecutionRecord(execution, workflowRunId, 2, input.executionId);
+  await setVideoGenerationWorkflowState(
+    input.runId,
+    2,
+    workflowRunId,
+    "completed"
+  );
+}
+
+settleBeautifyExecution.maxRetries = 4;
 
 async function settleExecutionRecord(
   execution: RunExecution,
