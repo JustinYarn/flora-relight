@@ -36,24 +36,25 @@ export interface LampIrisMegaPrompt {
 }
 
 /**
- * Immutable task contract for the eye-contact experiment — second
- * generation. The first live run (2026-07-17, run_mrpas6x9_3lhsc) shipped a
- * near-copy: the model regressed to the source exactly the way the first
- * relight slider did (LAMP-INTENSITY.md, pinched dynamic range). This
- * generation therefore states the demanded VISIBLE DIFFERENCE anatomically
- * and per intensity: the eye region is the one place the output must
- * visibly differ from the source, and a candidate whose eyes are hard to
- * distinguish from the source has failed regardless of its fidelity
- * everywhere else. The dead-stare overshoot remains the mirror failure.
+ * Immutable task contract for the eye-contact experiment — third
+ * generation (pupil-literal). The first live run shipped a near-copy; the
+ * second generation demanded visible difference but still let "toward the
+ * lens" blur into "near the lens". This generation names the physical
+ * target exactly: the pupils aim INTO the lens itself — the screen,
+ * prompter, or any point near the camera is a different target, and a gaze
+ * parked there reads as looking at the viewer's chin, not their eyes.
+ * Perceived contact with the person watching is the bar at every level.
+ * The dead-stare overshoot remains the mirror failure.
  */
 export const LAMP_IRIS_BASE_PROMPT: LampIrisBasePrompt = {
   task: [
-    "Correct the on-camera gaze of the primary subject of this exact source video so a person who was reading from a script, notes, or a prompter reads as holding natural eye contact with the camera.",
+    "Correct the on-camera gaze of the primary subject of this exact source video so a person who was reading from a script, notes, or a prompter reads as making literal eye contact with the camera — pupils aimed into the lens itself, so the person watching the clip feels personally looked at.",
+    "Eye contact is a precise physical target: the camera's lens is a single point, and the screen, prompter, or notes near it are DIFFERENT points. A gaze parked on the screen below the lens reads on playback as looking at the viewer's chin or past them — it is exactly the input state this workflow exists to eliminate. Near the lens is not the lens.",
     "The original video is structural, temporal, photometric, and performance ground truth for everything EXCEPT gaze direction — gaze direction is the one property this workflow exists to change, and it must visibly change.",
     "The human-approved gaze-correction plan is the complete edit authorization.",
-    "The goal of this workflow is the same person delivering the same take whose eyes now rest on the lens the way a confident speaker's would — alive, blinking exactly as filmed, occasionally breaking naturally — while every other pixel behaves as the source.",
-    "Calibrate VISIBLE CHANGE to each approved intensity: at 1 the reduction of the reading pattern must be findable in a side-by-side; at 2 the redirected eyes must be evident at a glance in a same-timestamp side-by-side; at 3 the to-lens contact must be unmistakable even without the source for comparison.",
-    "Undershooting is the defining failure of this workflow: a candidate whose eye region is hard to distinguish from the source at corresponding timestamps has failed its one job, no matter how faithful everything else is.",
+    "The goal of this workflow is the same person delivering the same take whose pupils now rest in the lens the way a confident speaker's would — the viewer feels looked in the eye — alive, blinking exactly as filmed, occasionally breaking naturally, while every other pixel behaves as the source.",
+    "Calibrate VISIBLE CHANGE to each approved intensity: at 1 the lift of the pupils toward the lens must be findable in a side-by-side; at 2 the pupils must read as IN the lens through speech, evident at a glance at the same timestamp; at 3 the contact must be unmistakable even without the source — every paused speaking frame reads as the subject looking straight at the person watching.",
+    "Undershooting is the defining failure of this workflow: a candidate whose eye region is hard to distinguish from the source has failed its one job — and so has a gaze moved only as far as the screen or the lens's neighborhood, because it still misses the viewer's eyes.",
     "Overshooting is the mirror failure: a frozen, unblinking, glassy stare is worse than the original reading pattern.",
     "Do not improve, restyle, or change anything outside the approved gaze-correction list.",
   ].join(" "),
@@ -98,15 +99,17 @@ export const LAMP_IRIS_BASE_PROMPT: LampIrisBasePrompt = {
     ].join(" "),
   },
   application: [
-    "Move the eyes decisively: redirection is the product, and a timid, source-hugging eye region is this workflow's characteristic failure.",
+    "Move the pupils decisively into the lens: redirection is the product, and a timid, source-hugging eye region is this workflow's characteristic failure.",
+    "Aim for the lens, not its neighborhood: a correction that stops at the top of the screen or drifts around the camera still misses the viewer's eyes and fails.",
     "Apply each approved correction continuously across the full timeline, tracking the subject through motion, expression changes, and partial occlusion.",
-    "Corrected gaze must read as attention, not surveillance: the eyes rest on the lens the way they would rest on a person, with the natural softness, settling, and micro-movement of real conversation.",
+    "Corrected gaze must read as attention, not surveillance: the pupils rest in the lens the way they would rest on a person's eyes, with the natural softness, settling, and micro-movement of real conversation.",
     "Transitions matter as much as rest states: when the gaze moves — into a retained natural break, back to the lens, into a blink — it travels with believable saccade motion, never popping or teleporting.",
-    "The finished frame test: pause the candidate beside the source at any speaking moment — the eyes must be plainly on the lens where the source's were on the reading material, and absolutely nothing else in the frame may have changed.",
+    "The finished frame test: pause the candidate beside the source at any speaking moment — the source's pupils rest on the reading material, the candidate's pupils rest in the lens, the person watching feels looked at, and absolutely nothing else in the frame has changed.",
     "The result must read as the same person on the same take who simply knew the camera was a person — never as a re-acted take, a staring contest, or painted-on eyes.",
   ].join(" "),
   negative: [
     "Do not correct, restyle, or alter anything outside the approved CORRECT list.",
+    "Do not settle the gaze on the screen, prompter, monitor edge, or any point near the camera in place of the lens itself; near-lens gaze is not eye contact.",
     "Do not re-aim, rotate, or re-pose the head, neck, or body to achieve contact; the correction lives in the eyes alone.",
     "Do not remove, add, retime, shorten, or extend any blink.",
     "Do not freeze the eyes into a fixed stare, strip natural micro-saccades, or produce glassy, painted, waxy, or dead eyes.",
@@ -304,9 +307,9 @@ function assertApprovedPlan(plan: LampIrisPlan): LampIrisPlan {
 }
 
 const INTENSITY_LINES: Record<LampIrisIntensity, string> = {
-  1: "intensity 1 of 3 — assist: a real, findable reduction of the reading pattern in a side-by-side; every natural glance-away and blink survives untouched",
-  2: "intensity 2 of 3 — presenter: evident at a glance in a same-timestamp side-by-side — the eyes sit ON the lens through speech and the source's reading gaze is gone",
-  3: "intensity 3 of 3 — anchor: unmistakable even without the source — direct to-lens contact in effectively every frame; a viewer would say the person is looking right at them",
+  1: "intensity 1 of 3 — assist: the pupils visibly lift from the reading position toward the lens, findable in a side-by-side; every natural glance-away and blink survives untouched",
+  2: "intensity 2 of 3 — presenter: literal eye contact through speech — the pupils read as IN the lens, not near it, evident at a glance in a same-timestamp side-by-side",
+  3: "intensity 3 of 3 — anchor: unmistakable literal eye contact in effectively every frame — a viewer would say the person is looking straight into their eyes",
 };
 
 /**
@@ -316,12 +319,12 @@ const INTENSITY_LINES: Record<LampIrisIntensity, string> = {
 type IrisBandRecipes = Record<LampIrisIntensity, string>;
 
 /**
- * Second-generation recipes. The dynamic range lives HERE, in anatomical,
- * checkable eye states — the first generation described when contact should
- * hold, the model regressed to the source, and the first live run shipped a
- * near-copy (the LAMP-INTENSITY.md failure reproduced). Each band now states
- * what a paused same-timestamp side-by-side MUST show; the keep-clause
- * states what survives at every level.
+ * Third-generation recipes (pupil-literal). The second generation demanded
+ * visible difference but "toward the lens" still let the model park the
+ * gaze NEAR the camera — on the screen an inch below it — which a viewer
+ * reads as looking at their chin. Each band now names the pupil target and
+ * the perceived-contact test: does the person watching feel looked in the
+ * eye. The keep-clause states what survives at every level.
  */
 const CATEGORY_RECIPES: Record<
   LampIrisCorrectItem["id"],
@@ -329,24 +332,24 @@ const CATEGORY_RECIPES: Record<
 > = {
   "camera-axis-anchor": {
     bands: {
-      1: "The resting gaze lifts visibly toward the lens: in a side-by-side the eyes sit clearly higher than the source's for most of the take, the iris riding centered in the aperture instead of settling low, while honest checks of the material may survive.",
-      2: "The eyes sit ON the lens axis in every speaking frame: upper lids lifted clear of the pupil, iris centered in the aperture, none of the source's downward set anywhere it read from material. A same-timestamp side-by-side shows plainly different eye direction — and nothing else different.",
-      3: "Direct, unbroken to-lens contact: the gaze vector meets the camera in effectively every frame, iris centered, lids open and engaged — any single paused frame reads as eye contact with the viewer.",
+      1: "The pupils lift from the screen toward the lens itself: in a side-by-side they sit clearly higher than the source's for most of the take, and the viewer begins to feel looked AT rather than looked NEAR, while honest checks of the material may survive.",
+      2: "The pupils aim into the lens — not at the screen below it, not at its neighborhood — in every speaking frame: both pupils converged on the camera's point, upper lids lifted clear of the pupil, none of the source's downward set anywhere it read. Any paused speaking frame reads as direct eye contact with the person watching, and a same-timestamp side-by-side shows plainly different pupil position — and nothing else different.",
+      3: "Unbroken literal eye contact: the pupils meet the viewer's eyes through the lens in effectively every frame — iris centered, lids open and engaged — and any single paused frame reads as the subject looking straight at the person watching.",
     },
     keep: "Only gaze direction and natural lid travel change: iris color and texture, sclera, eye shape and size, lashes, brows, and catchlight character remain exactly as filmed, and the head never re-aims.",
   },
   "reading-scan-smoothing": {
     bands: {
       1: "The most conspicuous line-scanning runs settle into steady lens-ward contact; subtler scans may survive where erasing them would cost naturalness.",
-      2: "The horizontal reading rhythm is gone in every passage: during speech the eyes hold still-and-steady on the lens with only natural conversational micro-movement, and no left-right text-tracking survives at any timestamp.",
-      3: "Zero text-tracking from first word to last: the eyes never once betray a line being read, holding steady living contact through every sentence.",
+      2: "The horizontal reading rhythm is gone in every passage: during speech the pupils hold still-and-steady in the lens with only natural conversational micro-movement, and no left-right text-tracking survives at any timestamp.",
+      3: "Zero text-tracking from first word to last: the eyes never once betray a line being read, holding steady living contact with the viewer through every sentence.",
     },
     keep: "Steadiness never becomes stillness: natural conversational micro-saccades and living eye texture survive at every level, and no blink is traded away for smoothness.",
   },
   "note-glance-bridging": {
     bands: {
       1: "Only the longest, most disruptive note-glances are bridged into continued contact; quick natural glances and thinking looks survive as filmed.",
-      2: "Habitual note-glances are gone: sentences are delivered to the lens without the source's recurring drop to notes, and only rare deliberate glance-aways survive as natural breaks.",
+      2: "Habitual note-glances are gone: sentences are delivered into the lens without the source's recurring drop to notes, and only rare deliberate glance-aways survive as natural breaks.",
       3: "Every note-glance is bridged: the only remaining look-aways are momentary natural micro-breaks that read as thought — never as reading.",
     },
     keep: "A bridge never consumes a blink: every source blink lands at its source timestamp with natural lid travel, and bridged passages keep believable saccade motion into and out of every retained break.",
@@ -549,7 +552,7 @@ export function renderLampIrisCorrection(
       const items = findCorrectItems(canonical, correction);
       return `The previous pass left the gaze reading essentially as the source — that output failed this workflow's one job. Fully apply these approved gaze corrections at their approved intensity wherever the pattern occurs: ${items
         .map((item) => `[${item.id}] at intensity ${item.intensity}`)
-        .join("; ")}. Produce plainly different eye direction at the same timestamps: wherever the source's eyes rest on reading material, the candidate's eyes are visibly on the lens in a same-frame comparison.`;
+        .join("; ")}. Produce plainly different pupil position at the same timestamps: wherever the source's eyes rest on reading material or near the lens, the candidate's pupils are visibly IN the lens — the person watching must feel looked in the eye in a same-frame comparison.`;
     }
     case "reduce-gaze-lock": {
       const items = findCorrectItems(canonical, correction);

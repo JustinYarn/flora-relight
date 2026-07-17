@@ -91,7 +91,7 @@ const DEFINITIONS: LampIrisEvalDefinition[] = [
       "reduce-gaze-lock",
       "remove-unapproved-changes",
     ],
-    rubric: `Treat the approved gaze-correction plan as the exact edit authorization and judge TARGET MATCHING per item in BOTH directions. At intensity 1 the reading pattern is visibly calmed while natural glance-aways survive; at 2 contact is the steady state through all speech; at 3 contact is near-continuous except blinks and momentary micro-breaks. A candidate whose gaze still reads as anchored to reading material, still scanning text, or still dropping to notes at the approved item's level has undershot — report correctionAction complete-approved-gaze-correction. A candidate locked beyond its approved level — natural breaks erased at intensity 1 or 2, or a stare that never varies — has overshot — report reduce-gaze-lock. Any change outside the approved list fails regardless of how it looks.`,
+    rubric: `Treat the approved gaze-correction plan as the exact edit authorization and judge TARGET MATCHING per item in BOTH directions, at the pupil level: PERCEIVED CONTACT is the bar. Pause speaking frames and ask whether the subject's pupils meet YOUR eyes — a gaze on the screen, prompter, or any near-lens point is NOT contact; it reads as looking at the viewer's chin and counts as the reading anchor surviving. At intensity 1 the pupils visibly lift toward the lens while natural glance-aways survive; at 2 literal eye contact is the steady state through all speech; at 3 contact is near-continuous except blinks and momentary micro-breaks. A candidate whose gaze still reads as anchored to reading material, parked near the lens without meeting it, still scanning text, or still dropping to notes at the approved item's level has undershot — report correctionAction complete-approved-gaze-correction. A candidate locked beyond its approved level — natural breaks erased at intensity 1 or 2, or a stare that never varies — has overshot — report reduce-gaze-lock. Any change outside the approved list fails regardless of how it looks.`,
   },
   {
     id: "gaze-naturalness",
@@ -648,9 +648,9 @@ function evaluatorPlanProjection(plan: LampIrisPlan): unknown {
 }
 
 const INTENSITY_EXPECTATION: Record<1 | 2 | 3, string> = {
-  1: "assist — the reading pattern is really reduced and findable in a side-by-side; an eye region essentially indistinguishable from the source at corresponding timestamps is undershoot, and erased natural breaks are overshoot",
-  2: "presenter — redirected eyes evident at a glance in a same-timestamp side-by-side, with contact the steady state through speech; an eye region hard to distinguish from the source is a failed near-copy and must score as undershoot, and a break-free continuous lock is overshoot",
-  3: "anchor — unmistakable to-lens contact in effectively every frame even without the source for comparison; any habitual off-lens rest is undershoot, and a frozen unblinking stare is overshoot",
+  1: "assist — the pupils really lift toward the lens, findable in a side-by-side; an eye region essentially indistinguishable from the source at corresponding timestamps is undershoot, and erased natural breaks are overshoot",
+  2: "presenter — literal eye contact through speech: the pupils read as IN the lens, and a paused speaking frame feels like being looked at; an eye region hard to distinguish from the source, or a gaze parked near the lens without meeting it, is a failed near-copy and must score as undershoot, while a break-free continuous lock is overshoot",
+  3: "anchor — unmistakable eye contact in effectively every frame even without the source for comparison; any habitual off-lens or near-lens rest is undershoot, and a frozen unblinking stare is overshoot",
 };
 
 export function renderLampIrisHolisticEvaluatorPrompt(input: {
@@ -683,7 +683,7 @@ export function renderLampIrisHolisticEvaluatorPrompt(input: {
     gazeContract,
     "",
     "Evaluation principles:",
-    "- The near-copy is this workflow's characteristic undershoot: when the eye region at corresponding timestamps is essentially indistinguishable from the source, gaze-adherence has failed regardless of overall fidelity — report it with correctionAction complete-approved-gaze-correction.",
+    "- The near-copy is this workflow's characteristic undershoot: when the eye region at corresponding timestamps is essentially indistinguishable from the source, OR the gaze moved only as far as a screen or near-lens point that still misses the viewer's eyes, gaze-adherence has failed regardless of overall fidelity — report it with correctionAction complete-approved-gaze-correction.",
     "- The subject is reading a script; the delivered audio is the untouched source track. Lip-sync and speech articulation are product-critical and judged at full strictness.",
     "- Blinks are never currency: no approved intensity buys the removal, addition, or retiming of a single blink.",
     "- The head never re-aims; contact achieved by head pose change instead of eye redirection is a motion-lipsync failure.",

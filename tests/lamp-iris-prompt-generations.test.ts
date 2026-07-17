@@ -11,12 +11,14 @@ import {
 } from "../lib/lamp-iris-evaluation.ts";
 import {
   LEGACY_V1_IRIS_BASE_PROMPT,
+  LEGACY_V2_IRIS_BASE_PROMPT,
   compileLampIrisFinalPrompt,
   initialLampIrisMegaPrompt,
   isPersistedInitialLampIrisPrompt,
   renderLampIrisMegaPrompt,
   renderLampIrisPlanBlock,
   renderLegacyLampIrisPlanBlockV1,
+  renderLegacyLampIrisPlanBlockV2,
 } from "../lib/prompts/lamp-iris.ts";
 
 function approvedPlan() {
@@ -37,6 +39,19 @@ function legacyInitialBytes(plan: ReturnType<typeof approvedPlan>): string {
   );
 }
 
+function legacyV2InitialBytes(plan: ReturnType<typeof approvedPlan>): string {
+  const base = renderLampIrisMegaPrompt({
+    version: 1,
+    base: LEGACY_V2_IRIS_BASE_PROMPT,
+    plan,
+    corrections: [],
+  });
+  return base.replace(
+    renderLampIrisPlanBlock(plan),
+    renderLegacyLampIrisPlanBlockV2(plan)
+  );
+}
+
 function emptyEvaluation(
   plan: ReturnType<typeof approvedPlan>
 ): LampIrisEvaluationArtifact {
@@ -51,22 +66,55 @@ function emptyEvaluation(
   };
 }
 
-test("current and legacy initial compiles are both accepted, and nothing else", () => {
+test("current and both legacy initial compiles are accepted, and nothing else", () => {
   const plan = approvedPlan();
   const current = initialLampIrisMegaPrompt(plan).rendered;
-  const legacy = legacyInitialBytes(plan);
+  const legacyV1 = legacyInitialBytes(plan);
+  const legacyV2 = legacyV2InitialBytes(plan);
 
   assert.notEqual(
     current,
-    legacy,
-    "the visibility rewrite must actually change the compiled bytes"
+    legacyV1,
+    "the pupil-literal rewrite must actually change the compiled bytes"
   );
+  assert.notEqual(
+    current,
+    legacyV2,
+    "the pupil-literal rewrite must differ from the frozen visibility generation"
+  );
+  assert.notEqual(legacyV1, legacyV2);
   assert.equal(isPersistedInitialLampIrisPrompt(plan, current), true);
-  assert.equal(isPersistedInitialLampIrisPrompt(plan, legacy), true);
+  assert.equal(isPersistedInitialLampIrisPrompt(plan, legacyV1), true);
+  assert.equal(isPersistedInitialLampIrisPrompt(plan, legacyV2), true);
   assert.equal(
-    isPersistedInitialLampIrisPrompt(plan, `${legacy} `),
+    isPersistedInitialLampIrisPrompt(plan, `${legacyV2} `),
     false,
     "mixed or edited intermediates are never valid persisted forms"
+  );
+});
+
+test("the final compiler patches frozen legacy v2 bytes without rewriting them", () => {
+  const plan = approvedPlan();
+  const legacyV2 = legacyV2InitialBytes(plan);
+  const final = compileLampIrisFinalPrompt(legacyV2, plan, emptyEvaluation(plan));
+
+  assert.equal(
+    final.rendered.startsWith("=== LAMP IRIS EYE-CONTACT MEGA PROMPT v2 ==="),
+    true
+  );
+  const rebuiltV1 =
+    "=== LAMP IRIS EYE-CONTACT MEGA PROMPT v1 ===" +
+    final.rendered.slice("=== LAMP IRIS EYE-CONTACT MEGA PROMPT v2 ===".length);
+  assert.equal(rebuiltV1, legacyV2);
+});
+
+test("the second generation stays byte-frozen", () => {
+  const bytes = JSON.stringify(LEGACY_V2_IRIS_BASE_PROMPT);
+  assert.equal(bytes.includes("Calibrate VISIBLE CHANGE"), true);
+  assert.equal(
+    bytes.includes("near-lens gaze is not eye contact"),
+    false,
+    "the frozen visibility generation predates the pupil-literal rewrite and must not absorb its language"
   );
 });
 

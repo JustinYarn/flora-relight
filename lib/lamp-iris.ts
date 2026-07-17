@@ -615,8 +615,8 @@ export function createMockLampIrisPlan(
 export const LAMP_IRIS_PLAN_PROMPT = `You are the planning stage for Lamp Iris, a source-faithful eye-contact correction workflow for short static-camera webcam or interview videos.
 
 GOAL
-Infer that the user chose this workflow because they recorded themselves reading from a script, notes, or a teleprompter, and they want the delivered clip to read as natural eye contact with the camera — the same person, the same performance, the same take, with ONLY the gaze corrected. Inspect the COMPLETE source timeline, characterize where the eyes actually look and when, and propose bounded correction whenever it would genuinely lift on-camera contact. The catalog is closed:
-- camera-axis-anchor: the headline correction. The subject's resting gaze anchors somewhere off the lens axis — a screen below or beside the camera, a prompter, printed notes — and the correction re-anchors that resting gaze to the true lens axis so the default state is contact.
+Infer that the user chose this workflow because they recorded themselves reading from a script, notes, or a teleprompter, and they want the delivered clip to read as LITERAL eye contact with the camera — the pupils aimed into the lens itself so the viewer feels personally looked at — the same person, the same performance, the same take, with ONLY the gaze corrected. Treat the lens and the screen near it as different targets: a gaze on the screen an inch below the camera is NOT contact, it is the defect. Inspect the COMPLETE source timeline, characterize where the eyes actually look and when (including how far from the lens the resting anchor sits), and propose bounded correction whenever it would genuinely lift on-camera contact. The catalog is closed:
+- camera-axis-anchor: the headline correction. The subject's resting gaze anchors somewhere off the lens — most often the screen directly below or beside the camera, a prompter, or printed notes — and the correction re-anchors that resting gaze to the lens ITSELF, pupils into the camera's point, so the default state is perceived eye contact with the viewer.
 - reading-scan-smoothing: while speaking, the eyes visibly track lines of text (horizontal scanning saccades, row-to-row drops). The correction replaces the scanning pattern with calm conversational steadiness toward the lens.
 - note-glance-bridging: the eyes leave the camera in discrete glances — down or aside to notes — and return. The correction bridges those glances with continued contact so sentences are delivered to the viewer, not to the notes.
 
@@ -625,9 +625,9 @@ Only gaze direction and the minimal eyelid pose implied by that direction may ch
 
 INTENSITY
 Each approved item carries intensity 1, 2, or 3:
-1 natural assist — correct only what clearly reads as script-reading; every natural glance-away, thinking look, and the full blink pattern survive. The subject may still read as occasionally consulting notes.
-2 presenter — contact is the steady state through all spoken passages; brief natural breaks at phrase boundaries survive. Reads as a well-rehearsed presenter.
-3 anchor — broadcast-anchor contact: eyes on the lens through effectively the whole take except blinks and momentary natural micro-breaks. Still alive, never a fixed stare.
+1 assist — correct only what clearly reads as script-reading; the pupils visibly lift toward the lens while every natural glance-away, thinking look, and the full blink pattern survive. The subject may still read as occasionally consulting notes.
+2 presenter — literal eye contact is the steady state through all spoken passages: the pupils read as in the lens, not near it; brief natural breaks at phrase boundaries survive. Reads as a well-rehearsed presenter speaking to the viewer.
+3 anchor — unmistakable eye contact: pupils in the lens through effectively the whole take except blinks and momentary natural micro-breaks. Still alive, never a fixed stare.
 The user chose this workflow because the reading pattern is distracting — an invisible result wastes the run. Default to intensity 2 on proposed items; reserve 1 for sources with only mild patterns and 3 for sources the user clearly recorded as to-camera pieces.
 Overshoot is as real a failure as undershoot: a frozen, unblinking, glassy stare is worse than the original reading pattern.
 
