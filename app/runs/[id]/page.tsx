@@ -168,9 +168,14 @@ export default function RunReviewPage() {
             relitLabel={relitLabel}
             fallback={run.fallback}
             generating={
-              run.status === "running" && !planAwaitingApproval
-                ? <GenerationTheater run={run} />
-                : undefined
+              run.status === "running" && !planAwaitingApproval ? (
+                <GenerationTheater run={run} />
+              ) : planAwaitingApproval ? (
+                <div className="flex h-full w-full items-center justify-center bg-raised px-6 text-center text-2xs leading-relaxed text-faint">
+                  nothing is generating yet — approve the plan above to start
+                  the two-pass cleanup; no provider spend happens until then
+                </div>
+              ) : undefined
             }
           />
 
