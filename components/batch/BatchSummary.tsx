@@ -14,9 +14,10 @@ import {
   ScoreMeter,
   SectionTitle,
 } from "@/components/ui";
-import { getEvalDef } from "@/lib/prompts/eval-defs";
+import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { formatUsd } from "@/lib/cost";
 import type { Batch, BatchExecutionSummary, Run, Verdict } from "@/lib/types";
+import { workflowModeLabel } from "@/lib/workflow-mode";
 
 function Stat({
   label,
@@ -120,6 +121,13 @@ export function BatchSummary({
   gateFailCounts.forEach((count, evalId) => {
     if (!worstGate || count > worstGate.count) worstGate = { evalId, count };
   });
+  const evalNames = new Map(
+    runs.flatMap((run) =>
+      evalDefsForRun(run).map(
+        (definition) => [definition.id, definition.name] as const
+      )
+    )
+  );
 
   const confidences = runs.flatMap((r) => {
     const latest = r.iterations[r.iterations.length - 1];
@@ -139,7 +147,8 @@ export function BatchSummary({
   const batchMeta = BATCH_STATUS_META[batch.status];
 
   if (execution) {
-    const lamp = execution.workflowMode === "lamp";
+    const twoPass = execution.workflowMode !== "flora";
+    const methodLabel = workflowModeLabel(execution.workflowMode ?? "flora");
     const count = (
       state: BatchExecutionSummary["members"][number]["state"]
     ): number =>
@@ -168,7 +177,9 @@ export function BatchSummary({
             ? { color: "var(--borderline)", label: "approval required" }
             : {
                 color: "var(--running)",
-                label: lamp ? "running Lamp two-pass" : "generating Flora cuts",
+                label: twoPass
+                  ? `running ${methodLabel} two-pass`
+                  : "generating Flora cuts",
               };
 
     return (
@@ -208,7 +219,9 @@ export function BatchSummary({
             value={ready}
             sub={
               <span className="text-2xs text-faint">
-                {lamp ? "finished Lamp Finals" : "canonical Flora cuts"}
+                {twoPass
+                  ? `finished ${methodLabel} Finals`
+                  : "canonical Flora cuts"}
               </span>
             }
           />
@@ -242,10 +255,10 @@ export function BatchSummary({
           />
           <Stat
             label="Quality checks"
-            value={lamp ? "2 / clip" : "—"}
+            value={twoPass ? "2 / clip" : "—"}
             sub={
               <span className="text-2xs text-faint">
-                {lamp
+                {twoPass
                   ? "AI evaluations plus human grade"
                   : "human review only"}
               </span>
@@ -325,7 +338,7 @@ export function BatchSummary({
           {worstGate ? (
             <>
               <span className="text-sm font-semibold leading-snug text-ink">
-                {getEvalDef(worstGate.evalId).name}
+                {evalNames.get(worstGate.evalId) ?? worstGate.evalId}
               </span>
               <span className="text-2xs text-faint">
                 failed {worstGate.count}× across the batch

@@ -1,23 +1,67 @@
 import type { Run, WorkflowMode } from "@/lib/types";
 
-export const DEFAULT_WORKFLOW_MODE: WorkflowMode = "lamp";
+export const DEFAULT_WORKFLOW_MODE: WorkflowMode = "background";
+export const LAMP_BACKGROUND_EXECUTION_PREFIX = "lamp-background:";
+export const LAMP_BACKGROUND_BATCH_EXECUTION_PREFIX =
+  "lamp-background-batch:";
 
 export function parseWorkflowMode(value: unknown): WorkflowMode | null {
-  return value === "flora" || value === "lamp" ? value : null;
+  return value === "flora" || value === "lamp" || value === "background"
+    ? value
+    : null;
 }
 
-export function workflowModeLabel(mode: WorkflowMode): "Flora" | "Lamp" {
-  return mode === "flora" ? "Flora" : "Lamp";
+export function workflowModeLabel(
+  mode: WorkflowMode
+): "Flora" | "Lamp" | "Lamp Background" {
+  if (mode === "flora") return "Flora";
+  if (mode === "lamp") return "Lamp";
+  return "Lamp Background";
 }
 
 /**
- * Missing mode is the immutable legacy rule: only the lamp-v1 workflow id
- * marks Lamp; every other pre-mode record predates Lamp and is Flora.
+ * Missing mode is the immutable legacy rule: known workflow ids recover their
+ * product identity; every other pre-mode record predates Lamp and is Flora.
  */
 export function runWorkflowMode(
   run: Pick<Run, "workflowMode" | "workflowId">
 ): WorkflowMode {
-  return run.workflowMode ?? (run.workflowId === "lamp-v1" ? "lamp" : "flora");
+  if (run.workflowMode) return run.workflowMode;
+  if (run.workflowId === "lamp-background-v1") return "background";
+  return run.workflowId === "lamp-v1" ? "lamp" : "flora";
+}
+
+/** Both Lamp methods use the fixed Initial → critique → Final contract. */
+export function isTwoPassWorkflowMode(
+  mode: WorkflowMode
+): mode is Extract<WorkflowMode, "lamp" | "background"> {
+  return mode === "lamp" || mode === "background";
+}
+
+/**
+ * Recover the immutable product method from a durable execution identity.
+ * Unknown and pre-Lamp ids retain the historical Flora interpretation.
+ */
+export function workflowModeFromExecutionId(
+  executionId: string
+): WorkflowMode {
+  if (
+    executionId.startsWith(LAMP_BACKGROUND_EXECUTION_PREFIX) ||
+    executionId.startsWith(LAMP_BACKGROUND_BATCH_EXECUTION_PREFIX)
+  ) {
+    return "background";
+  }
+  if (
+    executionId.startsWith("lamp:") ||
+    executionId.startsWith("lamp-batch:")
+  ) {
+    return "lamp";
+  }
+  return "flora";
+}
+
+export function isTwoPassExecutionId(executionId: string): boolean {
+  return isTwoPassWorkflowMode(workflowModeFromExecutionId(executionId));
 }
 
 /** True once the run holds any spend, provider, judged, or graded state. */
@@ -48,6 +92,6 @@ export function floraRetiredForNewWork(
 }
 
 export const FLORA_RETIRED_RUN_ERROR =
-  "Flora is retired for new runs. Start this clip as a Lamp run; existing Flora runs remain viewable and resumable.";
+  "Flora is retired for new runs. Start this clip as a Lamp Background run; existing Flora runs remain viewable and resumable.";
 export const FLORA_RETIRED_BATCH_ERROR =
-  "Flora is retired for new batches. Recreate this batch as Lamp; already-started Flora batches can still recover.";
+  "Flora is retired for new batches. Recreate this batch as Lamp Background; already-started Flora batches can still recover.";

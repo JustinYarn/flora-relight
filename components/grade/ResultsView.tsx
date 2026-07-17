@@ -3,7 +3,6 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import type { Run } from "@/lib/types";
-import { getEvalDef } from "@/lib/prompts/eval-defs";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { PairPlayer } from "@/components/library/PairPlayer";
 import { SectionTitle, verdictColor } from "@/components/ui";
@@ -181,6 +180,13 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
 export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
   const comps = useMemo(() => collectComparisons(gradedRuns), [gradedRuns]);
   const definitions = useMemo(() => evalDefsForRuns(gradedRuns), [gradedRuns]);
+  const definitionById = useMemo(
+    () =>
+      new Map(
+        definitions.map((definition) => [definition.id, definition] as const)
+      ),
+    [definitions]
+  );
   const stats = useMemo(
     () => perCheckStats(comps, definitions),
     [comps, definitions]
@@ -234,8 +240,9 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         </SectionTitle>
         <p className="mb-4 max-w-3xl text-pretty text-xs leading-relaxed text-muted">
           Open a video to compare every saved grade with the AI evaluation made
-          after the final regeneration. Each Lamp video has nine active rows;
-          Flora videos retain their eleven-row method.
+          after the final regeneration. Lamp Background uses nine visual checks
+          plus source audio, Lamp retains nine active rows, and Flora retains
+          its eleven-row method.
         </p>
         <div className="space-y-2">
           {gradedRuns.map((run, index) => (
@@ -256,8 +263,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         <p className="border-b border-edge py-4 text-sm text-ink">
           You disagree with the AI most on:{" "}
           <span className="font-semibold">
-            {definitions.find((definition) => definition.id === divergence.evalId)
-              ?.name ?? getEvalDef(divergence.evalId).name}
+            {definitionById.get(divergence.evalId)?.name ?? divergence.evalId}
           </span>{" "}
           <span className="text-2xs text-faint">
             ({Math.round(divergence.agreementPct)}% agreement over{" "}
@@ -283,9 +289,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         </div>
         <div className="divide-y divide-edge border-b border-edge">
           {stats.map((s) => {
-            const def =
-              definitions.find((definition) => definition.id === s.evalId) ??
-              getEvalDef(s.evalId);
+            const def = definitionById.get(s.evalId);
             if (s.compared === 0) {
               return (
                 <div
@@ -293,7 +297,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
                   className="flex items-center gap-x-5 py-3 text-sm"
                 >
                   <span className="w-60 shrink-0 font-medium text-muted">
-                    {def.name}
+                    {def?.name ?? s.evalId}
                   </span>
                   <span className="flex-1 text-2xs text-faint">
                     no final AI result was returned for a graded video
@@ -307,7 +311,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
                 className="flex flex-wrap items-center gap-x-5 gap-y-1 py-3 text-sm"
               >
                 <span className="w-60 shrink-0 font-medium text-ink">
-                  {def.name}
+                  {def?.name ?? s.evalId}
                 </span>
                 <span className="w-24 shrink-0 tabular-nums text-ink">
                   {Math.round(s.agreementPct)}%
@@ -346,7 +350,9 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         ) : (
           <div className="divide-y divide-edge border-b border-edge">
             {disagreements.map((d) => {
-              const def = getEvalDef(d.evalId);
+              const def = evalDefsForRun(d.run).find(
+                (definition) => definition.id === d.evalId
+              );
               return (
                 <div
                   key={`${d.run.id}-${d.evalId}`}
@@ -359,7 +365,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
                     {d.run.originalVideo.label}
                   </span>
                   <span className="w-52 shrink-0 text-sm font-medium text-ink">
-                    {def.name}
+                    {def?.name ?? d.evalId}
                   </span>
                   <span className="flex-1 text-xs tabular-nums">
                     <span className="text-faint">You: </span>

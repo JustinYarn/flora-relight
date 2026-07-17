@@ -5,10 +5,11 @@ import type {
   WorkflowMode,
 } from "@/lib/types";
 import { workflowForMode } from "@/lib/workflow-def";
+import { DEFAULT_WORKFLOW_MODE } from "@/lib/workflow-mode";
 import { uid } from "@/lib/util";
 
 export function freshNodeStates(
-  workflowMode: WorkflowMode = "lamp"
+  workflowMode: WorkflowMode = DEFAULT_WORKFLOW_MODE
 ): Record<string, NodeRunState> {
   const states: Record<string, NodeRunState> = {};
   for (const node of workflowForMode(workflowMode).nodes) {
@@ -21,7 +22,7 @@ export function freshNodeStates(
 export function buildRun(
   video: VideoAsset,
   now = Date.now(),
-  workflowMode: WorkflowMode = "lamp"
+  workflowMode: WorkflowMode = DEFAULT_WORKFLOW_MODE
 ): Run {
   const workflow = workflowForMode(workflowMode);
   return {
@@ -48,7 +49,7 @@ export function buildRun(
 export function buildQueuedRun(
   video: VideoAsset,
   now = Date.now(),
-  workflowMode: WorkflowMode = "lamp"
+  workflowMode: WorkflowMode = DEFAULT_WORKFLOW_MODE
 ): Run {
   const run = buildRun(video, now, workflowMode);
   run.log.push({

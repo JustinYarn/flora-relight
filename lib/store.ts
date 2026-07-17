@@ -24,6 +24,13 @@ import { workflowForMode } from "@/lib/workflow-def";
 import { runWorkflow } from "@/lib/engine";
 import { buildQueuedRun } from "@/lib/run-factory";
 import {
+  approveLampBackgroundCleanupPlan,
+  hashLampBackgroundCleanupPlan,
+  lampBackgroundPlanRequiresGeneration,
+  type LampBackgroundCleanupPlan,
+} from "@/lib/lamp-background";
+import { lampBackgroundNoOpPromptForRun } from "@/lib/lamp-background-read";
+import {
   isRecoverableBatchRun,
   isTerminalRun,
   summarizeBatchRecovery,
@@ -78,7 +85,7 @@ interface AppStore {
    * the server response must explicitly claim live run/batch ownership.
    */
   mode: "mock" | "live";
-  /** Product workflow for new work. Always Lamp: Flora is retired. */
+  /** Product workflow for new work. Flora is retained only for old runs. */
   workflowMode: WorkflowMode;
   /**
    * True once hydrate() has finished pulling persisted state (or confirmed
@@ -100,8 +107,21 @@ interface AppStore {
   /** Persists the run, then kicks off the async engine. */
   startRun(
     video: VideoAsset,
-    opts?: { approveLiveSpend?: boolean; workflowMode?: WorkflowMode }
+    opts?: {
+      approveLiveSpend?: boolean;
+      approvePlanSpend?: boolean;
+      workflowMode?: WorkflowMode;
+    }
   ): Promise<string>;
+  /**
+   * Approve the source-specific Lamp Background plan. Cleanup plans launch
+   * the fixed two-pass flow; exceptional no-op plans deliver the exact source
+   * without authorizing generation.
+   */
+  approveBackgroundPlan(
+    runId: string,
+    opts?: { approveLiveSpend?: boolean }
+  ): Promise<void>;
   /**
    * Mock-only convenience: creates one Run per video plus a Batch pointing at
    * them, then drains the runs through a browser worker queue. The
@@ -172,6 +192,67 @@ function appendRunLog(runId: string, message: string): void {
         : r
     ),
   }));
+}
+
+/** Provider-free exceptional no-op settlement for the mock workflow. */
+function materializeMockBackgroundNoOp(
+  run: Run,
+  approvedPlan: LampBackgroundCleanupPlan
+): Run {
+  const finalVideo: VideoAsset = {
+    ...run.originalVideo,
+    id: `lamp-background-no-op-${run.id}`,
+    kind: "final",
+    label: "Lamp Background demo — approved unchanged source",
+  };
+  const nodeStates = { ...run.nodeStates };
+  for (const nodeId of ["initial", "critique", "final"] as const) {
+    nodeStates[nodeId] = {
+      nodeId,
+      status: "skipped",
+      detail: "approved exceptional no-op — no generation",
+    };
+  }
+  nodeStates.plan = {
+    nodeId: "plan",
+    status: "succeeded",
+    detail: "exceptional no-op approved",
+  };
+  nodeStates.review = {
+    nodeId: "review",
+    status: "queued",
+    detail: "exact source ready for human grade",
+  };
+  return {
+    ...run,
+    workflowId: "lamp-background-v1",
+    workflowMode: "background",
+    backgroundCleanupPlan: approvedPlan,
+    iterations: [
+      {
+        index: 2,
+        megaPrompt: lampBackgroundNoOpPromptForRun(approvedPlan),
+        generatedVideo: finalVideo,
+        beforeFrames: [],
+        afterFrames: [],
+        evalResults: [],
+        status: "ungraded",
+      },
+    ],
+    finalVideo,
+    status: "awaiting-review",
+    nodeStates,
+    log: [
+      ...run.log,
+      {
+        at: Date.now(),
+        nodeId: "review",
+        level: "info",
+        message:
+          "Lamp Background plan approved as an exceptional no-op. The exact source is ready for human grading; no generation or AI evaluation ran.",
+      },
+    ],
+  };
 }
 
 /**
@@ -322,6 +403,13 @@ function healthSaysLive(data: unknown): boolean {
 
 function needsSingleExecutionAdoption(run: Run): boolean {
   if (
+    run.workflowMode === "background" &&
+    (run.backgroundCleanupPlan?.approval.status !== "approved" ||
+      run.backgroundCleanupPlan.decision === "exceptional-no-op")
+  ) {
+    return false;
+  }
+  if (
     !run.spendApproval ||
     run.spendApproval.source !== "single" ||
     run.spendApproval.batchId !== undefined
@@ -392,7 +480,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     const hydration = (async (): Promise<boolean> => {
       // The saved workflow-mode preference is intentionally not read back:
       // Flora is retired for new work, so a stale saved "flora" must not
-      // resurrect it, and the Lamp default already covers everything else.
+      // resurrect it, and Lamp Background is the experiment's fixed default.
       // 1. Live-mode health check. A missing route means a mock-only static
       // environment; a transient/network/server failure must be retried so a
       // live deployment never silently boots with persistence disabled.
@@ -519,31 +607,57 @@ export const useAppStore = create<AppStore>()((set, get) => ({
 
   startRun: async (
     video: VideoAsset,
-    opts?: { approveLiveSpend?: boolean; workflowMode?: WorkflowMode }
+    opts?: {
+      approveLiveSpend?: boolean;
+      approvePlanSpend?: boolean;
+      workflowMode?: WorkflowMode;
+    }
   ) => {
     const workflowMode = opts?.workflowMode ?? get().workflowMode;
+    const mock = get().mode === "mock";
     const response = await fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         video,
         approveLiveSpend: opts?.approveLiveSpend,
+        approvePlanSpend: opts?.approvePlanSpend,
         workflowMode,
+        mock,
       }),
     });
     const payload = (await response.json().catch(() => null)) as
-      | { run?: Run; serverOwned?: boolean; error?: string }
+      | {
+          run?: Run;
+          serverOwned?: boolean;
+          planReviewRequired?: boolean;
+          error?: string;
+        }
       | null;
     if (!response.ok || !payload?.run) {
+      if (payload?.run) {
+        set((state) => ({
+          runs: [
+            payload.run!,
+            ...state.runs.filter((item) => item.id !== payload.run!.id),
+          ],
+        }));
+      }
       throw new Error(payload?.error ?? `Run preparation failed (${response.status}).`);
     }
     const run = payload.run;
     set((state) => ({
       runs: [run, ...state.runs.filter((item) => item.id !== run.id)],
     }));
+    // Background preparation deliberately stops at a visible draft plan. The
+    // explicit approval action below owns either generation admission or the
+    // rare exact-source no-op settlement.
+    if (workflowMode === "background") {
+      return run.id;
+    }
     // Live first-cut execution is owned by the durable server Workflow started
     // by POST /api/runs. Keep the browser engine only for the zero-cost mock.
-    if (payload.serverOwned !== true && get().mode === "mock") {
+    if (payload.serverOwned !== true && mock) {
       void runWorkflow(run.id); // fire-and-forget; mock engine drives the store
     } else if (payload.serverOwned !== true) {
       throw new Error(
@@ -551,6 +665,103 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       );
     }
     return run.id;
+  },
+
+  approveBackgroundPlan: async (runId, opts) => {
+    const run = get().runs.find((item) => item.id === runId);
+    if (!run || run.workflowMode !== "background") {
+      throw new Error("Lamp Background run not found.");
+    }
+    const plan = run.backgroundCleanupPlan;
+    if (!plan) {
+      throw new Error("This run does not have a cleanup plan to approve.");
+    }
+    const resumingPausedLiveCleanup =
+      get().mode === "live" &&
+      plan.approval.status === "approved" &&
+      (run.serverExecution?.status === "user_action_required" ||
+        run.serverExecution === undefined);
+    if (
+      plan.approval.status === "approved" &&
+      !resumingPausedLiveCleanup
+    ) {
+      return;
+    }
+
+    if (get().mode === "live") {
+      const planHash = await hashLampBackgroundCleanupPlan(plan);
+      const response = await fetch("/api/background-plan/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runId,
+          planHash,
+          approveLiveSpend: opts?.approveLiveSpend === true,
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { run?: Run; serverOwned?: boolean; error?: string }
+        | null;
+      if (!response.ok || !payload?.run) {
+        throw new Error(
+          payload?.error ?? `Cleanup-plan approval failed (${response.status}).`
+        );
+      }
+      if (payload.serverOwned !== true) {
+        throw new Error(
+          "The live server did not claim the approved cleanup, so browser execution was refused."
+        );
+      }
+      set((state) => ({
+        runs: state.runs.map((item) =>
+          item.id === runId ? payload.run! : item
+        ),
+      }));
+      return;
+    }
+
+    const approvedPlan = approveLampBackgroundCleanupPlan(plan, Date.now());
+    if (!lampBackgroundPlanRequiresGeneration(approvedPlan)) {
+      set((state) => ({
+        runs: state.runs.map((item) =>
+          item.id === runId
+            ? materializeMockBackgroundNoOp(item, approvedPlan)
+            : item
+        ),
+      }));
+      return;
+    }
+    set((state) => ({
+      runs: state.runs.map((item) =>
+        item.id === runId
+          ? {
+              ...item,
+              backgroundCleanupPlan: approvedPlan,
+              nodeStates: {
+                ...item.nodeStates,
+                plan: {
+                  nodeId: "plan",
+                  status: "succeeded",
+                  detail: `${approvedPlan.remove.length} removal target${
+                    approvedPlan.remove.length === 1 ? "" : "s"
+                  } approved`,
+                },
+              },
+              log: [
+                ...item.log,
+                {
+                  at: Date.now(),
+                  nodeId: "plan",
+                  level: "info" as const,
+                  message:
+                    "Cleanup plan approved. Starting the fixed two-pass Lamp Background demo.",
+                },
+              ],
+            }
+          : item
+      ),
+    }));
+    void runWorkflow(runId);
   },
 
   createBatchDraft: (

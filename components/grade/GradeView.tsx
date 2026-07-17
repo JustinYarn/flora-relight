@@ -558,7 +558,7 @@ export function GradeView(
         <h1 className="text-balance text-base font-semibold text-ink">Grade</h1>
         <p className="text-pretty text-2xs text-faint">
           {mode === "grade"
-            ? "grade every active rubric row by eye — Lamp uses nine, and the completed final AI evaluation starts hidden until you reveal it"
+            ? "grade every active rubric row by eye — Lamp Background uses nine visual rows plus source audio, and any saved Final AI evaluation starts hidden until you reveal it"
             : hasAutomatedResults
               ? "compare each final video first, then use the aggregate view to calibrate the method"
               : "your saved human grades — no final AI results are available to compare"}
@@ -601,7 +601,7 @@ export function GradeView(
           ) : requestedRun ? (
             <EmptyState
               title="This video is not ready to grade"
-              hint="Lamp adds a video here only after Final and its saved AI evaluation are complete."
+              hint="A generated cleanup enters Grade after Final and its saved AI evaluation is complete; an approved exceptional no-op enters as the exact source without an AI evaluation."
               action={
                 <Link
                   href={`/runs/${encodeURIComponent(requestedRun.id)}`}
@@ -638,10 +638,10 @@ export function GradeView(
             }
             hint={
               inFlightCount > 0
-                ? "Finished videos land here automatically — each one becomes gradeable the moment its Final and AI evaluation complete."
+                ? "Finished outputs land here automatically when their server-verified Final is ready for human grading."
                 : runs.length === 0
                   ? "This workspace has no runs yet. Runs are graded where they were created — the deployed app and a local studio keep separate libraries, so a batch run locally will not appear here."
-                  : "Finish a Lamp run first — once Final and its AI evaluation are complete, the video lands here for grading."
+                  : "Finish a Lamp Background or Lamp run first. Generated Finals arrive with their saved AI evaluation hidden; an approved exceptional no-op arrives as the unchanged source without one."
             }
             action={
               <Link

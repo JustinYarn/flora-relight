@@ -72,9 +72,11 @@ export default function BatchPage() {
         <div>
           <h1 className="text-lg font-semibold text-ink">Batch runs</h1>
           <p className="mt-1 max-w-xl text-2xs leading-relaxed text-faint">
-            Send many clips through a bounded server queue. Flora delivers one
-            review-ready cut per source; Lamp completes its exact two-pass method
-            before each Final enters per-video grading.
+            Send many clips through a bounded server queue. New batches run
+            Lamp&apos;s exact two-pass method before each Final enters per-video
+            grading; Lamp Background stays one clip at a time so every source
+            keeps its own approved cleanup plan. Finished Flora batches stay
+            viewable.
           </p>
         </div>
       </header>
@@ -82,7 +84,7 @@ export default function BatchPage() {
       {!batch ? (
         <EmptyState
           title="No batches yet"
-          hint="Choose multiple videos on Create, select Flora or Lamp, then review the batch cost before launch."
+          hint="Choose multiple videos on Create with the Lamp method, then review the batch cost before launch. Lamp Background runs one clip at a time."
           action={
             <Link href="/">
               <Button>Go to Create</Button>

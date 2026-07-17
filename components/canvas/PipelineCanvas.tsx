@@ -37,7 +37,10 @@ type CanvasNode = PipelineFlowNode | LaneFlowNode;
 const nodeTypes = { pipeline: PipelineNodeView, lane: StageLaneView };
 
 function buildNodes(workflow: WorkflowDefinition): CanvasNode[] {
-  const laneNodes: LaneFlowNode[] = STAGE_LANES.map((lane) => ({
+  const laneNodes: LaneFlowNode[] =
+    workflow.id === "lamp-background-v1"
+      ? []
+      : STAGE_LANES.map((lane) => ({
     id: lane.id,
     type: "lane" as const,
     position: { x: lane.rect.x, y: lane.rect.y },
@@ -50,12 +53,18 @@ function buildNodes(workflow: WorkflowDefinition): CanvasNode[] {
     focusable: false,
     /* Clicks fall through the lane panel to the pane (deselect). */
     style: { pointerEvents: "none" as const },
-  }));
+        }));
   const pipelineNodes: PipelineFlowNode[] = workflow.nodes.map((n) => ({
     id: n.id,
     type: "pipeline" as const,
     /* Render-time stage layout; the workflow definition stays untouched. */
-    position: { ...(POSITION_OVERRIDES[n.id] ?? n.position) },
+    position: {
+      ...(
+        workflow.id === "lamp-background-v1"
+          ? n.position
+          : POSITION_OVERRIDES[n.id] ?? n.position
+      ),
+    },
     data: {
       pipelineNode: n,
       status: "idle" as const,
@@ -305,6 +314,18 @@ export function PipelineCanvas({
       .map((n) => n.id)
       .join(",");
   }, [workflow, run]);
+  const nodePositionById = useMemo(
+    () =>
+      new Map(
+        workflow.nodes.map((node) => [
+          node.id,
+          workflow.id === "lamp-background-v1"
+            ? node.position
+            : POSITION_OVERRIDES[node.id] ?? node.position,
+        ])
+      ),
+    [workflow]
+  );
 
   useEffect(() => {
     if (!follow || runningKey === "") return;
@@ -316,7 +337,7 @@ export function PipelineCanvas({
     let sx = 0;
     let sy = 0;
     for (const id of ids) {
-      const p = POSITION_OVERRIDES[id] ?? { x: 0, y: 0 };
+      const p = nodePositionById.get(id) ?? { x: 0, y: 0 };
       sx += p.x + 100; // node center (cards are 200px wide)
       sy += p.y + 50;
     }
@@ -324,7 +345,7 @@ export function PipelineCanvas({
       zoom: clamp(inst.getZoom(), 0.55, 1.1),
       duration: 650,
     });
-  }, [follow, runningKey]);
+  }, [follow, nodePositionById, runningKey]);
 
   /* Programmatic moves report a null event; a real event means the user
      grabbed the viewport, which pauses following. */

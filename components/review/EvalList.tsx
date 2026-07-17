@@ -14,8 +14,6 @@ import {
   VerdictBadge,
   verdictColor,
 } from "@/components/ui";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
-import { LAMP_EVAL_DEFS } from "@/lib/lamp-evaluation";
 import { formatTime, LOW_CONFIDENCE } from "@/lib/util";
 
 function severityColor(s: ViolationSeverity): string {
@@ -37,7 +35,15 @@ function fmtDelta(d: number): string {
 }
 
 /** Expanded body of one row: judges, violations, delta, method footnote. */
-function EvalRowDetail({ def, result }: { def: EvalDefinition; result: EvalResult }) {
+function EvalRowDetail({
+  def,
+  result,
+  totalWeight,
+}: {
+  def: EvalDefinition;
+  result: EvalResult;
+  totalWeight: number;
+}) {
   const delta = result.deltaFromPrevious;
   const deltaClass =
     delta === undefined
@@ -110,17 +116,10 @@ function EvalRowDetail({ def, result }: { def: EvalDefinition; result: EvalResul
           </span>
         ) : null}
         {result.verdicts.length === 1 && result.verdicts[0]?.judge === "gemini"
-          ? "Lamp holistic Gemini whole-video evaluation"
+          ? "Gemini whole-video evaluation"
           : def.method}
         {def.hardGate ? " · must pass (hard gate)" : ""} ·{" "}
-        {Math.round(
-          (def.weight /
-            (result.verdicts.length === 1 && result.verdicts[0]?.judge === "gemini"
-              ? LAMP_EVAL_DEFS
-              : EVAL_DEFS
-            ).reduce((sum, d) => sum + d.weight, 0)) *
-            100
-        )}
+        {Math.round((def.weight / totalWeight) * 100)}
         % of composite · pass ≥ {def.passThreshold}
       </p>
     </div>
@@ -132,6 +131,7 @@ function EvalRow({
   result,
   running,
   evalsUnderway,
+  totalWeight,
   open,
   onToggle,
 }: {
@@ -140,6 +140,7 @@ function EvalRow({
   running: boolean;
   /** True once the run has reached the checks phase — gates the pulsing rows. */
   evalsUnderway: boolean;
+  totalWeight: number;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -188,7 +189,7 @@ function EvalRow({
         ) : (
           <span className="flex-1 text-2xs text-faint">
             {def.id === "audio-integrity"
-              ? "not run yet — Lamp restores and verifies source audio before each holistic visual evaluation"
+              ? "not run yet — source audio is restored and verified before each holistic visual evaluation"
               : "not run this attempt"}
           </span>
         )}
@@ -222,7 +223,13 @@ function EvalRow({
         </span>
         <span className="w-3 text-center text-2xs text-faint">{open ? "▴" : "▾"}</span>
       </button>
-      {open ? <EvalRowDetail def={def} result={result} /> : null}
+      {open ? (
+        <EvalRowDetail
+          def={def}
+          result={result}
+          totalWeight={totalWeight}
+        />
+      ) : null}
     </div>
   );
 }
@@ -233,11 +240,11 @@ function EvalRow({
  */
 export function EvalList({
   iteration,
-  definitions = EVAL_DEFS,
+  definitions,
   evalsUnderway = true,
 }: {
   iteration?: Iteration;
-  definitions?: readonly EvalDefinition[];
+  definitions: readonly EvalDefinition[];
   /**
    * While the run executes: has the pipeline reached the checks phase yet?
    * (see evalPhaseReached in GenerationTheater). Defaults true so completed
@@ -246,6 +253,10 @@ export function EvalList({
   evalsUnderway?: boolean;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
+  const totalWeight = definitions.reduce(
+    (sum, definition) => sum + definition.weight,
+    0
+  );
   const definitionIds = new Set(definitions.map((definition) => definition.id));
   const availableCount =
     iteration?.evalResults.filter((result) => definitionIds.has(result.evalId)).length ?? 0;
@@ -277,6 +288,7 @@ export function EvalList({
             result={iteration?.evalResults.find((r) => r.evalId === def.id)}
             running={iteration?.status === "running"}
             evalsUnderway={evalsUnderway}
+            totalWeight={totalWeight}
             open={openId === def.id}
             onToggle={() => setOpenId((cur) => (cur === def.id ? null : def.id))}
           />

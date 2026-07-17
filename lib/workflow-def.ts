@@ -9,6 +9,7 @@
  */
 
 import { FLORA_WORKFLOW } from "./flora-workflow-def.ts";
+import { BACKGROUND_WORKFLOW } from "./background-workflow-def.ts";
 import type {
   PipelineEdge,
   PipelineNode,
@@ -220,10 +221,12 @@ export const LAMP_WORKFLOW: WorkflowDefinition = {
 };
 
 /** Legacy import kept for components that have not yet selected a mode. */
-export const RELIGHT_WORKFLOW = LAMP_WORKFLOW;
+export const RELIGHT_WORKFLOW = BACKGROUND_WORKFLOW;
 
 export function workflowForMode(mode: WorkflowMode): WorkflowDefinition {
-  return mode === "flora" ? FLORA_WORKFLOW : LAMP_WORKFLOW;
+  if (mode === "flora") return FLORA_WORKFLOW;
+  if (mode === "lamp") return LAMP_WORKFLOW;
+  return BACKGROUND_WORKFLOW;
 }
 
-export { FLORA_WORKFLOW };
+export { BACKGROUND_WORKFLOW, FLORA_WORKFLOW };

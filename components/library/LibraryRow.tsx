@@ -11,6 +11,8 @@ import { PairPlayer } from "@/components/library/PairPlayer";
 import { DownloadSideBySide } from "@/components/review/DownloadSideBySide";
 import { needsLampHumanGrade } from "@/components/grade/derive";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
+import { isLampBackgroundRun } from "@/lib/lamp-background-read";
+import { isTwoPassWorkflowMode, runWorkflowMode } from "@/lib/workflow-mode";
 import {
   STATUS_META,
   activeFixes,
@@ -88,12 +90,14 @@ function AttemptChips({
   iterations,
   bestIndex,
   fixedTwoPass,
+  noOp,
   selected,
   onSelect,
 }: {
   iterations: Iteration[];
   bestIndex?: number;
   fixedTwoPass: boolean;
+  noOp: boolean;
   selected: number | undefined;
   onSelect: (index: number) => void;
 }) {
@@ -108,7 +112,7 @@ function AttemptChips({
   return (
     <div className="flex flex-wrap items-center gap-1">
       <span className="mr-1 text-2xs uppercase tracking-[0.14em] text-faint">
-        {fixedTwoPass ? "Videos" : "Attempts"}
+        {noOp ? "Delivery" : fixedTwoPass ? "Videos" : "Attempts"}
       </span>
       {iterations.map((it) => (
         <button
@@ -122,7 +126,9 @@ function AttemptChips({
             className={`h-1.5 w-1.5 rounded-full ${it.status === "running" ? "status-pulse" : ""}`}
             style={{ background: dotColor(it.status) }}
           />
-          {fixedTwoPass
+          {noOp
+            ? "Exact source"
+            : fixedTwoPass
             ? it.index === 1
               ? "Initial"
               : it.index === 2
@@ -153,7 +159,12 @@ function RowBody({ run }: { run: Run }) {
   const fixes = activeFixes(run);
   const relit = shippedVideo(run);
   const fixedTwoPass =
-    run.workflowMode === "lamp" || run.workflowId === "lamp-v1";
+    isTwoPassWorkflowMode(runWorkflowMode(run));
+  const background = isLampBackgroundRun(run);
+  const backgroundNoOp =
+    background &&
+    run.backgroundCleanupPlan?.approval.status === "approved" &&
+    run.backgroundCleanupPlan.decision === "exceptional-no-op";
   const needsHumanGrade = needsLampHumanGrade(run);
 
   return (
@@ -162,13 +173,21 @@ function RowBody({ run }: { run: Run }) {
         original={run.originalVideo}
         relit={relit}
         relitLabel={
-          run.workflowId === "lamp-v1" && shipped?.index === 2
-            ? "RELIT · FINAL"
-            : run.finalVideo
+          backgroundNoOp
+            ? "UNCHANGED SOURCE · APPROVED NO-OP"
+            : background && shipped?.index === 2
+            ? "CLEANED · FINAL"
+            : fixedTwoPass && shipped?.index === 2
               ? "RELIT · FINAL"
+            : run.finalVideo
+              ? background
+                ? "CLEANED · FINAL"
+                : "RELIT · FINAL"
               : shipped
-                ? `RELIT v${shipped.index}`
-                : "RELIT"
+                ? `${background ? "CLEANED" : "RELIT"} v${shipped.index}`
+                : background
+                  ? "CLEANED"
+                  : "RELIT"
         }
       />
 
@@ -178,6 +197,7 @@ function RowBody({ run }: { run: Run }) {
             iterations={ordered}
             bestIndex={run.bestIterationIndex}
             fixedTwoPass={fixedTwoPass}
+            noOp={backgroundNoOp}
             selected={selected?.index}
             onSelect={setSelectedIndex}
           />
@@ -279,7 +299,11 @@ export function LibraryRow({
   const verdict = composite ? compositeVerdict(composite, passThreshold) : undefined;
   const relit = shippedVideo(run);
   const attempts = run.iterations.length;
-  const fixedTwoPass = run.workflowId === "lamp-v1";
+  const fixedTwoPass = isTwoPassWorkflowMode(runWorkflowMode(run));
+  const backgroundNoOp =
+    isLampBackgroundRun(run) &&
+    run.backgroundCleanupPlan?.approval.status === "approved" &&
+    run.backgroundCleanupPlan.decision === "exceptional-no-op";
   const actualUsd = run.cost?.actualUsd ?? 0;
 
   // Delete flow: ✕ → inline confirm → removeRun (optimistic; store restores
@@ -396,7 +420,11 @@ export function LibraryRow({
         </span>
 
         <span className="w-16 shrink-0 text-sm tabular-nums text-muted">
-          {fixedTwoPass ? `${attempts}/2 vids` : `${attempts} att.`}
+          {backgroundNoOp
+            ? "no gen."
+            : fixedTwoPass
+              ? `${attempts}/2 vids`
+              : `${attempts} att.`}
         </span>
 
         <span

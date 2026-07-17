@@ -20,7 +20,12 @@ import type { Run } from "@/lib/types";
 import { useAppStore } from "@/lib/store";
 import { markServerRunObserved } from "@/lib/persist";
 import { isProviderLostInteractionError } from "@/lib/lost-interaction";
-import { estimateLampRun, formatUsd } from "@/lib/cost";
+import {
+  estimateLampBackgroundTwoPass,
+  estimateLampRun,
+  formatUsd,
+} from "@/lib/cost";
+import { workflowModeFromExecutionId } from "@/lib/workflow-mode";
 import { Button, Card } from "@/components/ui";
 
 export function LostGenerationRecovery({ run }: { run: Run }) {
@@ -37,8 +42,9 @@ export function LostGenerationRecovery({ run }: { run: Run }) {
     return null;
   }
 
+  const workflowMode = workflowModeFromExecutionId(execution.executionId);
   const lostGeneration =
-    execution.executionId.startsWith("lamp:") &&
+    workflowMode !== "flora" &&
     isProviderLostInteractionError(execution.error);
   // Prefer the canonical journal entry; fall back to the archived :lost:
   // entry so an acknowledgment that crashed between its two durable writes
@@ -56,7 +62,10 @@ export function LostGenerationRecovery({ run }: { run: Run }) {
   const interactionId =
     lostGeneration && operation ? operation.providerInteractionId : undefined;
 
-  const estimate = estimateLampRun(run.originalVideo.durationSec);
+  const estimate =
+    workflowMode === "background"
+      ? estimateLampBackgroundTwoPass(run.originalVideo.durationSec)
+      : estimateLampRun(run.originalVideo.durationSec);
   // Iteration 1 lost → the whole plan still runs; iteration 2 lost → only the
   // final generation and its evaluation remain (earlier journals replay free,
   // so exactly half the two-generation/two-evaluation plan is new spend).

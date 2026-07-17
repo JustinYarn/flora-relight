@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseHumanGrade } from "../lib/human-grade.ts";
+import { LAMP_BACKGROUND_EVAL_IDS } from "../lib/lamp-background-evaluation.ts";
 import { LAMP_EVAL_IDS } from "../lib/lamp-evaluation.ts";
 import { EVAL_DEFS } from "../lib/prompts/eval-defs.ts";
 
@@ -49,6 +50,22 @@ test("a stale eleven-row Lamp submission saves only the current nine rows", () =
   assert.deepEqual(Object.keys(parsed.scores), LAMP_EVAL_IDS);
   assert.equal("temporal-alignment" in parsed.scores, false);
   assert.equal("lighting-match-to-anchor" in parsed.scores, false);
+});
+
+test("Lamp Background requires its exact cleanup and preservation rows", () => {
+  const parsed = parseHumanGrade({
+    value: grade(LAMP_BACKGROUND_EVAL_IDS),
+    requiredEvalIds: LAMP_BACKGROUND_EVAL_IDS,
+  });
+  assert.ok(parsed);
+  assert.deepEqual(Object.keys(parsed.scores), LAMP_BACKGROUND_EVAL_IDS);
+  assert.equal(
+    parseHumanGrade({
+      value: grade(LAMP_EVAL_IDS),
+      requiredEvalIds: LAMP_BACKGROUND_EVAL_IDS,
+    }),
+    null
+  );
 });
 
 test("Lamp rejects partial, unknown, and non-canonical score payloads", () => {

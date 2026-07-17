@@ -49,6 +49,15 @@ export interface VideoAsset {
   height: number;
   hasAudio: boolean;
   /**
+   * SyncNet metrics measured once from this exact asset by the free local
+   * analyzer. Persisted on the ORIGINAL source as the durable baseline for
+   * the source-relative Final sync gate (lib/v2-sync.ts v2SyncVerdict):
+   * footage that cannot itself meet the absolute 4/10 bar must not have its
+   * Final killed against that bar. Server-owned — putRun preserves
+   * originalVideo wholesale, so a stale browser snapshot cannot erase it.
+   */
+  syncBaseline?: import("./v2-sync").SyncNetMetrics;
+  /**
    * Mock mode only: a CSS filter string applied on top of the original video
    * to *simulate* what the generated video would look like. Real mode leaves
    * this undefined and `url` points at an actual generated file.
@@ -369,11 +378,11 @@ export interface WorkflowDefinition {
 // ---------------------------------------------------------------------------
 
 /**
- * User-selected relighting method. Legacy records omit this field and are
- * interpreted as Flora so existing runs and batches keep their original
- * execution semantics after Lamp is introduced.
+ * User-selected video-editing method. Legacy records omit this field and are
+ * interpreted from their workflow id so existing Flora and Lamp runs keep
+ * their original execution semantics after Lamp Background is introduced.
  */
-export type WorkflowMode = "flora" | "lamp";
+export type WorkflowMode = "flora" | "lamp" | "background";
 
 export type NodeRunStatus =
   | "idle"
@@ -464,6 +473,10 @@ export interface RunExecution {
   inputHash: string;
   /** Exact first-cut provider prompt; retained for deployment-safe recovery. */
   renderedPrompt: string;
+  /** Lamp Background only: completed planner journal bound to this execution. */
+  planOperationId?: string;
+  /** Lamp Background only: SHA-256 of the exact human-approved plan content. */
+  approvedPlanHash?: string;
   source: "single" | "batch";
   batchId?: string;
   status: RunExecutionStatus;
@@ -593,7 +606,7 @@ export interface PaidOperation {
   id: string;
   runId: string;
   provider: "gemini" | "claude" | "replicate";
-  kind: "manifest" | "anchor" | "judge" | "lipsync";
+  kind: "manifest" | "anchor" | "plan" | "judge" | "lipsync";
   /** Anchor version or generated-video iteration, when applicable. */
   iteration?: number;
   /** Canonical eval id for judge operations. */
@@ -616,7 +629,12 @@ export interface SpendApproval {
   id: string;
   source: "single" | "batch";
   /** Legacy records without this field are treated as full_pipeline. */
-  scope?: "full_pipeline" | "first_cut" | "lamp_two_pass";
+  scope?:
+    | "full_pipeline"
+    | "first_cut"
+    | "lamp_two_pass"
+    | "background_plan"
+    | "background_two_pass";
   batchId?: string;
   /** Canonical durable ingest identity and facts this approval was priced for. */
   runId: string;
@@ -626,6 +644,7 @@ export interface SpendApproval {
   expiresAt: number;
   /** Conservative run reservation authorized by the confirmation, in USD. */
   maxUsd: number;
+  /** Zero for planner-only approval; otherwise the generation-attempt ceiling. */
   maxIterations: number;
 }
 
@@ -683,6 +702,11 @@ export interface Run {
   spendApproval?: SpendApproval;
   /** Extracted once at ingest; ground truth for all evals. */
   manifest?: SceneManifest;
+  /**
+   * Server-owned Lamp Background plan. Live plans come from the exactly-once
+   * planner journal; mock plans remain drafts until explicitly approved.
+   */
+  backgroundCleanupPlan?: import("./lamp-background").LampBackgroundCleanupPlan;
   iterations: Iteration[];
   /** Legacy best-of tracking. Lamp leaves this unset because v2 is always Final. */
   bestIterationIndex?: number;

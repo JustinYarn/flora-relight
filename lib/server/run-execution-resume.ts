@@ -1,5 +1,6 @@
 import type { RunExecution } from "../types.ts";
 import { isProviderLostInteractionError } from "../lost-interaction.ts";
+import { isTwoPassExecutionId } from "../workflow-mode.ts";
 
 export const LAMP_USER_ACTION_REQUIRED_PREFIX =
   "LAMP_USER_ACTION_REQUIRED:";
@@ -20,7 +21,7 @@ export function isLampApprovalReplayTransition(
     current.status === "user_action_required" &&
     current.error?.startsWith(LAMP_USER_ACTION_REQUIRED_PREFIX) === true &&
     candidate.status === "queued" &&
-    current.executionId.startsWith("lamp:") &&
+    isTwoPassExecutionId(current.executionId) &&
     candidate.source === current.source &&
     candidate.batchId === current.batchId &&
     candidate.phase === "queued" &&
@@ -55,7 +56,7 @@ export function isLampLostGenerationAcknowledgeTransition(
   candidate: RunExecution
 ): boolean {
   return (
-    current.executionId.startsWith("lamp:") &&
+    isTwoPassExecutionId(current.executionId) &&
     current.status === "reconcile_required" &&
     isProviderLostInteractionError(current.error) &&
     candidate.status === "user_action_required" &&
@@ -79,12 +80,12 @@ export function acknowledgeLostLampGeneration(
   now = Date.now()
 ): RunExecution {
   if (
-    !execution.executionId.startsWith("lamp:") ||
+    !isTwoPassExecutionId(execution.executionId) ||
     execution.status !== "reconcile_required" ||
     !isProviderLostInteractionError(execution.error)
   ) {
     throw new Error(
-      "Only a Lamp execution stopped by a provider-lost generation can be acknowledged this way."
+      "Only a two-pass execution stopped by a provider-lost generation can be acknowledged this way."
     );
   }
   return {
@@ -112,12 +113,12 @@ export function requeueLampExecutionAfterApproval(
   now = Date.now()
 ): RunExecution {
   if (
-    !execution.executionId.startsWith("lamp:") ||
+    !isTwoPassExecutionId(execution.executionId) ||
     execution.status !== "user_action_required" ||
     !execution.error?.startsWith(LAMP_USER_ACTION_REQUIRED_PREFIX)
   ) {
     throw new Error(
-      "Only a Lamp execution paused for approval can be resumed this way."
+      "Only a Lamp execution paused for approval or a Lamp Background execution paused for approval can be resumed this way."
     );
   }
   return {

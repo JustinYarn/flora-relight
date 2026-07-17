@@ -84,6 +84,11 @@ function lightingDirectiveFrom(base: RelightBasePrompt): string {
 export function initialMegaPrompt(
   workflowMode: WorkflowMode = "lamp"
 ): MegaPrompt {
+  if (workflowMode === "background") {
+    throw new Error(
+      "Lamp Background prompts require a human-approved cleanup plan and must use initialLampBackgroundMegaPrompt."
+    );
+  }
   const base =
     workflowMode === "lamp" ? LAMP_RELIGHT_BASE_PROMPT : RELIGHT_BASE_PROMPT;
   const mp: MegaPrompt = {
@@ -107,6 +112,11 @@ export function nextMegaPrompt(
   results: EvalResult[],
   workflowMode: WorkflowMode = serializedWorkflowMode(prev.rendered)
 ): MegaPrompt {
+  if (workflowMode === "background") {
+    throw new Error(
+      "Lamp Background corrections must use the plan-bound compileLampBackgroundFinalPrompt."
+    );
+  }
   const version = prev.version + 1;
 
   // 1. Index the latest violations by ledger key, keeping the most severe
@@ -191,6 +201,11 @@ export function renderMegaPrompt(
   mp: MegaPrompt,
   workflowMode: WorkflowMode = serializedWorkflowMode(mp.rendered)
 ): string {
+  if (workflowMode === "background") {
+    throw new Error(
+      "Lamp Background rendering requires the dedicated approved-plan compiler."
+    );
+  }
   const { base } = mp;
 
   const locks = [

@@ -1,5 +1,5 @@
 import type { PipelineNode } from "@/lib/types";
-import { getEvalDef } from "@/lib/prompts/eval-defs";
+import { evalDefForId } from "@/lib/lamp-evaluation";
 
 export interface NodePromptRole {
   label: string;
@@ -14,7 +14,15 @@ export interface NodePromptRole {
  */
 export function promptRoleForNode(node: PipelineNode): NodePromptRole | null {
   if (node.kind === "evaluate" && node.evalId) {
-    const def = getEvalDef(node.evalId);
+    const def = evalDefForId(node.evalId);
+    if (!def) {
+      return {
+        label: "rubric",
+        color: "var(--running)",
+        description:
+          "Uses the workflow's canonical evaluation rubric for this node.",
+      };
+    }
     return def.promptTemplate
       ? {
           label: "rubric",
@@ -29,6 +37,34 @@ export function promptRoleForNode(node: PipelineNode): NodePromptRole | null {
   }
 
   switch (node.id) {
+    case "plan":
+      return {
+        label: "planner prompt",
+        color: "var(--running)",
+        description:
+          "Inventories the complete source as remove, preserve, or uncertain before human approval.",
+      };
+    case "initial":
+      return {
+        label: "approved-plan prompt",
+        color: "var(--accent)",
+        description:
+          "Consumes the exact approved cleanup plan with person, lighting, camera, and audio locks.",
+      };
+    case "critique":
+      return {
+        label: "whole-video rubric",
+        color: "var(--running)",
+        description:
+          "Scores Initial against the approved plan and emits only structured, plan-bound corrections.",
+      };
+    case "final":
+      return {
+        label: "corrected mega prompt",
+        color: "var(--accent)",
+        description:
+          "Consumes the immutable source, approved plan, and one consolidated correction set.",
+      };
     case "manifest":
       return {
         label: "extractor prompt",

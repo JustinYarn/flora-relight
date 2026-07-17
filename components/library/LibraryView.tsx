@@ -270,7 +270,7 @@ export function LibraryView() {
         <Stat
           value={avgScore !== undefined ? avgScore.toFixed(1) : "—"}
           label="avg Final AI score"
-          title="mean Overall score of each Lamp run's Final video"
+          title="mean overall score of each run's delivered Final or shipped cut"
         />
         <Stat
           value={formatUsd(spend.actual)}

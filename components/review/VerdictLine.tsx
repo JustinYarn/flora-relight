@@ -3,6 +3,7 @@
 import type { Iteration, Run, Verdict } from "@/lib/types";
 import { Badge, verdictColor } from "@/components/ui";
 import { formatUsd } from "@/lib/cost";
+import { isLampBackgroundRun } from "@/lib/lamp-background-read";
 
 /**
  * One flat horizontal strip under the hero: the composite number, the
@@ -32,6 +33,10 @@ export function VerdictLine({
     : "borderline";
 
   const videosGenerated = run.iterations.length;
+  const backgroundNoOp =
+    isLampBackgroundRun(run) &&
+    run.backgroundCleanupPlan?.approval.status === "approved" &&
+    run.backgroundCleanupPlan.decision === "exceptional-no-op";
   const scoreLabel =
     iteration?.index === 2
       ? "Final AI score"
@@ -101,7 +106,9 @@ export function VerdictLine({
 
       <span className="ml-auto flex items-baseline gap-4 text-sm text-muted">
         <span className="tabular-nums">
-          {videosGenerated >= 2
+          {backgroundNoOp
+            ? "Exact source · no generation"
+            : videosGenerated >= 2
             ? "Initial + Final generated"
             : videosGenerated === 1
               ? "Initial generated"

@@ -9,8 +9,9 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import type { EvalResult, Run } from "@/lib/types";
-import { LAMP_VISUAL_EVAL_DEFS } from "@/lib/lamp-evaluation";
+import type { EvalDefinition, EvalResult, Run } from "@/lib/types";
+import { evalDefsForRun } from "@/lib/lamp-evaluation";
+import { isLampBackgroundRun } from "@/lib/lamp-background-read";
 import { verdictColor } from "@/components/ui";
 import { formatUsd } from "@/lib/cost";
 
@@ -45,14 +46,25 @@ const NODE_STAGES: Array<{ id: string; stage: StageId }> = [
   { id: "eval-audio", stage: "remux" },
 ];
 
+const BACKGROUND_NODE_STAGES: Array<{ id: string; stage: StageId }> = [
+  { id: "plan", stage: "brief" },
+  { id: "initial", stage: "videogen" },
+  { id: "critique", stage: "checks" },
+  { id: "final", stage: "videogen" },
+  { id: "review", stage: "decide" },
+];
+
 /**
  * The furthest RUNNING node wins; if nothing is running (a beat between
  * nodes), fall back to the furthest settled node so the line never blanks.
  */
 export function currentStage(run: Run): StageId {
+  const stages = isLampBackgroundRun(run)
+    ? BACKGROUND_NODE_STAGES
+    : NODE_STAGES;
   let running: StageId | null = null;
   let settled: StageId | null = null;
-  for (const { id, stage } of NODE_STAGES) {
+  for (const { id, stage } of stages) {
     const status = run.nodeStates[id]?.status;
     if (status === "running") running = stage;
     else if (status === "succeeded" || status === "failed") settled = stage;
@@ -83,18 +95,21 @@ function fmtElapsed(ms: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-/** The eight visual checks Lamp can truthfully return from one holistic call. */
-const WHOLE_VIDEO_CHECK_DEFS = LAMP_VISUAL_EVAL_DEFS;
-
-function CheckChips({ results }: { results: EvalResult[] }) {
-  const landed = WHOLE_VIDEO_CHECK_DEFS.map((def) => ({
+function CheckChips({
+  results,
+  definitions,
+}: {
+  results: EvalResult[];
+  definitions: readonly EvalDefinition[];
+}) {
+  const landed = definitions.map((def) => ({
     def,
     result: results.find((r) => r.evalId === def.id),
   })).filter(
     (
       x
     ): x is {
-      def: (typeof WHOLE_VIDEO_CHECK_DEFS)[number];
+      def: EvalDefinition;
       result: EvalResult;
     } => Boolean(x.result)
   );
@@ -130,15 +145,29 @@ function CheckChips({ results }: { results: EvalResult[] }) {
 
 export function GenerationTheater({ run }: { run: Run }) {
   const stage = currentStage(run);
+  const background = isLampBackgroundRun(run);
+  const wholeVideoCheckDefs = evalDefsForRun(run).filter(
+    (definition) => definition.method !== "deterministic"
+  );
   const pausedForApproval =
     run.serverExecution?.status === "user_action_required";
   const latest = run.iterations[run.iterations.length - 1];
-  const attempt = latest?.index ?? 1;
+  const attempt =
+    run.nodeStates.final?.status === "running" ||
+    run.nodeStates.final?.status === "succeeded"
+      ? 2
+      : (latest?.index ?? 1);
 
   // Videogen elapsed clock, ticking from the stage's own log entry.
   const videogenStartAt = useMemo(() => {
     for (let i = run.log.length - 1; i >= 0; i -= 1) {
-      if (run.log[i].nodeId === "videogen") return run.log[i].at;
+      if (
+        run.log[i].nodeId === "videogen" ||
+        run.log[i].nodeId === "initial" ||
+        run.log[i].nodeId === "final"
+      ) {
+        return run.log[i].at;
+      }
     }
     return null;
   }, [run.log]);
@@ -175,8 +204,12 @@ export function GenerationTheater({ run }: { run: Run }) {
         } — compiling the final prompt…`;
         subline = "the whole-video feedback gets one correction pass";
       } else {
-        headline = "Compiling the mega prompt…";
-        subline = "what may change and what must remain source-faithful";
+        headline = background
+          ? "Locking the approved cleanup plan…"
+          : "Compiling the mega prompt…";
+        subline = background
+          ? "only approved removal targets may change"
+          : "what may change and what must remain source-faithful";
       }
       break;
     case "videogen":
@@ -198,7 +231,7 @@ export function GenerationTheater({ run }: { run: Run }) {
         attempt >= 2
           ? "Saving the final AI evaluation…"
           : "Turning the critique into one final revision…";
-      subline = "Lamp stops after the fixed second generation";
+      subline = `${background ? "Lamp Background" : "Lamp"} stops after the fixed second generation`;
       break;
     case "remux":
       headline = "Restoring and verifying the original audio…";
@@ -206,12 +239,12 @@ export function GenerationTheater({ run }: { run: Run }) {
       break;
   }
   if (pausedForApproval) {
-    headline = "Lamp is safely paused for approval";
+    headline = `${background ? "Lamp Background" : "Lamp"} is safely paused for approval`;
     subline =
       "return to Create to renew the exact plan; completed provider work will be reused";
   }
 
-  const landedCount = WHOLE_VIDEO_CHECK_DEFS.filter((def) =>
+  const landedCount = wholeVideoCheckDefs.filter((def) =>
     latest?.evalResults.some((r) => r.evalId === def.id)
   ).length;
 
@@ -261,10 +294,15 @@ export function GenerationTheater({ run }: { run: Run }) {
         {stage === "checks" && !pausedForApproval ? (
           <>
             <p className="text-2xs tabular-nums text-muted">
-              {landedCount} of {WHOLE_VIDEO_CHECK_DEFS.length} applicable visual
+              {landedCount} of {wholeVideoCheckDefs.length} applicable visual
               results returned
             </p>
-            {latest ? <CheckChips results={latest.evalResults} /> : null}
+            {latest ? (
+              <CheckChips
+                results={latest.evalResults}
+                definitions={wholeVideoCheckDefs}
+              />
+            ) : null}
           </>
         ) : null}
 

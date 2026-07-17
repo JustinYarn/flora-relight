@@ -20,7 +20,7 @@ export function ReviewActions({
 }) {
   const [notes, setNotes] = useState("");
 
-  if (run.serverExecution && run.humanGrade) {
+  if (run.humanGrade) {
     return (
       <p className="flex flex-wrap items-center justify-end gap-2 py-4 text-sm text-muted">
         <span className="text-2xs uppercase tracking-wider text-faint">
@@ -35,11 +35,15 @@ export function ReviewActions({
   }
 
   if (needsLampHumanGrade(run)) {
+    const exceptionalBackgroundNoOp =
+      run.backgroundCleanupPlan?.approval.status === "approved" &&
+      run.backgroundCleanupPlan.decision === "exceptional-no-op";
     return (
       <div className="flex flex-wrap items-center justify-end gap-3 py-4">
         <span className="text-pretty text-2xs text-faint">
-          The final video and AI evaluation are ready here. Grade mode starts
-          with the AI results hidden so you can score independently.
+          {exceptionalBackgroundNoOp
+            ? "The approved unchanged source is ready. Grade whether the exceptional no-op was the right cleanup decision; no Final AI evaluation was run."
+            : "The final video and AI evaluation are ready here. Grade mode starts with the AI results hidden so you can score independently."}
         </span>
         <Link
           href={`/grade?run=${encodeURIComponent(run.id)}`}

@@ -11,10 +11,12 @@ import type {
 import { useAppStore } from "@/lib/store";
 import { markServerRunObserved } from "@/lib/persist";
 import { evalDefsForRun, isLampRun } from "@/lib/lamp-evaluation";
+import { isLampBackgroundRun } from "@/lib/lamp-background-read";
 import { Button, verdictColor } from "@/components/ui";
 import { PairPlayer } from "@/components/library/PairPlayer";
 import { formatRunDate } from "@/components/library/derive";
 import { EvalList } from "@/components/review/EvalList";
+import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
 import {
   finalLampIteration,
   finalLampVideo,
@@ -135,6 +137,12 @@ export function ClipGrader({
   const shipped = finalLampIteration(run);
   const relit = finalLampVideo(run);
   const lampRun = isLampRun(run);
+  const backgroundRun = isLampBackgroundRun(run);
+  const exceptionalBackgroundNoOp =
+    backgroundRun &&
+    run.backgroundCleanupPlan?.decision === "exceptional-no-op";
+  const savedAiEvaluationExpected =
+    lampRun || (backgroundRun && !exceptionalBackgroundNoOp);
   const gradeDefs = evalDefsForRun(run);
   const aiHeadingId = `final-ai-heading-${run.id}`;
   const aiPanelId = `final-ai-panel-${run.id}`;
@@ -324,7 +332,13 @@ export function ClipGrader({
         />
       </div>
 
-      {lampRun ? (
+      {run.backgroundCleanupPlan?.approval.status === "approved" ? (
+        <div className="mt-4">
+          <BackgroundPlanReview run={run} interactive={false} compact />
+        </div>
+      ) : null}
+
+      {savedAiEvaluationExpected ? (
         <section
           aria-busy={aiRevealState === "loading"}
           className="mt-4 rounded-xl bg-surface px-4 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.16)]"
@@ -383,9 +397,20 @@ export function ClipGrader({
             </div>
           ) : null}
         </section>
+      ) : exceptionalBackgroundNoOp ? (
+        <section className="mt-4 rounded-xl bg-surface px-4 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.16)]">
+          <p className="text-sm font-medium text-ink">
+            No Final AI evaluation was run
+          </p>
+          <p className="mt-0.5 text-pretty text-2xs leading-relaxed text-muted">
+            You approved the strict exceptional no-op, so this is the exact
+            source video. Grade whether leaving it unchanged was the right
+            background-cleanup decision.
+          </p>
+        </section>
       ) : null}
 
-      {/* Workflow-scoped checks — nine for Lamp, eleven for Flora. */}
+      {/* Workflow-scoped checks for the exact method that produced this clip. */}
       <section className="mt-6 divide-y divide-edge border-b border-t border-edge">
         {gradeDefs.map((def) => (
           <div

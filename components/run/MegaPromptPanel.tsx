@@ -1,16 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import type { MegaPrompt, ViolationSeverity } from "@/lib/types";
+import type {
+  EvalDefinition,
+  MegaPrompt,
+  ViolationSeverity,
+} from "@/lib/types";
 import { Badge, Card } from "@/components/ui";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 
 function severityColor(s: ViolationSeverity): string {
   return s === "critical" ? "var(--fail)" : s === "major" ? "var(--borderline)" : "var(--muted)";
-}
-
-function evalName(id: string): string {
-  return EVAL_DEFS.find((d) => d.id === id)?.name ?? id;
 }
 
 /**
@@ -22,9 +21,11 @@ function evalName(id: string): string {
 export function MegaPromptPanel({
   megaPrompt,
   prev,
+  definitions,
 }: {
   megaPrompt?: MegaPrompt;
   prev?: MegaPrompt;
+  definitions: readonly EvalDefinition[];
 }) {
   const [open, setOpen] = useState(false);
   if (!megaPrompt) return null;
@@ -36,6 +37,8 @@ export function MegaPromptPanel({
   const newlyResolved = megaPrompt.corrections.filter(
     (c) => c.resolved && prev?.corrections.some((p) => p.id === c.id && !p.resolved)
   );
+  const evalName = (id: string): string =>
+    definitions.find((definition) => definition.id === id)?.name ?? id;
 
   return (
     <Card>

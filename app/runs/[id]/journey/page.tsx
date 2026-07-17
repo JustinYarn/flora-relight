@@ -10,9 +10,10 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useAppStore } from "@/lib/store";
 import { useRunDetails } from "@/lib/useRunDetails";
 import type { RunStatus } from "@/lib/types";
+import { workflowForMode } from "@/lib/workflow-def";
+import { runWorkflowMode } from "@/lib/workflow-mode";
 import { Badge, EmptyState } from "@/components/ui";
 import { buildJourneySteps } from "@/components/journey/chain";
 import { JourneyChain } from "@/components/journey/JourneyChain";
@@ -37,7 +38,6 @@ const STATUS_LABEL: Record<RunStatus, string> = {
 export default function RunJourneyPage() {
   const params = useParams<{ id: string }>();
   const run = useRunDetails(params.id);
-  const threshold = useAppStore((s) => s.workflow.config.compositePassThreshold);
   // null = follow the newest step automatically; a string pins the panel.
   const [pinned, setPinned] = useState<string | null>(null);
 
@@ -60,6 +60,9 @@ export default function RunJourneyPage() {
     );
   }
 
+  const threshold = workflowForMode(
+    runWorkflowMode(run)
+  ).config.compositePassThreshold;
   const steps = buildJourneySteps(run);
   const activeStep =
     (pinned ? steps.find((s) => s.id === pinned) : undefined) ??

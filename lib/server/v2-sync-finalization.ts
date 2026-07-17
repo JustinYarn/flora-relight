@@ -35,11 +35,12 @@ import {
   type StorageDriver,
 } from "@/lib/server/storage";
 import { lipsync2ProCostFromDuration } from "@/lib/cost";
+import { resolveSourceUrl } from "@/lib/server/gemini";
 import {
   isLipsyncOperationResult,
   LIPSYNC_MODEL,
   LIPSYNC_OPERATION_ID,
-  v2SyncPasses,
+  v2SyncVerdict,
   type LipsyncOperationResult,
   type SyncNetMetrics,
 } from "@/lib/v2-sync";
@@ -59,7 +60,17 @@ export type V2LipsyncCheckpoint =
 
 export type V2CandidateSyncCheck =
   | { skipped: true; videoUrl: string }
-  | { skipped: false; videoUrl: string; metrics: SyncNetMetrics };
+  | {
+      skipped: false;
+      videoUrl: string;
+      metrics: SyncNetMetrics;
+      /**
+       * Durable baseline of the ORIGINAL source, measured/persisted by this
+       * same analysis. Null only when the source itself cannot be analyzed —
+       * every gate then falls back to the absolute bar.
+       */
+      sourceSync: SyncNetMetrics | null;
+    };
 
 export type V2LipsyncPollResult =
   | { done: false }
@@ -156,6 +167,50 @@ export async function readV2LipsyncCheckpoint(
   };
 }
 
+/**
+ * Measure the ORIGINAL source's SyncNet metrics once and persist them as the
+ * run's durable baseline for the source-relative Final gate. The read is free
+ * (local analyzer, already retry-laddered) and idempotent. Persistence rides
+ * the server-owned canonical-source write, so a stale browser Run PUT can
+ * never erase the baseline between the gate and settlement — the settle-time
+ * re-verification must see exactly the value the gate judged with.
+ *
+ * Returns null only when the source itself cannot be analyzed after the full
+ * retry ladder. The gate then stays at the absolute bar — the pre-baseline
+ * behavior — instead of inventing a new way for a paid run to fail.
+ */
+export async function ensureSourceSyncBaseline(
+  runId: string
+): Promise<SyncNetMetrics | null> {
+  const storage = getStorage();
+  const run = await storage.getRun(runId);
+  if (!run) {
+    throw new Error("Run not found while measuring the source sync baseline.");
+  }
+  if (run.originalVideo.syncBaseline) return run.originalVideo.syncBaseline;
+  let metrics: SyncNetMetrics;
+  try {
+    metrics = await analyzeVideoSync(
+      await resolveSourceUrl(run.originalVideo.url)
+    );
+  } catch (error) {
+    console.warn(
+      `[syncnet] source baseline unavailable for ${runId}; Final gate stays absolute — ${
+        error instanceof Error ? error.message.slice(0, 200) : "analysis failed"
+      }`
+    );
+    return null;
+  }
+  const updated = await storage.putCanonicalRunSource(runId, {
+    ...run.originalVideo,
+    syncBaseline: metrics,
+  });
+  if (!updated) {
+    throw new Error("Run disappeared while persisting the source sync baseline.");
+  }
+  return updated.originalVideo.syncBaseline ?? metrics;
+}
+
 /** Preserve Gemini's candidate before measuring or potentially replacing V2. */
 export async function analyzeV2Candidate(
   runId: string
@@ -167,10 +222,15 @@ export async function analyzeV2Candidate(
     if (!(await storage.mediaExists(runId, SOURCE_AUDIO_NAME))) {
       return { skipped: true, videoUrl };
     }
+    // Candidate first: it proves the analyzer is reachable before the
+    // baseline's failure-tolerant fallback could misread an outage as "this
+    // source cannot be analyzed".
+    const metrics = await analyzeVideoSync(candidatePath);
     return {
       skipped: false,
       videoUrl,
-      metrics: await analyzeVideoSync(candidatePath),
+      metrics,
+      sourceSync: await ensureSourceSyncBaseline(runId),
     };
   } finally {
     await cleanupRemoteScratch(storage, runId).catch(() => undefined);
@@ -235,9 +295,6 @@ export async function startV2LipsyncPrediction(input: {
   prepared: PreparedLipsyncInputs;
   preSync: SyncNetMetrics;
 }): Promise<string> {
-  if (v2SyncPasses(input.preSync)) {
-    throw new Error("A passing V2 must not start a Lipsync repair.");
-  }
   // Configuration failures must surface BEFORE the exactly-once claim is
   // taken: a claim held for a request that provably cannot be sent would
   // block every later attempt behind manual reconciliation.
@@ -248,6 +305,15 @@ export async function startV2LipsyncPrediction(input: {
   const storage = getStorage();
   const run = await storage.getRun(input.runId);
   if (!run) throw new Error("Run not found for V2 Lipsync repair.");
+  // Billing guard on the EFFECTIVE gate, not the absolute bar: when the
+  // source's own baseline already admits this candidate, a repair cannot
+  // improve the verdict — Lipsync-2-Pro cannot make a quiet speaker score
+  // like a loud one, so that spend is unwinnable by construction.
+  if (
+    v2SyncVerdict(input.preSync, run.originalVideo.syncBaseline ?? null).pass
+  ) {
+    throw new Error("A passing V2 must not start a Lipsync repair.");
+  }
   const claim = await beginPaidOperation({
     run,
     id: LIPSYNC_OPERATION_ID,
@@ -458,14 +524,23 @@ export async function finalizeV2Lipsync(input: {
       postSync,
     };
 
-    if (!v2SyncPasses(postSync)) {
+    // Judge the repair against the same effective gate that admitted the
+    // repair: absolute for sources that pass 4/10, source-relative otherwise.
+    // The baseline was persisted before the repair was claimed; the ensure
+    // call only covers executions started before baselines existed.
+    const verdict = v2SyncVerdict(
+      postSync,
+      run.originalVideo.syncBaseline ??
+        (await ensureSourceSyncBaseline(input.runId))
+    );
+    if (!verdict.pass) {
       const result: LipsyncOperationResult = {
         ...baseResult,
         videoUrl: repairedUrl,
       };
       await completePaidOperation(operation, result);
       throw new Error(
-        `Lipsync-2-Pro output still failed SyncNet (confidence ${postSync.confidence.toFixed(2)}, distance ${postSync.distance.toFixed(2)}).`
+        `Lipsync-2-Pro output still failed SyncNet (${verdict.reason}).`
       );
     }
 

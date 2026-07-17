@@ -35,6 +35,7 @@ import {
   isAcknowledgedLostGenerationError,
 } from "@/lib/server/run-execution-resume";
 import { lostGenerationArchiveId } from "@/lib/server/lost-generation-archive";
+import { isTwoPassExecutionId } from "@/lib/workflow-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -77,14 +78,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
   if (
-    execution.executionId !== `lamp:${body.runId}` ||
+    !isTwoPassExecutionId(execution.executionId) ||
+    (execution.executionId !== `lamp:${body.runId}` &&
+      execution.executionId !== `lamp-background:${body.runId}`) ||
     execution.source !== "single" ||
     execution.batchId !== undefined
   ) {
     return NextResponse.json(
       {
         error:
-          "Only a single-run Lamp execution can acknowledge a lost generation here.",
+          "Only a single-run Lamp or Lamp Background execution can acknowledge a lost generation here.",
       },
       { status: 409, headers: NO_STORE }
     );

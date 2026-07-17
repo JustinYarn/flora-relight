@@ -24,6 +24,11 @@ import {
   lampCompositeForResults,
   LAMP_EVAL_DEFS,
 } from "../../lib/lamp-evaluation.ts";
+import {
+  isLampBackgroundRun,
+  lampBackgroundCompositeForResults,
+  LAMP_BACKGROUND_UI_EVAL_DEFS,
+} from "../../lib/lamp-background-read.ts";
 
 // ---------------------------------------------------------------------------
 // The 5-point scale
@@ -69,9 +74,16 @@ export function isGradeable(run: Run): boolean {
   const v = finalLampVideo(run);
   const serverVerifiedArtifact =
     finalLampIteration(run)?.recoveredFromProviderOperation === true;
+  const approvedBackgroundNoOp =
+    isLampBackgroundRun(run) &&
+    run.backgroundCleanupPlan?.approval.status === "approved" &&
+    run.backgroundCleanupPlan.runId === run.id &&
+    run.backgroundCleanupPlan.decision === "exceptional-no-op" &&
+    run.status === "awaiting-review" &&
+    v?.url === run.originalVideo.url;
   return (
     (!run.serverExecution || run.serverExecution.status === "awaiting_review") &&
-    serverVerifiedArtifact &&
+    (serverVerifiedArtifact || approvedBackgroundNoOp) &&
     v !== undefined &&
     !v.simulatedFilter
   );
@@ -80,7 +92,7 @@ export function isGradeable(run: Run): boolean {
 /** Lamp's human grade and comparison target is strictly v2. */
 export function finalLampIteration(run: Run): Iteration | undefined {
   const second = run.iterations.find((iteration) => iteration.index === 2);
-  if (isLampRun(run)) return second;
+  if (isLampRun(run) || isLampBackgroundRun(run)) return second;
   // Legacy Flora records keep their historical fallback behavior.
   return second ?? run.iterations.at(-1);
 }
@@ -92,9 +104,18 @@ export function finalLampVideo(run: Run): VideoAsset | undefined {
 
 /** Canonical ungraded-Final predicate: execution truth is server-owned. */
 export function needsLampHumanGrade(run: Run): boolean {
+  const backgroundNoOp =
+    isLampBackgroundRun(run) &&
+    run.backgroundCleanupPlan?.approval.status === "approved" &&
+    run.backgroundCleanupPlan.runId === run.id &&
+    run.backgroundCleanupPlan.decision === "exceptional-no-op" &&
+    run.status === "awaiting-review";
   return (
-    run.serverExecution?.executionId.startsWith("lamp:") === true &&
-    run.serverExecution.status === "awaiting_review" &&
+    ((run.serverExecution !== undefined &&
+      (run.serverExecution.executionId.startsWith("lamp:") ||
+        run.serverExecution.executionId.startsWith("lamp-background:")) &&
+      run.serverExecution.status === "awaiting_review") ||
+      backgroundNoOp) &&
     run.humanGrade === undefined
   );
 }
@@ -201,9 +222,29 @@ export function perCheckStats(
   });
 }
 
-/** All-Lamp results stay at nine rows; a mixed/Flora set retains Flora's 11. */
+/** Preserve each method's registry; mixed sets use the stable union by id. */
 export function evalDefsForRuns(runs: Run[]): EvalDefinition[] {
-  return runs.some((run) => !isLampRun(run)) ? EVAL_DEFS : LAMP_EVAL_DEFS;
+  if (runs.length === 0) return LAMP_BACKGROUND_UI_EVAL_DEFS;
+  const registries: readonly EvalDefinition[][] = [
+    ...(runs.some(
+      (run) => !isLampRun(run) && !isLampBackgroundRun(run)
+    )
+      ? [EVAL_DEFS]
+      : []),
+    ...(runs.some((run) => isLampRun(run)) ? [LAMP_EVAL_DEFS] : []),
+    ...(runs.some((run) => isLampBackgroundRun(run))
+      ? [LAMP_BACKGROUND_UI_EVAL_DEFS]
+      : []),
+  ];
+  const definitions = new Map<string, EvalDefinition>();
+  for (const registry of registries) {
+    for (const definition of registry) {
+      if (!definitions.has(definition.id)) {
+        definitions.set(definition.id, definition);
+      }
+    }
+  }
+  return Array.from(definitions.values());
 }
 
 /** Overall verdict-level agreement across every compared pair, 0–100. */
@@ -275,6 +316,9 @@ export function aiPassRatePct(gradedRuns: Run[]): number | undefined {
   const scored = gradedRuns
     .map((run) => {
       const final = finalLampIteration(run);
+      if (isLampBackgroundRun(run)) {
+        return lampBackgroundCompositeForResults(final?.evalResults ?? []);
+      }
       return isLampRun(run)
         ? lampCompositeForResults(final?.evalResults ?? [])
         : final?.composite;

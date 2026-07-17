@@ -5,6 +5,22 @@ import {
   lampEvaluationOperationId,
   type LampEvaluationArtifact,
 } from "@/lib/lamp-evaluation";
+import {
+  isLampBackgroundEvaluationArtifact,
+} from "@/lib/lamp-background-read";
+import {
+  lampBackgroundEvaluationOperationId,
+} from "@/lib/lamp-background-operations";
+import type {
+  LampBackgroundEvalResult,
+  LampBackgroundEvaluationArtifact,
+} from "@/lib/lamp-background-evaluation";
+import type { LampBackgroundCleanupPlan } from "@/lib/lamp-background";
+import { compileLampBackgroundFinalPrompt } from "@/lib/prompts/lamp-background";
+import {
+  validateLampBackgroundExecutionBinding,
+} from "@/lib/server/lamp-background-execution";
+import { runLampBackgroundHolisticEvaluation } from "@/lib/server/lamp-background-evaluator";
 import { runLampHolisticEvaluation } from "@/lib/server/lamp-evaluator";
 import type { PreparedLipsyncInputs } from "@/lib/server/replicate-lipsync";
 import { getStorage } from "@/lib/server/storage";
@@ -27,6 +43,7 @@ import {
 import { PaidOperationAuthorizationError } from "@/lib/server/paid-operation";
 import {
   analyzeV2Candidate,
+  ensureSourceSyncBaseline,
   finalizeV2Lipsync,
   pollV2LipsyncPrediction,
   prepareV2LipsyncInputs,
@@ -38,6 +55,7 @@ import {
 } from "@/lib/server/v2-sync-finalization";
 import {
   assertVideoGenerationAuthorized,
+  hasReusableLampBackgroundApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
 import {
@@ -52,10 +70,14 @@ import type { RunExecution, VideoGenerationOperationResult } from "@/lib/types";
 import {
   isLipsyncOperationResult,
   LIPSYNC_OPERATION_ID,
-  v2SyncPasses,
+  v2SyncVerdict,
   type LipsyncOperationResult,
   type SyncNetMetrics,
 } from "@/lib/v2-sync";
+import {
+  isTwoPassExecutionId,
+  workflowModeFromExecutionId,
+} from "@/lib/workflow-mode";
 
 export interface DurableRelightRunInput {
   runId: string;
@@ -77,13 +99,15 @@ const MAX_RECONCILIATION_POLLS = 7 * 24 * 12;
 const MAX_RETRY_SAFE_GAP_ATTEMPTS = 7 * 24 * 12;
 
 /**
- * Lamp runs use the fixed two-pass contract, whether started alone or by the
- * durable batch parent:
+ * Lamp and Lamp Background use the fixed two-pass contract. Lamp Background
+ * additionally binds every provider input to one human-approved cleanup plan:
  *
  *   original + mega prompt v1 -> generation 1 -> holistic critique
  *   -> corrected mega prompt v2 -> generation 2 from original
- *   -> SyncNet check and at most one Lipsync-2-Pro repair
- *   -> final holistic evaluation -> blind human grading
+ *   -> final holistic evaluation
+ *   -> SyncNet gate (absolute, or source-relative when the source itself
+ *      cannot pass the absolute bar) and at most one Lipsync-2-Pro repair
+ *   -> blind human grading
  *
  * Existing Flora batch children and pre-Lamp single executions retain their
  * already-authorized one-cut behavior until those records naturally settle.
@@ -98,9 +122,13 @@ export async function durableRelightRun(
   if (!source) {
     return { runId: input.runId, executionId: input.executionId, status: "not_owner" };
   }
-  const lamp = input.executionId.startsWith("lamp:");
+  const workflowMode = workflowModeFromExecutionId(input.executionId);
 
   try {
+    const backgroundPlan =
+      workflowMode === "background"
+        ? await readBoundBackgroundPlan(input, workflowRunId)
+        : undefined;
     const first = await runGenerationAttempt(
       input,
       workflowRunId,
@@ -108,7 +136,7 @@ export async function durableRelightRun(
       input.renderedPrompt
     );
 
-    if (!lamp) {
+    if (workflowMode === "flora") {
       await settleLegacyFirstCut(input, workflowRunId);
       return {
         runId: input.runId,
@@ -120,32 +148,86 @@ export async function durableRelightRun(
     }
 
     await enterEvaluationPhaseWithRecovery(input, workflowRunId, 1);
-    const firstEvaluation = await evaluateAttemptWithRecovery(
-      input,
-      workflowRunId,
-      1,
-      []
-    );
-    const finalPrompt = compileLampFinalPrompt(
-      input.renderedPrompt,
-      firstEvaluation
-    );
+    let finalRenderedPrompt: string;
+    let lampFirstEvaluation: LampEvaluationArtifact | undefined;
+    let backgroundFirstEvaluation:
+      | LampBackgroundEvaluationArtifact
+      | undefined;
+    if (workflowMode === "background") {
+      if (!backgroundPlan) {
+        throw new Error(
+          "Lamp Background lost its approved cleanup plan before evaluation."
+        );
+      }
+      backgroundFirstEvaluation =
+        await evaluateBackgroundAttemptWithRecovery(
+          input,
+          workflowRunId,
+          1,
+          backgroundPlan,
+          []
+        );
+      finalRenderedPrompt = compileLampBackgroundFinalPrompt(
+        input.renderedPrompt,
+        backgroundPlan,
+        backgroundFirstEvaluation
+      ).rendered;
+    } else {
+      lampFirstEvaluation = await evaluateAttemptWithRecovery(
+        input,
+        workflowRunId,
+        1,
+        []
+      );
+      finalRenderedPrompt = compileLampFinalPrompt(
+        input.renderedPrompt,
+        lampFirstEvaluation
+      ).rendered;
+    }
 
     await runGenerationAttempt(
       input,
       workflowRunId,
       2,
-      finalPrompt.rendered
+      finalRenderedPrompt
     );
-    const effectiveFinal = await finalizeV2WithSync(input, workflowRunId);
+    // The Final holistic evaluation runs BEFORE the sync gate. The spend
+    // dialog promises two judge calls, and a gate kill after a completed
+    // Final generation must not erase the second one (live 2026-07-16:
+    // run_bg01_049's failed repair sealed the run with no judge:2 journal).
+    // The judge therefore sees the Final exactly as generated; a later
+    // Lipsync repair only revises the mouth region under the same URL.
     await enterEvaluationPhaseWithRecovery(input, workflowRunId, 2);
-    await evaluateAttemptWithRecovery(
-      input,
-      workflowRunId,
-      2,
-      firstEvaluation.evalResults
-    );
-    await settleLampExecution(input, workflowRunId, finalPrompt.rendered);
+    if (workflowMode === "background") {
+      await evaluateBackgroundAttemptWithRecovery(
+        input,
+        workflowRunId,
+        2,
+        backgroundPlan!,
+        backgroundFirstEvaluation!.evalResults
+      );
+    } else {
+      await evaluateAttemptWithRecovery(
+        input,
+        workflowRunId,
+        2,
+        lampFirstEvaluation!.evalResults
+      );
+    }
+    const effectiveFinal = await finalizeV2WithSync(input, workflowRunId);
+    if (workflowMode === "background") {
+      await settleBackgroundExecution(
+        input,
+        workflowRunId,
+        finalRenderedPrompt
+      );
+    } else {
+      await settleLampExecution(
+        input,
+        workflowRunId,
+        finalRenderedPrompt
+      );
+    }
     return {
       runId: input.runId,
       executionId: input.executionId,
@@ -155,7 +237,9 @@ export async function durableRelightRun(
     };
   } catch (error) {
     const safeError =
-      error instanceof Error ? error.message : "Durable Lamp execution failed.";
+      error instanceof Error
+        ? error.message
+        : "Durable two-pass execution failed.";
     const failure = await recordExecutionFailure(
       input,
       workflowRunId,
@@ -165,13 +249,37 @@ export async function durableRelightRun(
       await settleLegacyFirstCut(input, workflowRunId);
       return { runId: input.runId, executionId: input.executionId, status: "awaiting_review" };
     }
-    if (failure === "lamp_completed") {
-      const firstEvaluation = await readCompletedEvaluation(input.runId, 1);
-      const finalPrompt = compileLampFinalPrompt(
-        input.renderedPrompt,
-        firstEvaluation
-      );
-      await settleLampExecution(input, workflowRunId, finalPrompt.rendered);
+    if (failure === "two_pass_completed") {
+      if (workflowMode === "background") {
+        const [cleanupPlan, firstEvaluation] = await Promise.all([
+          readBoundBackgroundPlan(input, workflowRunId),
+          readCompletedBackgroundEvaluation(input.runId, 1),
+        ]);
+        const finalPrompt = compileLampBackgroundFinalPrompt(
+          input.renderedPrompt,
+          cleanupPlan,
+          firstEvaluation
+        );
+        await settleBackgroundExecution(
+          input,
+          workflowRunId,
+          finalPrompt.rendered
+        );
+      } else {
+        const firstEvaluation = await readCompletedEvaluation(
+          input.runId,
+          1
+        );
+        const finalPrompt = compileLampFinalPrompt(
+          input.renderedPrompt,
+          firstEvaluation
+        );
+        await settleLampExecution(
+          input,
+          workflowRunId,
+          finalPrompt.rendered
+        );
+      }
       return { runId: input.runId, executionId: input.executionId, status: "awaiting_review" };
     }
     if (failure === "awaiting_review") {
@@ -179,13 +287,50 @@ export async function durableRelightRun(
     }
     throw new Error(
       failure === "user_action_required"
-        ? "Durable Lamp execution paused until its exact spend approval is renewed."
+        ? "Durable two-pass execution paused until its exact spend approval is renewed."
         : failure === "reconcile_required"
-        ? "Durable Lamp execution requires provider reconciliation."
-        : "Durable Lamp execution stopped before a gradeable final artifact was confirmed."
+        ? "Durable two-pass execution requires provider reconciliation."
+        : "Durable two-pass execution stopped before a gradeable final artifact was confirmed."
     );
   }
 }
+
+async function readBoundBackgroundPlan(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<LampBackgroundCleanupPlan> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    !execution.executionId.startsWith("lamp-background:")
+  ) {
+    throw new Error(
+      "Durable run execution no longer owns the approved Lamp Background plan."
+    );
+  }
+  const planOperation = execution.planOperationId
+    ? await storage.getPaidOperation(
+        input.runId,
+        execution.planOperationId
+      )
+    : null;
+  return validateLampBackgroundExecutionBinding({
+    run,
+    execution,
+    planOperation,
+  });
+}
+
+readBoundBackgroundPlan.maxRetries = 2;
 
 interface EffectiveV2 {
   videoUrl: string;
@@ -199,8 +344,20 @@ async function finalizeV2WithSync(
   let checkpoint = await readV2SyncCheckpointStep(input, workflowRunId);
   if (checkpoint.state === "blocked") throw new Error(checkpoint.reason);
   if (checkpoint.state === "completed") {
-    if (!v2SyncPasses(checkpoint.result.postSync)) {
-      throw new Error("The completed Lipsync repair still fails SyncNet.");
+    // Resume/recovery path: the repair already billed and journaled. Fetch
+    // the source baseline only when the absolute bar alone would kill the
+    // run — a quiet-speaker source must re-admit its within-tolerance repair.
+    let verdict = v2SyncVerdict(checkpoint.result.postSync);
+    if (!verdict.pass) {
+      verdict = v2SyncVerdict(
+        checkpoint.result.postSync,
+        await readSourceSyncBaselineStep(input, workflowRunId)
+      );
+    }
+    if (!verdict.pass) {
+      throw new Error(
+        `The completed Lipsync repair still fails SyncNet (${verdict.reason}).`
+      );
     }
     return {
       videoUrl: checkpoint.result.videoUrl,
@@ -216,7 +373,12 @@ async function finalizeV2WithSync(
     return { videoUrl: candidate.videoUrl, audioVerified: true };
   }
   if (checkpoint.state === "unclaimed") {
-    if (v2SyncPasses(candidate.metrics)) {
+    // The effective gate admits the candidate outright: the absolute bar, or
+    // the source-relative bar for footage that cannot meet it. The relative
+    // pass is also the paid-repair skip — when the source is below the
+    // absolute bar and the Final already scores within tolerance of it,
+    // Lipsync-2-Pro has nothing to win and must not bill.
+    if (v2SyncVerdict(candidate.metrics, candidate.sourceSync).pass) {
       return { videoUrl: candidate.videoUrl, audioVerified: true };
     }
     const prepared = await prepareV2LipsyncInputsStep(input, workflowRunId);
@@ -254,8 +416,14 @@ async function finalizeV2WithSync(
       const sealed = await readV2SyncCheckpointStep(input, workflowRunId);
       if (sealed.state === "blocked") throw error;
       if (sealed.state === "completed") {
-        if (!v2SyncPasses(sealed.result.postSync)) {
-          throw new Error("The completed Lipsync repair still fails SyncNet.");
+        const verdict = v2SyncVerdict(
+          sealed.result.postSync,
+          candidate.sourceSync
+        );
+        if (!verdict.pass) {
+          throw new Error(
+            `The completed Lipsync repair still fails SyncNet (${verdict.reason}).`
+          );
         }
         return { videoUrl: sealed.result.videoUrl, audioVerified: true };
       }
@@ -269,8 +437,11 @@ async function finalizeV2WithSync(
       result.outputUrl,
       candidate.metrics
     );
-    if (!v2SyncPasses(finalized.postSync)) {
-      throw new Error("Lipsync-2-Pro output still fails SyncNet.");
+    const verdict = v2SyncVerdict(finalized.postSync, candidate.sourceSync);
+    if (!verdict.pass) {
+      throw new Error(
+        `Lipsync-2-Pro output still fails SyncNet (${verdict.reason}).`
+      );
     }
     return { videoUrl: finalized.videoUrl, audioVerified: true };
   }
@@ -802,23 +973,45 @@ async function prepareAttempt(
   if (!run || !execution || execution.executionId !== input.executionId) {
     throw new Error("Run not found during Lamp preparation.");
   }
+  const workflowMode = workflowModeFromExecutionId(execution.executionId);
+  if (workflowMode === "background") {
+    const planOperation = execution.planOperationId
+      ? await getStorage().getPaidOperation(
+          input.runId,
+          execution.planOperationId
+        )
+      : null;
+    await validateLampBackgroundExecutionBinding({
+      run,
+      execution,
+      planOperation,
+    });
+  }
   try {
     assertVideoGenerationAuthorized(run, iteration);
   } catch (error) {
     // A valid exact Lamp grant means this is an orchestration invariant (for
     // example, a missing prior completion), not something another user click
     // can repair. Only an absent/expired/mismatched Lamp grant is resumable.
-    if (
-      hasReusableLampApproval(
-        run,
-        execution.source,
-        execution.batchId
-      )
-    ) {
+    const reusableApproval =
+      workflowMode === "background"
+        ? hasReusableLampBackgroundApproval(
+            run,
+            execution.source,
+            execution.batchId
+          )
+        : workflowMode === "lamp"
+          ? hasReusableLampApproval(
+              run,
+              execution.source,
+              execution.batchId
+            )
+          : false;
+    if (reusableApproval) {
       throw error;
     }
     throw new Error(
-      `${LAMP_USER_ACTION_REQUIRED_PREFIX}${error instanceof Error ? error.message : "Lamp spend approval must be renewed."}`
+      `${LAMP_USER_ACTION_REQUIRED_PREFIX}${error instanceof Error ? error.message : "Two-pass spend approval must be renewed."}`
     );
   }
   return prepareVideoGenerationStart(input.runId);
@@ -875,23 +1068,59 @@ async function assertGenerationOwner(
   }
 }
 
+/**
+ * Ownership assert for every V2 sync-gate step. The gate historically ran
+ * inside the video_generation phase; since the Final holistic evaluation
+ * moved ahead of it, the gate normally executes inside the evaluating phase.
+ * Accept both so pre-reorder executions resumed mid-flight keep their
+ * ownership guarantees instead of dying on a phase mismatch.
+ */
+async function assertV2FinalizeOwner(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<void> {
+  const current = await getStorage().getRunExecution(input.runId);
+  if (
+    !current ||
+    current.executionId !== input.executionId ||
+    current.inputHash !== runExecutionInputHash(input.renderedPrompt) ||
+    current.workflowRunId !== workflowRunId ||
+    current.status !== "running" ||
+    (current.phase !== "video_generation" && current.phase !== "evaluating") ||
+    current.iteration !== 2
+  ) {
+    throw new Error("Durable run execution no longer owns the V2 sync gate.");
+  }
+}
+
 async function readV2SyncCheckpointStep(
   input: DurableRelightRunInput,
   workflowRunId: string
 ): Promise<V2LipsyncCheckpoint> {
   "use step";
-  await assertGenerationOwner(input, workflowRunId, 2);
+  await assertV2FinalizeOwner(input, workflowRunId);
   return readV2LipsyncCheckpoint(input.runId);
 }
 
 readV2SyncCheckpointStep.maxRetries = 2;
+
+async function readSourceSyncBaselineStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<SyncNetMetrics | null> {
+  "use step";
+  await assertV2FinalizeOwner(input, workflowRunId);
+  return ensureSourceSyncBaseline(input.runId);
+}
+
+readSourceSyncBaselineStep.maxRetries = 2;
 
 async function analyzeV2CandidateStep(
   input: DurableRelightRunInput,
   workflowRunId: string
 ): Promise<V2CandidateSyncCheck> {
   "use step";
-  await assertGenerationOwner(input, workflowRunId, 2);
+  await assertV2FinalizeOwner(input, workflowRunId);
   return analyzeV2Candidate(input.runId);
 }
 
@@ -902,7 +1131,7 @@ async function prepareV2LipsyncInputsStep(
   workflowRunId: string
 ): Promise<PreparedLipsyncInputs> {
   "use step";
-  await assertGenerationOwner(input, workflowRunId, 2);
+  await assertV2FinalizeOwner(input, workflowRunId);
   return prepareV2LipsyncInputs(input.runId);
 }
 
@@ -915,7 +1144,7 @@ async function startV2LipsyncPredictionStep(
   preSync: SyncNetMetrics
 ): Promise<string> {
   "use step";
-  await assertGenerationOwner(input, workflowRunId, 2);
+  await assertV2FinalizeOwner(input, workflowRunId);
   try {
     return await startV2LipsyncPrediction({
       runId: input.runId,
@@ -938,7 +1167,7 @@ async function pollV2LipsyncPredictionStep(
   predictionId: string
 ): Promise<V2LipsyncPollResult> {
   "use step";
-  await assertGenerationOwner(input, workflowRunId, 2);
+  await assertV2FinalizeOwner(input, workflowRunId);
   return pollV2LipsyncPrediction({ runId: input.runId, predictionId });
 }
 
@@ -952,7 +1181,7 @@ async function finalizeV2LipsyncStep(
   preSync: SyncNetMetrics
 ): Promise<LipsyncOperationResult> {
   "use step";
-  await assertGenerationOwner(input, workflowRunId, 2);
+  await assertV2FinalizeOwner(input, workflowRunId);
   return finalizeV2Lipsync({
     runId: input.runId,
     predictionId,
@@ -1107,6 +1336,192 @@ async function evaluateAttemptWithRecovery(
     checkpoint.state === "ambiguous"
       ? `Lamp evaluation ${iteration} has an ambiguous paid operation and requires reconciliation.`
       : `Lamp evaluation ${iteration} could not cross its pre-claim boundary within seven days.`
+  );
+}
+
+async function evaluateBackgroundAttempt(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  cleanupPlan: LampBackgroundCleanupPlan,
+  previousResults: LampBackgroundEvalResult[]
+): Promise<LampBackgroundEvaluationArtifact> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.status !== "running" ||
+    execution.phase !== "evaluating" ||
+    execution.iteration !== iteration ||
+    !execution.executionId.startsWith("lamp-background:")
+  ) {
+    throw new Error(
+      "Durable run execution no longer owns Lamp Background evaluation."
+    );
+  }
+  const planOperation = execution.planOperationId
+    ? await storage.getPaidOperation(
+        input.runId,
+        execution.planOperationId
+      )
+    : null;
+  const boundPlan = await validateLampBackgroundExecutionBinding({
+    run,
+    execution,
+    planOperation,
+  });
+  if (boundPlan.id !== cleanupPlan.id) {
+    throw new Error(
+      "Lamp Background evaluation plan changed after Workflow binding."
+    );
+  }
+  try {
+    return await runLampBackgroundHolisticEvaluation({
+      runId: input.runId,
+      iteration,
+      cleanupPlan: boundPlan,
+      previousResults,
+    });
+  } catch (error) {
+    if (error instanceof PaidOperationAuthorizationError) {
+      throw new Error(`${LAMP_USER_ACTION_REQUIRED_PREFIX}${error.message}`);
+    }
+    throw error;
+  }
+}
+
+evaluateBackgroundAttempt.maxRetries = 0;
+
+type BackgroundEvaluationCheckpoint =
+  | { state: "unclaimed" }
+  | { state: "completed"; result: LampBackgroundEvaluationArtifact }
+  | { state: "ambiguous" };
+
+async function readBackgroundEvaluationCheckpoint(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  cleanupPlanId: string
+): Promise<BackgroundEvaluationCheckpoint> {
+  "use step";
+  const storage = getStorage();
+  const [execution, operation] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getPaidOperation(
+      input.runId,
+      lampBackgroundEvaluationOperationId(iteration)
+    ),
+  ]);
+  if (
+    !execution ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.status !== "running" ||
+    execution.phase !== "evaluating" ||
+    execution.iteration !== iteration ||
+    !execution.executionId.startsWith("lamp-background:")
+  ) {
+    return { state: "ambiguous" };
+  }
+  if (!operation) return { state: "unclaimed" };
+  if (
+    operation.status === "completed" &&
+    isLampBackgroundEvaluationArtifact(operation.result, iteration) &&
+    operation.result.cleanupPlanId === cleanupPlanId
+  ) {
+    return { state: "completed", result: operation.result };
+  }
+  return { state: "ambiguous" };
+}
+
+readBackgroundEvaluationCheckpoint.maxRetries = 2;
+
+async function readBackgroundEvaluationCheckpointWithRecovery(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  cleanupPlanId: string
+): Promise<BackgroundEvaluationCheckpoint> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS; attempt += 1) {
+    try {
+      return await readBackgroundEvaluationCheckpoint(
+        input,
+        workflowRunId,
+        iteration,
+        cleanupPlanId
+      );
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep("5m");
+  }
+  throw (lastError instanceof Error
+    ? lastError
+    : new Error(
+        `Lamp Background evaluation ${iteration} checkpoint could not be read within seven days.`
+      ));
+}
+
+async function evaluateBackgroundAttemptWithRecovery(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  cleanupPlan: LampBackgroundCleanupPlan,
+  previousResults: LampBackgroundEvalResult[]
+): Promise<LampBackgroundEvaluationArtifact> {
+  let checkpoint =
+    await readBackgroundEvaluationCheckpointWithRecovery(
+      input,
+      workflowRunId,
+      iteration,
+      cleanupPlan.id
+    );
+  for (
+    let attempt = 0;
+    checkpoint.state === "unclaimed" &&
+    attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      return await evaluateBackgroundAttempt(
+        input,
+        workflowRunId,
+        iteration,
+        cleanupPlan,
+        previousResults
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        isLampUserActionRequiredError(error)
+      ) {
+        throw error;
+      }
+      checkpoint =
+        await readBackgroundEvaluationCheckpointWithRecovery(
+          input,
+          workflowRunId,
+          iteration,
+          cleanupPlan.id
+        );
+      if (checkpoint.state === "completed") return checkpoint.result;
+      if (checkpoint.state === "ambiguous") throw error;
+      await sleep("5m");
+    }
+  }
+  if (checkpoint.state === "completed") return checkpoint.result;
+  throw new Error(
+    checkpoint.state === "ambiguous"
+      ? `Lamp Background evaluation ${iteration} has an ambiguous paid operation and requires reconciliation.`
+      : `Lamp Background evaluation ${iteration} could not cross its pre-claim boundary within seven days.`
   );
 }
 
@@ -1271,6 +1686,28 @@ async function readCompletedEvaluation(
 
 readCompletedEvaluation.maxRetries = 2;
 
+async function readCompletedBackgroundEvaluation(
+  runId: string,
+  iteration: 1 | 2
+): Promise<LampBackgroundEvaluationArtifact> {
+  "use step";
+  const operation = await getStorage().getPaidOperation(
+    runId,
+    lampBackgroundEvaluationOperationId(iteration)
+  );
+  if (
+    operation?.status !== "completed" ||
+    !isLampBackgroundEvaluationArtifact(operation.result, iteration)
+  ) {
+    throw new Error(
+      `Completed Lamp Background evaluation ${iteration} could not be recovered.`
+    );
+  }
+  return operation.result;
+}
+
+readCompletedBackgroundEvaluation.maxRetries = 2;
+
 async function settleLegacyFirstCut(
   input: DurableRelightRunInput,
   workflowRunId: string
@@ -1288,7 +1725,7 @@ async function settleLegacyFirstCut(
     !execution ||
     execution.executionId !== input.executionId ||
     execution.workflowRunId !== workflowRunId ||
-    execution.executionId.startsWith("lamp:") ||
+    isTwoPassExecutionId(execution.executionId) ||
     execution.renderedPrompt !== input.renderedPrompt ||
     operation?.status !== "completed" ||
     !operation.result ||
@@ -1335,7 +1772,10 @@ async function settleLampExecution(
     (lipsync !== null &&
       (lipsync.status !== "completed" ||
         !isLipsyncOperationResult(lipsync.result) ||
-        !v2SyncPasses(lipsync.result.postSync)))
+        !v2SyncVerdict(
+          lipsync.result.postSync,
+          run?.originalVideo.syncBaseline ?? null
+        ).pass))
   ) {
     throw new Error(
       "Lamp's final artifact and final evaluation are not durably journaled against this execution."
@@ -1346,6 +1786,98 @@ async function settleLampExecution(
 }
 
 settleLampExecution.maxRetries = 4;
+
+async function settleBackgroundExecution(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  finalRenderedPrompt: string
+): Promise<void> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run, firstEvaluation, finalEvaluation, lipsync] =
+    await Promise.all([
+      storage.getRunExecution(input.runId),
+      storage.getRun(input.runId),
+      storage.getPaidOperation(
+        input.runId,
+        lampBackgroundEvaluationOperationId(1)
+      ),
+      storage.getPaidOperation(
+        input.runId,
+        lampBackgroundEvaluationOperationId(2)
+      ),
+      storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+    ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    !execution.executionId.startsWith("lamp-background:") ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    execution.inputHash !== runExecutionInputHash(input.renderedPrompt)
+  ) {
+    throw new Error(
+      "Lamp Background settlement no longer owns its durable execution."
+    );
+  }
+  const planOperation = execution.planOperationId
+    ? await storage.getPaidOperation(
+        input.runId,
+        execution.planOperationId
+      )
+    : null;
+  const cleanupPlan = await validateLampBackgroundExecutionBinding({
+    run,
+    execution,
+    planOperation,
+  });
+  const operation = run.providerOperations?.find(
+    (item) => item.id === videoGenerationOperationId(2)
+  );
+  if (
+    operation?.status !== "completed" ||
+    !operation.result ||
+    !operation.result.audioVerified ||
+    operation.renderedPrompt !== finalRenderedPrompt ||
+    firstEvaluation?.status !== "completed" ||
+    !isLampBackgroundEvaluationArtifact(firstEvaluation.result, 1) ||
+    firstEvaluation.result.cleanupPlanId !== cleanupPlan.id ||
+    finalEvaluation?.status !== "completed" ||
+    !isLampBackgroundEvaluationArtifact(finalEvaluation.result, 2) ||
+    finalEvaluation.result.cleanupPlanId !== cleanupPlan.id ||
+    (lipsync !== null &&
+      (lipsync.status !== "completed" ||
+        !isLipsyncOperationResult(lipsync.result) ||
+        !v2SyncVerdict(
+          lipsync.result.postSync,
+          run.originalVideo.syncBaseline ?? null
+        ).pass))
+  ) {
+    throw new Error(
+      "Lamp Background's Final artifact and both plan-bound evaluations are not durably journaled against this execution."
+    );
+  }
+  const expectedFinalPrompt = compileLampBackgroundFinalPrompt(
+    input.renderedPrompt,
+    cleanupPlan,
+    firstEvaluation.result
+  ).rendered;
+  if (expectedFinalPrompt !== finalRenderedPrompt) {
+    throw new Error(
+      "Lamp Background's Final prompt no longer reproduces from its approved plan and Initial evaluation."
+    );
+  }
+  await settleExecutionRecord(execution, workflowRunId, 2, input.executionId);
+  await setVideoGenerationWorkflowState(
+    input.runId,
+    2,
+    workflowRunId,
+    "completed"
+  );
+}
+
+settleBackgroundExecution.maxRetries = 4;
 
 async function settleExecutionRecord(
   execution: RunExecution,
@@ -1385,7 +1917,7 @@ async function settleExecutionRecord(
 
 type FailureRecord =
   | "legacy_completed"
-  | "lamp_completed"
+  | "two_pass_completed"
   | "awaiting_review"
   | "user_action_required"
   | "failed"
@@ -1415,7 +1947,7 @@ async function recordExecutionFailure(
   if (execution.status === "reconcile_required") return "reconcile_required";
 
   if (
-    input.executionId.startsWith("lamp:") &&
+    isTwoPassExecutionId(input.executionId) &&
     error.startsWith(LAMP_USER_ACTION_REQUIRED_PREFIX)
   ) {
     const candidate: RunExecution = {
@@ -1466,37 +1998,97 @@ async function recordExecutionFailure(
   const first = run?.providerOperations?.find(
     (operation) => operation.id === videoGenerationOperationId(1)
   );
-  const lamp = input.executionId.startsWith("lamp:");
-  if (!lamp && isGradeableVideoGeneration(first)) {
+  const workflowMode = workflowModeFromExecutionId(input.executionId);
+  const twoPass = workflowMode !== "flora";
+  if (!twoPass && isGradeableVideoGeneration(first)) {
     return "legacy_completed";
   }
   const final = run?.providerOperations?.find(
     (operation) => operation.id === videoGenerationOperationId(2)
   );
-  const [finalEvaluation, lipsync] = await Promise.all([
-    storage.getPaidOperation(input.runId, lampEvaluationOperationId(2)),
-    storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
-  ]);
+  const [firstBackgroundEvaluation, finalEvaluation, lipsync] =
+    await Promise.all([
+      workflowMode === "background"
+        ? storage.getPaidOperation(
+            input.runId,
+            lampBackgroundEvaluationOperationId(1)
+          )
+        : Promise.resolve(null),
+      workflowMode === "background"
+        ? storage.getPaidOperation(
+            input.runId,
+            lampBackgroundEvaluationOperationId(2)
+          )
+        : storage.getPaidOperation(
+            input.runId,
+            lampEvaluationOperationId(2)
+          ),
+      storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+    ]);
+  let finalEvaluationComplete =
+    workflowMode === "lamp" &&
+    finalEvaluation?.status === "completed" &&
+    isLampEvaluationArtifact(finalEvaluation.result, 2);
   if (
-    lamp &&
+    workflowMode === "background" &&
+    run &&
+    firstBackgroundEvaluation?.status === "completed" &&
+    isLampBackgroundEvaluationArtifact(
+      firstBackgroundEvaluation.result,
+      1
+    ) &&
+    finalEvaluation?.status === "completed" &&
+    isLampBackgroundEvaluationArtifact(finalEvaluation.result, 2)
+  ) {
+    try {
+      const planOperation = execution.planOperationId
+        ? await storage.getPaidOperation(
+            input.runId,
+            execution.planOperationId
+          )
+        : null;
+      const cleanupPlan = await validateLampBackgroundExecutionBinding({
+        run,
+        execution,
+        planOperation,
+      });
+      const expectedFinalPrompt = compileLampBackgroundFinalPrompt(
+        input.renderedPrompt,
+        cleanupPlan,
+        firstBackgroundEvaluation.result
+      ).rendered;
+      finalEvaluationComplete =
+        firstBackgroundEvaluation.result.cleanupPlanId === cleanupPlan.id &&
+        finalEvaluation.result.cleanupPlanId === cleanupPlan.id &&
+        final?.renderedPrompt === expectedFinalPrompt;
+    } catch {
+      finalEvaluationComplete = false;
+    }
+  }
+  if (
+    twoPass &&
     final?.status === "completed" &&
     final.result &&
     final.result.audioVerified &&
-    finalEvaluation?.status === "completed" &&
-    isLampEvaluationArtifact(finalEvaluation.result, 2) &&
+    finalEvaluationComplete &&
     (lipsync === null ||
       (lipsync.status === "completed" &&
         isLipsyncOperationResult(lipsync.result) &&
-        v2SyncPasses(lipsync.result.postSync)))
+        v2SyncVerdict(
+          lipsync.result.postSync,
+          run?.originalVideo.syncBaseline ?? null
+        ).pass))
   ) {
-    return "lamp_completed";
+    return "two_pass_completed";
   }
 
   const currentEvaluation =
-    lamp && execution.phase === "evaluating"
+    twoPass && execution.phase === "evaluating"
       ? await storage.getPaidOperation(
           input.runId,
-          lampEvaluationOperationId(execution.iteration)
+          workflowMode === "background"
+            ? lampBackgroundEvaluationOperationId(execution.iteration)
+            : lampEvaluationOperationId(execution.iteration)
         )
       : null;
   const evaluationAmbiguous = Boolean(
