@@ -38,6 +38,20 @@ export interface LampIrisGazeMeasurements {
   /** Blink events detected from the eye-aspect-ratio trace. */
   blinkCount: number;
   blinkTimestampsSec: number[];
+  /**
+   * Per-sample non-blink irisY values in sample order (rounded, bounded by
+   * the meter's frame cap). Optional and additive: artifacts measured before
+   * the contact-anchor upgrade lack it and every consumer fails open.
+   */
+  irisYTrace?: number[];
+  /**
+   * The camera-contact anchor for THIS video: the median irisY of its
+   * lens-glance cluster (see lampIrisContactAnchor). "Directly at the
+   * viewer" is not knowable from geometry alone — it depends on where the
+   * camera sat in the recording setup — but a source's own lens glances
+   * define it exactly. Present only when a confident cluster exists.
+   */
+  contactAnchorY?: number;
 }
 
 export interface LampIrisGazeComparison {
@@ -52,6 +66,19 @@ export interface LampIrisGazeComparison {
   blinkDelta: number;
   /** Fraction agreement of candidate blink timestamps with source (±0.25s). */
   blinkTimingMatch: number;
+  /**
+   * Signed distance from the source's measured contact anchor: positive =
+   * the candidate's median gaze rests BELOW the anchor (short of contact),
+   * negative = above it (past contact). Absent when the source has no
+   * measured anchor.
+   */
+  offsetFromContact?: number;
+  /**
+   * Fraction of the candidate's non-blink samples resting within
+   * ±LAMP_IRIS_CONTACT_BAND of the source's contact anchor. Absent when the
+   * source has no anchor or the candidate has no trace.
+   */
+  onContactFraction?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -80,8 +107,43 @@ export function isLampIrisGazeMeasurements(
     Array.isArray(value.blinkTimestampsSec) &&
     (value.blinkTimestampsSec as unknown[]).every(
       (t) => typeof t === "number" && Number.isFinite(t) && t >= 0
-    )
+    ) &&
+    (value.irisYTrace === undefined ||
+      (Array.isArray(value.irisYTrace) &&
+        (value.irisYTrace as unknown[]).length <= 64 &&
+        (value.irisYTrace as unknown[]).every(
+          (y) => typeof y === "number" && Number.isFinite(y)
+        ))) &&
+    (value.contactAnchorY === undefined || finite01(value.contactAnchorY))
   );
+}
+
+/**
+ * Half-width of the contact band around a measured anchor: a candidate gaze
+ * resting within it reads as the same position at the meter's precision.
+ */
+export const LAMP_IRIS_CONTACT_BAND = 0.03;
+
+/**
+ * The camera-contact anchor from one video's own gaze trace. A script-reader
+ * who ever glances at the lens leaves a small cluster of samples lifted well
+ * above the dominant reading anchor; the median of that cluster is where
+ * TRUE contact sits for this exact camera geometry. Deterministic and
+ * fail-open: no confident cluster (never glanced, or the lifted samples
+ * scatter) returns null.
+ */
+export function lampIrisContactAnchor(irisYTrace: number[]): number | null {
+  if (irisYTrace.length < 8) return null;
+  const sorted = [...irisYTrace].sort((a, b) => a - b);
+  const mid = sorted[Math.floor(sorted.length / 2)];
+  // Lifted = meaningfully above (numerically below) the dominant anchor.
+  const lifted = sorted.filter((y) => y <= mid - 0.05);
+  if (lifted.length < 2) return null;
+  // The cluster must be tight; scattered lifted samples are saccade noise.
+  const q1 = lifted[Math.floor((lifted.length - 1) * 0.25)];
+  const q3 = lifted[Math.ceil((lifted.length - 1) * 0.75)];
+  if (q3 - q1 > 0.04) return null;
+  return lifted[Math.floor(lifted.length / 2)];
 }
 
 /**
@@ -112,11 +174,28 @@ export function compareLampIrisGaze(
     candidate.blinkTimestampsSec.length,
     1
   );
+  const anchorY = source.contactAnchorY;
+  const contact =
+    anchorY !== undefined
+      ? {
+          offsetFromContact: candidate.medianIrisY - anchorY,
+          ...(candidate.irisYTrace !== undefined &&
+          candidate.irisYTrace.length > 0
+            ? {
+                onContactFraction:
+                  candidate.irisYTrace.filter(
+                    (y) => Math.abs(y - anchorY) <= LAMP_IRIS_CONTACT_BAND
+                  ).length / candidate.irisYTrace.length,
+              }
+            : {}),
+        }
+      : {};
   return {
     verticalLift: source.medianIrisY - candidate.medianIrisY,
     scanReduction: source.irisXDispersion - candidate.irisXDispersion,
     blinkDelta: candidate.blinkCount - source.blinkCount,
     blinkTimingMatch: matched / denominator,
+    ...contact,
   };
 }
 
@@ -149,6 +228,21 @@ export function renderLampIrisGazeMeasurementBlock(input: {
         ? " — BELOW the near-copy floor: the gaze measurably did not move; gaze-adherence must score this as failed undershoot"
         : ""
     }.`,
+    ...(comparison.offsetFromContact !== undefined
+      ? [
+          `- Measured contact anchor (from the source's own lens-glance frames): y=${fixed(
+            input.source.contactAnchorY ?? NaN
+          )}. Candidate offset from the anchor: ${fixed(
+            Math.abs(comparison.offsetFromContact)
+          )} aperture units ${
+            comparison.offsetFromContact > 0 ? "BELOW" : "ABOVE"
+          } contact${
+            comparison.onContactFraction !== undefined
+              ? `; fraction of candidate frames within the contact band: ${fixed(comparison.onContactFraction)}`
+              : ""
+          }. A gaze parked off the anchor in either direction is not eye contact — judge over- and under-shoot against this number.`,
+        ]
+      : []),
     `- Reading-scan reduction: ${fixed(comparison.scanReduction)} (positive = scanning calmed).`,
     `- Blink delta: ${comparison.blinkDelta >= 0 ? "+" : ""}${comparison.blinkDelta} (contract allows at most ±1); blink timing match ${fixed(comparison.blinkTimingMatch)}.`,
   ].join("\n");
@@ -167,11 +261,23 @@ export function renderLampIrisMeasuredCalibrationCorrection(input: {
   const parts: string[] = [];
   if (comparison.verticalLift < LAMP_IRIS_NEAR_COPY_LIFT_FLOOR) {
     parts.push(
-      `Deterministic measurement of the previous pass: the pupils lifted only ${comparison.verticalLift.toFixed(
+      `Deterministic measurement of the first take: the pupils lifted only ${comparison.verticalLift.toFixed(
         3
       )} aperture units from the source's reading anchor — measurably unchanged. The pupils must move decisively UP and onto the lens: close most of the gap between the source anchor (median iris y=${input.source.medianIrisY.toFixed(
         3
       )}) and the upper-centered aperture position of true lens contact.`
+    );
+  }
+  if (
+    comparison.offsetFromContact !== undefined &&
+    Math.abs(comparison.offsetFromContact) > LAMP_IRIS_CONTACT_BAND
+  ) {
+    const anchor = (input.source.contactAnchorY ?? NaN).toFixed(3);
+    const offset = Math.abs(comparison.offsetFromContact).toFixed(3);
+    parts.push(
+      comparison.offsetFromContact > 0
+        ? `The source itself contains lens-contact frames at median iris y=${anchor}; the first take's median gaze rests ${offset} aperture units below that measured contact position. Raise the pupils to rest at the measured contact position, not short of it.`
+        : `The source itself contains lens-contact frames at median iris y=${anchor}; the first take's median gaze rests ${offset} aperture units above that measured contact position. Lower the pupils to rest at the measured contact position, not past it.`
     );
   }
   if (comparison.scanReduction <= 0 && input.source.irisXDispersion > 0.04) {

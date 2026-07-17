@@ -47,6 +47,7 @@ import sharp from "sharp";
 
 import {
   LAMP_IRIS_GAZE_METER_VERSION,
+  lampIrisContactAnchor,
   type LampIrisGazeMeasurements,
 } from "../lamp-iris-gaze.ts";
 
@@ -54,8 +55,10 @@ import {
 const SAMPLE_FPS_NUM = 18;
 const SAMPLE_FPS_DEN = 5;
 const MAX_FRAMES = 36;
-/** Frames are downscaled to this width before landmarking. */
+/** Pass-1 face location runs on frames downscaled to this width. */
 const FRAME_WIDTH = 640;
+/** Pass-2 native-resolution face crops are capped to this width. */
+const FINE_MAX_WIDTH = 1024;
 /** Hard wall-clock cap for one video, per the fail-open contract. */
 const HARD_CAP_MS = 90_000;
 /** Below this fraction of frames with a face the numbers are noise. */
@@ -393,6 +396,40 @@ interface FrameSample {
   ear: number | null;
 }
 
+interface DetectedFace {
+  mesh: number[][];
+  width: number;
+  height: number;
+}
+
+async function detectFace(
+  human: HumanLike,
+  data: Buffer,
+  width: number,
+  height: number
+): Promise<DetectedFace | null> {
+  const tensor = human.tf.tensor3d(
+    new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+    [height, width, 3],
+    "int32"
+  );
+  let result: { face: HumanFace[] };
+  try {
+    result = await human.detect(tensor);
+  } finally {
+    tensor.dispose();
+  }
+  const face = result.face.find(
+    (f) =>
+      (f.faceScore ?? f.score ?? 0) >= MIN_FACE_SCORE &&
+      Array.isArray(f.meshRaw) &&
+      f.meshRaw.length >= 478
+  );
+  return face?.meshRaw
+    ? { mesh: face.meshRaw, width, height }
+    : null;
+}
+
 async function analyzeFrames(
   human: HumanLike,
   frameDir: string,
@@ -405,36 +442,83 @@ async function analyzeFrames(
       throw new GazeMeterFailure("hard time cap exceeded during landmarking");
     }
     const timestampSec = round((i * SAMPLE_FPS_DEN) / SAMPLE_FPS_NUM, 3);
-    const { data, info } = await sharp(path.join(frameDir, frameFiles[i]))
+    const framePath = path.join(frameDir, frameFiles[i]);
+    // Pass 1: locate the face on a bounded downscale of the native frame.
+    const coarse = await sharp(framePath)
+      .resize({ width: FRAME_WIDTH, withoutEnlargement: true })
       .removeAlpha()
       .raw()
       .toBuffer({ resolveWithObject: true });
-    const tensor = human.tf.tensor3d(
-      new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
-      [info.height, info.width, 3],
-      "int32"
+    const located = await detectFace(
+      human,
+      coarse.data,
+      coarse.info.width,
+      coarse.info.height
     );
-    let result: { face: HumanFace[] };
-    try {
-      result = await human.detect(tensor);
-    } finally {
-      tensor.dispose();
-    }
-
-    const face = result.face.find(
-      (f) =>
-        (f.faceScore ?? f.score ?? 0) >= MIN_FACE_SCORE &&
-        Array.isArray(f.meshRaw) &&
-        f.meshRaw.length >= 478
-    );
-    if (!face || !face.meshRaw) {
+    if (!located) {
       samples.push({ timestampSec, hasFace: false, irisX: null, irisY: null, ear: null });
       continue;
     }
 
-    const mesh = face.meshRaw;
-    const w = info.width;
-    const h = info.height;
+    // Pass 2: re-landmark a native-resolution crop of the located face. The
+    // iris-in-aperture precision scales with eye pixel size — the coarse
+    // pass's ~1 px landmark noise is the exact floor the contact-anchor
+    // math must beat. All ratios are scale-invariant, so a frame that falls
+    // back to the coarse mesh stays consistent with fine-pass frames.
+    let chosen = located;
+    const native = await sharp(framePath).metadata();
+    if (
+      typeof native.width === "number" &&
+      typeof native.height === "number" &&
+      native.width > located.width
+    ) {
+      const scaleX = native.width / located.width;
+      const scaleY = native.height / located.height;
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const point of located.mesh) {
+        const x = point[0] * located.width * scaleX;
+        const y = point[1] * located.height * scaleY;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+      const padX = 0.25 * (maxX - minX);
+      const padY = 0.25 * (maxY - minY);
+      const left = Math.max(0, Math.round(minX - padX));
+      const top = Math.max(0, Math.round(minY - padY));
+      const cropWidth = Math.min(native.width - left, Math.round(maxX - minX + 2 * padX));
+      const cropHeight = Math.min(native.height - top, Math.round(maxY - minY + 2 * padY));
+      if (cropWidth >= 64 && cropHeight >= 64) {
+        let cropPipeline = sharp(framePath).extract({
+          left,
+          top,
+          width: cropWidth,
+          height: cropHeight,
+        });
+        if (cropWidth > FINE_MAX_WIDTH) {
+          cropPipeline = cropPipeline.resize({ width: FINE_MAX_WIDTH });
+        }
+        const fine = await cropPipeline
+          .removeAlpha()
+          .raw()
+          .toBuffer({ resolveWithObject: true });
+        const refined = await detectFace(
+          human,
+          fine.data,
+          fine.info.width,
+          fine.info.height
+        );
+        if (refined) chosen = refined;
+      }
+    }
+
+    const mesh = chosen.mesh;
+    const w = chosen.width;
+    const h = chosen.height;
     const ear =
       (eyeAspectRatio(mesh, EYE_A, w, h) + eyeAspectRatio(mesh, EYE_B, w, h)) / 2;
 
@@ -533,7 +617,9 @@ export async function measureLampIrisGaze(
         "-i",
         videoPath,
         "-vf",
-        `fps=${SAMPLE_FPS_NUM}/${SAMPLE_FPS_DEN},scale=${FRAME_WIDTH}:-2:flags=bicubic`,
+        // Native resolution: pass 2 crops the located face from these frames,
+        // so the extraction must not throw eye pixels away.
+        `fps=${SAMPLE_FPS_NUM}/${SAMPLE_FPS_DEN}`,
         "-frames:v",
         String(MAX_FRAMES),
         "-y",
@@ -576,6 +662,10 @@ export async function measureLampIrisGaze(
     }
     const xs = irisSamples.map((s) => s.irisX);
     const ys = irisSamples.map((s) => s.irisY);
+    // The persisted trace makes the contact anchor and on-contact fraction
+    // replay-stable: every downstream compile reads these exact numbers.
+    const irisYTrace = ys.map((y) => round(y, 4));
+    const contactAnchorY = lampIrisContactAnchor(irisYTrace);
 
     return {
       version: LAMP_IRIS_GAZE_METER_VERSION,
@@ -587,6 +677,10 @@ export async function measureLampIrisGaze(
       irisYDispersion: round(interquartileRange(ys), 4),
       blinkCount: blinks.blinkCount,
       blinkTimestampsSec: blinks.blinkTimestampsSec,
+      irisYTrace,
+      ...(contactAnchorY !== null
+        ? { contactAnchorY: round(contactAnchorY, 4) }
+        : {}),
     };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);

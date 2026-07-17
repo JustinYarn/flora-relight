@@ -124,6 +124,27 @@ Slider-calibration live runs measured ~$2.3–2.4 settled per two-pass run on a
 4. **Batch support** mirrors Beautify's status (single-clip plan-first flow;
    full batch contract not wired).
 
+## Contact anchor — absolute "at the viewer" measurement (2026-07-17)
+
+"Directly at the viewer through the screen" is not a geometric property a
+single video exposes: it depends on where the camera sat relative to the
+screen in that recording setup, and the near-lens difference (~2-5° of gaze)
+is below the noise floor of generic gaze estimators (validated: a
+reading-just-below-lens source measured indistinguishably from camera-contact
+presenters on both Human's gaze bearing and 640px iris landmarks). The
+working answer is **per-clip self-calibration**: a script-reader's own lens
+glances leave a tight lifted cluster in the irisY trace, and
+`lampIrisContactAnchor` takes that cluster's median as THIS setup's true
+contact position. The meter persists `irisYTrace` + `contactAnchorY`
+(optional, additive), the comparison reports signed `offsetFromContact`
+(below = short of contact, above = past it) + `onContactFraction`, the judge
+block carries the numbers, and the pass-2 calibration correction steers to
+the measured position in either direction. No glances → fail-open (the
+mrpas6x9 clip, whose planner said "no baseline contact to break away from",
+correctly measures anchor: none). Precision behind it: two-pass landmarking
+(locate at 640px, re-landmark a native-resolution face crop capped at
+1024px), byte-deterministic and ~3 s/video.
+
 ## Provider content-filter constraint (learned live 2026-07-17)
 
 The provider runs an **asynchronous content filter over the whole prompt
