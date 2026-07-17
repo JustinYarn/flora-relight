@@ -8,6 +8,10 @@ import {
   LAMP_BEAUTIFY_UI_EVAL_DEFS,
 } from "./lamp-beautify-read.ts";
 import {
+  isLampIrisRun,
+  LAMP_IRIS_UI_EVAL_DEFS,
+} from "./lamp-iris-read.ts";
+import {
   isLampBackgroundRun,
   LAMP_BACKGROUND_UI_EVAL_DEFS,
 } from "./lamp-background-read.ts";
@@ -135,6 +139,7 @@ export function isLampRun(run: RunEvalScope): boolean {
 }
 
 export function evalDefsForRun(run: RunEvalScope): EvalDefinition[] {
+  if (isLampIrisRun(run)) return LAMP_IRIS_UI_EVAL_DEFS;
   if (isLampBeautifyRun(run)) return LAMP_BEAUTIFY_UI_EVAL_DEFS;
   if (isLampBackgroundRun(run)) return LAMP_BACKGROUND_UI_EVAL_DEFS;
   return isLampRun(run) ? LAMP_EVAL_DEFS : EVAL_DEFS;

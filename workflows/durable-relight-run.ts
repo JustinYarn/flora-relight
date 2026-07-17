@@ -37,6 +37,22 @@ import {
   validateLampBeautifyExecutionBinding,
 } from "@/lib/server/lamp-beautify-execution";
 import { runLampBeautifyHolisticEvaluation } from "@/lib/server/lamp-beautify-evaluator";
+import {
+  isLampIrisEvaluationArtifact,
+} from "@/lib/lamp-iris-read";
+import {
+  lampIrisEvaluationOperationId,
+} from "@/lib/lamp-iris-operations";
+import type {
+  LampIrisEvalResult,
+  LampIrisEvaluationArtifact,
+} from "@/lib/lamp-iris-evaluation";
+import type { LampIrisPlan } from "@/lib/lamp-iris";
+import { compileLampIrisFinalPrompt } from "@/lib/prompts/lamp-iris";
+import {
+  validateLampIrisExecutionBinding,
+} from "@/lib/server/lamp-iris-execution";
+import { runLampIrisHolisticEvaluation } from "@/lib/server/lamp-iris-evaluator";
 import { runLampHolisticEvaluation } from "@/lib/server/lamp-evaluator";
 import type { PreparedLipsyncInputs } from "@/lib/server/replicate-lipsync";
 import { getStorage } from "@/lib/server/storage";
@@ -73,6 +89,7 @@ import {
   assertVideoGenerationAuthorized,
   hasReusableLampBackgroundApproval,
   hasReusableLampBeautifyApproval,
+  hasReusableLampIrisApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
 import {
@@ -150,6 +167,10 @@ export async function durableRelightRun(
       workflowMode === "beautify"
         ? await readBoundBeautifyPlan(input, workflowRunId)
         : undefined;
+    const irisPlan =
+      workflowMode === "iris"
+        ? await readBoundIrisPlan(input, workflowRunId)
+        : undefined;
     const first = await runGenerationAttempt(
       input,
       workflowRunId,
@@ -177,7 +198,28 @@ export async function durableRelightRun(
     let beautifyFirstEvaluation:
       | LampBeautifyEvaluationArtifact
       | undefined;
-    if (workflowMode === "beautify") {
+    let irisFirstEvaluation:
+      | LampIrisEvaluationArtifact
+      | undefined;
+    if (workflowMode === "iris") {
+      if (!irisPlan) {
+        throw new Error(
+          "Lamp Iris lost its approved gaze-correction plan before evaluation."
+        );
+      }
+      irisFirstEvaluation = await evaluateIrisAttemptWithRecovery(
+        input,
+        workflowRunId,
+        1,
+        irisPlan,
+        []
+      );
+      finalRenderedPrompt = compileLampIrisFinalPrompt(
+        input.renderedPrompt,
+        irisPlan,
+        irisFirstEvaluation
+      ).rendered;
+    } else if (workflowMode === "beautify") {
       if (!beautifyPlan) {
         throw new Error(
           "Lamp Beautify lost its approved enhancement plan before evaluation."
@@ -240,7 +282,15 @@ export async function durableRelightRun(
     // The judge therefore sees the Final exactly as generated; a later
     // Lipsync repair only revises the mouth region under the same URL.
     await enterEvaluationPhaseWithRecovery(input, workflowRunId, 2);
-    if (workflowMode === "beautify") {
+    if (workflowMode === "iris") {
+      await evaluateIrisAttemptWithRecovery(
+        input,
+        workflowRunId,
+        2,
+        irisPlan!,
+        irisFirstEvaluation!.evalResults
+      );
+    } else if (workflowMode === "beautify") {
       await evaluateBeautifyAttemptWithRecovery(
         input,
         workflowRunId,
@@ -265,7 +315,13 @@ export async function durableRelightRun(
       );
     }
     const effectiveFinal = await finalizeV2WithSync(input, workflowRunId);
-    if (workflowMode === "beautify") {
+    if (workflowMode === "iris") {
+      await settleIrisExecution(
+        input,
+        workflowRunId,
+        finalRenderedPrompt
+      );
+    } else if (workflowMode === "beautify") {
       await settleBeautifyExecution(
         input,
         workflowRunId,
@@ -306,7 +362,22 @@ export async function durableRelightRun(
       return { runId: input.runId, executionId: input.executionId, status: "awaiting_review" };
     }
     if (failure === "two_pass_completed") {
-      if (workflowMode === "beautify") {
+      if (workflowMode === "iris") {
+        const [plan, firstEvaluation] = await Promise.all([
+          readBoundIrisPlan(input, workflowRunId),
+          readCompletedIrisEvaluation(input.runId, 1),
+        ]);
+        const finalPrompt = compileLampIrisFinalPrompt(
+          input.renderedPrompt,
+          plan,
+          firstEvaluation
+        );
+        await settleIrisExecution(
+          input,
+          workflowRunId,
+          finalPrompt.rendered
+        );
+      } else if (workflowMode === "beautify") {
         const [plan, firstEvaluation] = await Promise.all([
           readBoundBeautifyPlan(input, workflowRunId),
           readCompletedBeautifyEvaluation(input.runId, 1),
@@ -439,6 +510,43 @@ async function readBoundBeautifyPlan(
 }
 
 readBoundBeautifyPlan.maxRetries = 2;
+
+async function readBoundIrisPlan(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<LampIrisPlan> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    !execution.executionId.startsWith("lamp-iris:")
+  ) {
+    throw new Error(
+      "Durable run execution no longer owns the approved Lamp Iris plan."
+    );
+  }
+  const planOperation = execution.planOperationId
+    ? await storage.getPaidOperation(
+        input.runId,
+        execution.planOperationId
+      )
+    : null;
+  return validateLampIrisExecutionBinding({
+    run,
+    execution,
+    planOperation,
+  });
+}
+
+readBoundIrisPlan.maxRetries = 2;
 
 interface EffectiveV2 {
   videoUrl: string;
@@ -1082,14 +1190,24 @@ async function prepareAttempt(
     throw new Error("Run not found during Lamp preparation.");
   }
   const workflowMode = workflowModeFromExecutionId(execution.executionId);
-  if (workflowMode === "background" || workflowMode === "beautify") {
+  if (
+    workflowMode === "background" ||
+    workflowMode === "beautify" ||
+    workflowMode === "iris"
+  ) {
     const planOperation = execution.planOperationId
       ? await getStorage().getPaidOperation(
           input.runId,
           execution.planOperationId
         )
       : null;
-    if (workflowMode === "beautify") {
+    if (workflowMode === "iris") {
+      await validateLampIrisExecutionBinding({
+        run,
+        execution,
+        planOperation,
+      });
+    } else if (workflowMode === "beautify") {
       await validateLampBeautifyExecutionBinding({
         run,
         execution,
@@ -1110,7 +1228,13 @@ async function prepareAttempt(
     // example, a missing prior completion), not something another user click
     // can repair. Only an absent/expired/mismatched Lamp grant is resumable.
     const reusableApproval =
-      workflowMode === "beautify"
+      workflowMode === "iris"
+        ? hasReusableLampIrisApproval(
+            run,
+            execution.source,
+            execution.batchId
+          )
+        : workflowMode === "beautify"
         ? hasReusableLampBeautifyApproval(
             run,
             execution.source,
@@ -1831,6 +1955,190 @@ async function evaluateBeautifyAttemptWithRecovery(
   );
 }
 
+async function evaluateIrisAttempt(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  plan: LampIrisPlan,
+  previousResults: LampIrisEvalResult[]
+): Promise<LampIrisEvaluationArtifact> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.status !== "running" ||
+    execution.phase !== "evaluating" ||
+    execution.iteration !== iteration ||
+    !execution.executionId.startsWith("lamp-iris:")
+  ) {
+    throw new Error(
+      "Durable run execution no longer owns Lamp Iris evaluation."
+    );
+  }
+  const planOperation = execution.planOperationId
+    ? await storage.getPaidOperation(
+        input.runId,
+        execution.planOperationId
+      )
+    : null;
+  const boundPlan = await validateLampIrisExecutionBinding({
+    run,
+    execution,
+    planOperation,
+  });
+  if (boundPlan.id !== plan.id) {
+    throw new Error(
+      "Lamp Iris evaluation plan changed after Workflow binding."
+    );
+  }
+  try {
+    return await runLampIrisHolisticEvaluation({
+      runId: input.runId,
+      iteration,
+      plan: boundPlan,
+      previousResults,
+    });
+  } catch (error) {
+    if (error instanceof PaidOperationAuthorizationError) {
+      throw new Error(`${LAMP_USER_ACTION_REQUIRED_PREFIX}${error.message}`);
+    }
+    throw error;
+  }
+}
+
+evaluateIrisAttempt.maxRetries = 0;
+
+type IrisEvaluationCheckpoint =
+  | { state: "unclaimed" }
+  | { state: "completed"; result: LampIrisEvaluationArtifact }
+  | { state: "ambiguous" };
+
+async function readIrisEvaluationCheckpoint(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  planId: string
+): Promise<IrisEvaluationCheckpoint> {
+  "use step";
+  const storage = getStorage();
+  const [execution, operation] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getPaidOperation(
+      input.runId,
+      lampIrisEvaluationOperationId(iteration)
+    ),
+  ]);
+  if (
+    !execution ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.status !== "running" ||
+    execution.phase !== "evaluating" ||
+    execution.iteration !== iteration ||
+    !execution.executionId.startsWith("lamp-iris:")
+  ) {
+    return { state: "ambiguous" };
+  }
+  if (!operation) return { state: "unclaimed" };
+  if (
+    operation.status === "completed" &&
+    isLampIrisEvaluationArtifact(operation.result, iteration) &&
+    operation.result.planId === planId
+  ) {
+    return { state: "completed", result: operation.result };
+  }
+  return { state: "ambiguous" };
+}
+
+readIrisEvaluationCheckpoint.maxRetries = 2;
+
+async function readIrisEvaluationCheckpointWithRecovery(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  planId: string
+): Promise<IrisEvaluationCheckpoint> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS; attempt += 1) {
+    try {
+      return await readIrisEvaluationCheckpoint(
+        input,
+        workflowRunId,
+        iteration,
+        planId
+      );
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep("5m");
+  }
+  throw (lastError instanceof Error
+    ? lastError
+    : new Error(
+        `Lamp Iris evaluation ${iteration} checkpoint could not be read within seven days.`
+      ));
+}
+
+async function evaluateIrisAttemptWithRecovery(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  plan: LampIrisPlan,
+  previousResults: LampIrisEvalResult[]
+): Promise<LampIrisEvaluationArtifact> {
+  let checkpoint = await readIrisEvaluationCheckpointWithRecovery(
+    input,
+    workflowRunId,
+    iteration,
+    plan.id
+  );
+  for (
+    let attempt = 0;
+    checkpoint.state === "unclaimed" &&
+    attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      return await evaluateIrisAttempt(
+        input,
+        workflowRunId,
+        iteration,
+        plan,
+        previousResults
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        isLampUserActionRequiredError(error)
+      ) {
+        throw error;
+      }
+      checkpoint = await readIrisEvaluationCheckpointWithRecovery(
+        input,
+        workflowRunId,
+        iteration,
+        plan.id
+      );
+      if (checkpoint.state === "completed") return checkpoint.result;
+      if (checkpoint.state === "ambiguous") throw error;
+      await sleep("5m");
+    }
+  }
+  if (checkpoint.state === "completed") return checkpoint.result;
+  throw new Error(
+    checkpoint.state === "ambiguous"
+      ? `Lamp Iris evaluation ${iteration} has an ambiguous paid operation and requires reconciliation.`
+      : `Lamp Iris evaluation ${iteration} could not cross its pre-claim boundary within seven days.`
+  );
+}
+
 async function recordProviderWorkflowRunning(
   input: DurableRelightRunInput,
   workflowRunId: string,
@@ -2035,6 +2343,28 @@ async function readCompletedBeautifyEvaluation(
 }
 
 readCompletedBeautifyEvaluation.maxRetries = 2;
+
+async function readCompletedIrisEvaluation(
+  runId: string,
+  iteration: 1 | 2
+): Promise<LampIrisEvaluationArtifact> {
+  "use step";
+  const operation = await getStorage().getPaidOperation(
+    runId,
+    lampIrisEvaluationOperationId(iteration)
+  );
+  if (
+    operation?.status !== "completed" ||
+    !isLampIrisEvaluationArtifact(operation.result, iteration)
+  ) {
+    throw new Error(
+      `Completed Lamp Iris evaluation ${iteration} could not be recovered.`
+    );
+  }
+  return operation.result;
+}
+
+readCompletedIrisEvaluation.maxRetries = 2;
 
 async function settleLegacyFirstCut(
   input: DurableRelightRunInput,
@@ -2298,6 +2628,98 @@ async function settleBeautifyExecution(
 }
 
 settleBeautifyExecution.maxRetries = 4;
+
+async function settleIrisExecution(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  finalRenderedPrompt: string
+): Promise<void> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run, firstEvaluation, finalEvaluation, lipsync] =
+    await Promise.all([
+      storage.getRunExecution(input.runId),
+      storage.getRun(input.runId),
+      storage.getPaidOperation(
+        input.runId,
+        lampIrisEvaluationOperationId(1)
+      ),
+      storage.getPaidOperation(
+        input.runId,
+        lampIrisEvaluationOperationId(2)
+      ),
+      storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+    ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    !execution.executionId.startsWith("lamp-iris:") ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    execution.inputHash !== runExecutionInputHash(input.renderedPrompt)
+  ) {
+    throw new Error(
+      "Lamp Iris settlement no longer owns its durable execution."
+    );
+  }
+  const planOperation = execution.planOperationId
+    ? await storage.getPaidOperation(
+        input.runId,
+        execution.planOperationId
+      )
+    : null;
+  const plan = await validateLampIrisExecutionBinding({
+    run,
+    execution,
+    planOperation,
+  });
+  const operation = run.providerOperations?.find(
+    (item) => item.id === videoGenerationOperationId(2)
+  );
+  if (
+    operation?.status !== "completed" ||
+    !operation.result ||
+    !operation.result.audioVerified ||
+    operation.renderedPrompt !== finalRenderedPrompt ||
+    firstEvaluation?.status !== "completed" ||
+    !isLampIrisEvaluationArtifact(firstEvaluation.result, 1) ||
+    firstEvaluation.result.planId !== plan.id ||
+    finalEvaluation?.status !== "completed" ||
+    !isLampIrisEvaluationArtifact(finalEvaluation.result, 2) ||
+    finalEvaluation.result.planId !== plan.id ||
+    (lipsync !== null &&
+      (lipsync.status !== "completed" ||
+        !isLipsyncOperationResult(lipsync.result) ||
+        !v2SyncVerdict(
+          lipsync.result.postSync,
+          run.originalVideo.syncBaseline ?? null
+        ).pass))
+  ) {
+    throw new Error(
+      "Lamp Iris's Final artifact and both plan-bound evaluations are not durably journaled against this execution."
+    );
+  }
+  const expectedFinalPrompt = compileLampIrisFinalPrompt(
+    input.renderedPrompt,
+    plan,
+    firstEvaluation.result
+  ).rendered;
+  if (expectedFinalPrompt !== finalRenderedPrompt) {
+    throw new Error(
+      "Lamp Iris's Final prompt no longer reproduces from its approved plan and Initial evaluation."
+    );
+  }
+  await settleExecutionRecord(execution, workflowRunId, 2, input.executionId);
+  await setVideoGenerationWorkflowState(
+    input.runId,
+    2,
+    workflowRunId,
+    "completed"
+  );
+}
+
+settleIrisExecution.maxRetries = 4;
 
 async function settleExecutionRecord(
   execution: RunExecution,

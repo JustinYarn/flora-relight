@@ -84,6 +84,30 @@ import {
   estimateLampBeautifyPlan,
   estimateLampBeautifyTwoPass,
 } from "@/lib/cost";
+import {
+  lampIrisPlanRequiresGeneration,
+  parseLampIrisPlan,
+  type LampIrisPlan,
+} from "@/lib/lamp-iris";
+import {
+  buildLampIrisEvaluationArtifact,
+  LAMP_IRIS_VISUAL_EVAL_DEFS,
+  type LampIrisEvalId,
+  type LampIrisEvaluationArtifact,
+} from "@/lib/lamp-iris-evaluation";
+import {
+  lampIrisArtifactResultsForRun,
+  lampIrisCompositeForResults,
+  lampIrisPromptForRun,
+} from "@/lib/lamp-iris-read";
+import {
+  compileLampIrisFinalPrompt,
+  initialLampIrisMegaPrompt,
+} from "@/lib/prompts/lamp-iris";
+import {
+  estimateLampIrisPlan,
+  estimateLampIrisTwoPass,
+} from "@/lib/cost";
 import { initialMegaPrompt, nextMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { runWorkflowMode } from "@/lib/workflow-mode";
 import { extractFrames } from "@/lib/frames";
@@ -1279,6 +1303,349 @@ async function runLampBeautifyMockWorkflow(input: {
   );
 }
 
+type MockLampIrisRawResult = {
+  evalId: LampIrisEvalId;
+  score: number;
+  confidence: number;
+  violations: Array<{
+    aspect: string;
+    severity: "critical" | "major" | "minor";
+    description: string;
+    correctionAction?: string;
+    planItemIds?: string[];
+  }>;
+  reasoning: string;
+};
+
+function mockLampIrisEvaluation(
+  irisPlan: LampIrisPlan,
+  iteration: 1 | 2,
+  previous?: LampIrisEvaluationArtifact
+): LampIrisEvaluationArtifact {
+  const correctIds = irisPlan.correct.map((item) => item.id);
+  const initialScores: Partial<Record<LampIrisEvalId, number>> = {
+    "identity-preservation": 97,
+    "gaze-adherence": 66,
+    "gaze-naturalness": 62,
+    "eye-region-fidelity": 90,
+    "motion-lipsync": 95,
+    "outside-eye-fidelity": 96,
+    "background-integrity": 97,
+    "other-people-untouched": 96,
+    "lighting-camera-fidelity": 95,
+    "gaze-temporal-stability": 73,
+  };
+  const finalScores: Partial<Record<LampIrisEvalId, number>> = {
+    "identity-preservation": 98,
+    "gaze-adherence": 95,
+    "gaze-naturalness": 91,
+    "eye-region-fidelity": 94,
+    "motion-lipsync": 97,
+    "outside-eye-fidelity": 97,
+    "background-integrity": 97,
+    "other-people-untouched": 97,
+    "lighting-camera-fidelity": 95,
+    "gaze-temporal-stability": 93,
+  };
+  const results: MockLampIrisRawResult[] =
+    LAMP_IRIS_VISUAL_EVAL_DEFS.map((definition) => {
+      const score =
+        (iteration === 1 ? initialScores : finalScores)[definition.id] ?? 95;
+      const violations: MockLampIrisRawResult["violations"] = [];
+      if (iteration === 1) {
+        if (definition.id === "gaze-adherence") {
+          violations.push({
+            aspect: "approved-gaze-correction-unapplied",
+            severity: "major",
+            description:
+              "The simulated Initial leaves an approved gaze correction effectively unapplied.",
+            correctionAction: "complete-approved-gaze-correction",
+            planItemIds: correctIds,
+          });
+        } else if (definition.id === "gaze-naturalness") {
+          violations.push({
+            aspect: "contact-not-yet-alive",
+            severity: "major",
+            description:
+              "The simulated Initial does not yet read as a living person speaking to the camera.",
+            correctionAction: "repair-eye-naturalness",
+            planItemIds: [],
+          });
+        } else if (definition.id === "gaze-temporal-stability") {
+          violations.push({
+            aspect: "gaze-correction-flicker",
+            severity: "major",
+            description:
+              "The simulated Initial shows the corrected gaze snapping between directions across frames.",
+            correctionAction: "complete-approved-gaze-correction",
+            planItemIds: correctIds,
+          });
+        } else if (definition.id === "eye-region-fidelity") {
+          violations.push({
+            aspect: "sclera-brightening",
+            severity: "minor",
+            description:
+              "The simulated Initial slightly brightens the sclera under the key light.",
+            correctionAction: "remove-unapproved-changes",
+            planItemIds: [],
+          });
+        }
+      }
+      return {
+        evalId: definition.id,
+        score,
+        confidence: iteration === 1 ? 0.88 : 0.93,
+        violations,
+        reasoning:
+          iteration === 1
+            ? `Simulated Initial whole-video evidence for ${definition.id}; no evaluation provider was called.`
+            : `Simulated Final whole-video evidence for ${definition.id}; no evaluation provider was called.`,
+      };
+    });
+  return buildLampIrisEvaluationArtifact({
+    raw: { results },
+    plan: irisPlan,
+    iteration,
+    audioVerified: true,
+    previousResults: previous?.evalResults,
+    costUsd: 0,
+  });
+}
+
+/**
+ * Zero-cost Lamp Iris rehearsal. It uses the production plan,
+ * evaluator-artifact, and deterministic prompt compiler contracts, while the
+ * generated mock assets retain neutral source pixels so a gaze-correction
+ * rehearsal can never masquerade as a real eye-contact edit.
+ */
+async function runLampIrisMockWorkflow(input: {
+  runId: string;
+  original: VideoAsset;
+  irisPlan: LampIrisPlan;
+  instant: boolean;
+  pace: (minMs?: number, maxMs?: number) => Promise<void>;
+}): Promise<void> {
+  const { runId, original, irisPlan, instant, pace } = input;
+  const plan = parseLampIrisPlan(irisPlan);
+  if (plan.approval.status !== "approved") {
+    throw new Error(
+      "Lamp Iris mock execution requires an approved gaze plan."
+    );
+  }
+  if (plan.runId !== runId) {
+    throw new Error(
+      "Lamp Iris mock execution requires a gaze plan bound to this run."
+    );
+  }
+  if (!lampIrisPlanRequiresGeneration(plan)) {
+    const current = getRun(runId);
+    if (
+      current?.status !== "awaiting-review" ||
+      current.finalVideo?.kind !== "final" ||
+      current.finalVideo.url !== original.url
+    ) {
+      throw new Error(
+        "Approved exceptional no-op plans must be materialized as the exact source before the mock engine is invoked."
+      );
+    }
+    setNode(runId, "plan", "succeeded", "exceptional no-op approved");
+    setNode(runId, "initial", "skipped", "generation not authorized");
+    setNode(runId, "critique", "skipped", "generation not authorized");
+    setNode(runId, "final", "skipped", "exact source delivered");
+    setNode(runId, "review", "running", "awaiting your human grade");
+    log(
+      runId,
+      "info",
+      "Lamp Iris exceptional no-op preserved: the exact source remains the final and no generation was dispatched.",
+      "review"
+    );
+    return;
+  }
+
+  const providers = getProviders("mock", { instant });
+  const planningEstimate = estimateLampIrisPlan();
+  const correctionEstimate = estimateLampIrisTwoPass(original.durationSec);
+  const estimate = {
+    totalUsd: planningEstimate.totalUsd + correctionEstimate.totalUsd,
+    items: [...planningEstimate.items, ...correctionEstimate.items],
+  };
+  const encode = (iteration: number) =>
+    encodeScenarioIteration(original.id, iteration);
+
+  mutateRun(runId, (run) => {
+    run.live = false;
+    run.irisPlan = plan;
+    run.iterations = [];
+    run.cost = {
+      estimatedUsd: estimate.totalUsd,
+      actualUsd: 0,
+      items: estimate.items.map((item) => ({
+        label: item.label,
+        usd: item.usd,
+        estimated: true,
+      })),
+    };
+    delete run.bestIterationIndex;
+    delete run.finalVideo;
+    delete run.fallback;
+  });
+
+  setNode(runId, "plan", "running");
+  await pace(80, 180);
+  setNode(
+    runId,
+    "plan",
+    "succeeded",
+    `${plan.correct.length} correct · ${plan.declined.length} declined · ${plan.uncertain.length} uncertain`
+  );
+  log(
+    runId,
+    "info",
+    "Human-approved gaze plan locked. Declined, uncertain, and unlisted content remain protected.",
+    "plan"
+  );
+
+  setNode(runId, "initial", "running", "generation 1 of 2");
+  const initialPrompt = initialLampIrisMegaPrompt(plan);
+  const initialPresentationPrompt = lampIrisPromptForRun(initialPrompt);
+  mutateRun(runId, (run) => {
+    run.iterations.push({
+      index: 1,
+      megaPrompt: initialPresentationPrompt,
+      beforeFrames: [],
+      afterFrames: [],
+      evalResults: [],
+      status: "running",
+    });
+  });
+  const initialGenerated = await providers.videoGen.generate({
+    originalVideo: original,
+    megaPrompt: initialPresentationPrompt,
+    seed: 133744,
+    iteration: encode(1),
+  });
+  const initialVideo: VideoAsset = {
+    ...initialGenerated.video,
+    url: original.url,
+    label: "Lamp Iris Initial — simulated gaze correction",
+    simulatedFilter: "none",
+  };
+  patchIteration(runId, 1, (iteration) => {
+    iteration.generatedVideo = initialVideo;
+  });
+  setNode(runId, "initial", "succeeded", "simulated Initial saved");
+
+  setNode(runId, "critique", "running", "whole-video plan check");
+  await pace(180, 340);
+  const initialArtifact = mockLampIrisEvaluation(plan, 1);
+  const initialResults = lampIrisArtifactResultsForRun(
+    initialArtifact,
+    plan
+  );
+  const initialComposite = lampIrisCompositeForResults(initialResults);
+  if (!initialComposite || initialComposite.passed) {
+    throw new Error(
+      "Lamp Iris mock Initial must retain its intentional gaze-gate failure."
+    );
+  }
+  patchIteration(runId, 1, (iteration) => {
+    iteration.evalResults = initialResults;
+    iteration.composite = initialComposite;
+    iteration.status = "failed";
+  });
+  const corrections = initialArtifact.evalResults.flatMap((result) =>
+    result.violations.filter((violation) => violation.correction)
+  ).length;
+  setNode(
+    runId,
+    "critique",
+    "succeeded",
+    `${corrections} plan-bound corrections compiled`
+  );
+  log(
+    runId,
+    "warn",
+    "The simulated Initial failed gaze gates. Only structured corrections tied to approved catalog items will enter Final.",
+    "critique"
+  );
+
+  setNode(runId, "final", "running", "generation 2 of 2");
+  const finalPrompt = compileLampIrisFinalPrompt(
+    initialPrompt.rendered,
+    plan,
+    initialArtifact
+  );
+  if (finalPrompt.corrections.length === 0) {
+    throw new Error(
+      "Lamp Iris mock Final requires at least one approved plan-bound correction."
+    );
+  }
+  const finalPresentationPrompt = lampIrisPromptForRun(finalPrompt);
+  mutateRun(runId, (run) => {
+    run.iterations.push({
+      index: 2,
+      megaPrompt: finalPresentationPrompt,
+      beforeFrames: [],
+      afterFrames: [],
+      evalResults: [],
+      status: "running",
+    });
+  });
+  const finalGenerated = await providers.videoGen.generate({
+    originalVideo: original,
+    megaPrompt: finalPresentationPrompt,
+    seed: 133744,
+    iteration: encode(2),
+  });
+  const finalGeneratedVideo: VideoAsset = {
+    ...finalGenerated.video,
+    url: original.url,
+    label: "Lamp Iris Final — simulated gaze correction",
+    simulatedFilter: "none",
+  };
+  const finalArtifact = mockLampIrisEvaluation(plan, 2, initialArtifact);
+  const finalResults = lampIrisArtifactResultsForRun(finalArtifact, plan);
+  const finalComposite = lampIrisCompositeForResults(finalResults);
+  if (!finalComposite?.passed) {
+    throw new Error(
+      "Lamp Iris mock Final must pass every gaze and preservation gate."
+    );
+  }
+  patchIteration(runId, 2, (iteration) => {
+    iteration.generatedVideo = finalGeneratedVideo;
+    iteration.evalResults = finalResults;
+    iteration.composite = finalComposite;
+    iteration.status = "ungraded";
+  });
+  setNode(
+    runId,
+    "final",
+    "succeeded",
+    finalComposite?.passed ? "simulated Final passed" : "simulated Final saved"
+  );
+
+  const finalVideo: VideoAsset = {
+    ...finalGeneratedVideo,
+    id: uid("video"),
+    kind: "final",
+    hasAudio: original.hasAudio,
+    label: original.hasAudio
+      ? "Lamp Iris Final — source audio restored"
+      : "Lamp Iris Final — source silence preserved",
+  };
+  setNode(runId, "review", "running", "awaiting your blind human grade");
+  mutateRun(runId, (run) => {
+    run.finalVideo = finalVideo;
+    run.status = "awaiting-review";
+  });
+  log(
+    runId,
+    "info",
+    "Lamp Iris demo complete: Initial failed, approved plan-bound corrections drove Final, and the saved Final evaluation is ready for blind-grade reveal. Actual provider spend: $0.00.",
+    "review"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The engine
 // ---------------------------------------------------------------------------
@@ -1305,6 +1672,32 @@ export async function runWorkflow(
     throw new Error(
       "Live browser execution is disabled. Durable server Workflows own all provider dispatch."
     );
+  }
+  if (workflowMode === "iris") {
+    try {
+      if (!run0.irisPlan) {
+        throw new Error(
+          "Lamp Iris mock execution cannot start without a gaze plan."
+        );
+      }
+      await runLampIrisMockWorkflow({
+        runId,
+        original,
+        irisPlan: run0.irisPlan,
+        instant,
+        pace,
+      });
+    } catch (error) {
+      log(runId, "error", `Lamp Iris demo error: ${errText(error)}`);
+      mutateRun(runId, (run) => {
+        run.status = "failed";
+        for (const state of Object.values(run.nodeStates)) {
+          if (state.status === "running") state.status = "failed";
+          if (state.status === "queued") state.status = "idle";
+        }
+      });
+    }
+    return;
   }
   if (workflowMode === "beautify") {
     try {

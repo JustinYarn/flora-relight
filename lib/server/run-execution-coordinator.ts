@@ -27,6 +27,16 @@ import { compileLampBeautifyFinalPrompt } from "@/lib/prompts/lamp-beautify";
 import {
   validateLampBeautifyPlanBinding,
 } from "@/lib/server/lamp-beautify-execution";
+import {
+  isLampIrisEvaluationArtifact,
+} from "@/lib/lamp-iris-read";
+import {
+  lampIrisEvaluationOperationId,
+} from "@/lib/lamp-iris-operations";
+import { compileLampIrisFinalPrompt } from "@/lib/prompts/lamp-iris";
+import {
+  validateLampIrisPlanBinding,
+} from "@/lib/server/lamp-iris-execution";
 import { getStorage } from "@/lib/server/storage";
 import { runExecutionInputHash } from "@/lib/server/run-execution-input";
 import { requeueLampExecutionAfterApproval } from "@/lib/server/run-execution-resume";
@@ -35,6 +45,7 @@ import {
   hasReusableFirstCutApproval,
   hasReusableLampBackgroundApproval,
   hasReusableLampBeautifyApproval,
+  hasReusableLampIrisApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
@@ -232,6 +243,56 @@ export async function repairCompletedRunExecution(
         finalEvaluation?.status === "completed" &&
         isLampBeautifyEvaluationArtifact(finalEvaluation.result, 2) &&
         finalEvaluation.result.planId === beautifyPlan.id;
+    } else if (workflowMode === "iris") {
+      const [planOperation, firstEvaluation, finalEvaluation] =
+        await Promise.all([
+          execution.planOperationId
+            ? storage.getPaidOperation(
+                input.runId,
+                execution.planOperationId
+              )
+            : Promise.resolve(null),
+          storage.getPaidOperation(
+            input.runId,
+            lampIrisEvaluationOperationId(1)
+          ),
+          storage.getPaidOperation(
+            input.runId,
+            lampIrisEvaluationOperationId(2)
+          ),
+        ]);
+      let irisPlan;
+      try {
+        irisPlan = await validateLampIrisPlanBinding({
+          run,
+          planOperation,
+          planOperationId: execution.planOperationId,
+          approvedPlanHash: execution.approvedPlanHash,
+          renderedPrompt: execution.renderedPrompt,
+        });
+      } catch {
+        return execution;
+      }
+      if (
+        firstEvaluation?.status !== "completed" ||
+        !isLampIrisEvaluationArtifact(firstEvaluation.result, 1) ||
+        firstEvaluation.result.planId !== irisPlan.id
+      ) {
+        return execution;
+      }
+      try {
+        expectedPrompt = compileLampIrisFinalPrompt(
+          input.renderedPrompt,
+          irisPlan,
+          firstEvaluation.result
+        ).rendered;
+      } catch {
+        return execution;
+      }
+      finalEvaluationComplete =
+        finalEvaluation?.status === "completed" &&
+        isLampIrisEvaluationArtifact(finalEvaluation.result, 2) &&
+        finalEvaluation.result.planId === irisPlan.id;
     }
     // The Final holistic evaluation now runs BEFORE the sync gate, so a
     // completed final evaluation no longer implies the gate passed. Any
@@ -447,11 +508,17 @@ export async function enqueueRunExecution(
               input.source,
               input.batchId
             )
-          : hasReusableFirstCutApproval(
-            run,
-            input.source === "batch" ? "batch" : "single",
-            input.batchId
-          );
+          : workflowMode === "iris"
+            ? hasReusableLampIrisApproval(
+                run,
+                input.source,
+                input.batchId
+              )
+            : hasReusableFirstCutApproval(
+              run,
+              input.source === "batch" ? "batch" : "single",
+              input.batchId
+            );
   if (!reusableApproval) {
     throw new Error(
       "The durable spend approval is expired or does not match this execution and canonical source."

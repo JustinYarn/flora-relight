@@ -5,6 +5,7 @@ import type { Iteration, Run } from "@/lib/types";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { isLampBackgroundRun } from "@/lib/lamp-background-read";
 import { isLampBeautifyRun } from "@/lib/lamp-beautify-read";
+import { isLampIrisRun } from "@/lib/lamp-iris-read";
 
 type StageState = "idle" | "active" | "done" | "failed" | "skipped";
 
@@ -27,6 +28,14 @@ const BEAUTIFY_STAGES = [
   { id: "plan", label: "Enhancement plan" },
   { id: "initial", label: "Initial video" },
   { id: "critique", label: "Touch-up critique" },
+  { id: "final", label: "Final video" },
+  { id: "grade", label: "Your grade" },
+] as const;
+
+const IRIS_STAGES = [
+  { id: "plan", label: "Gaze plan" },
+  { id: "initial", label: "Initial video" },
+  { id: "critique", label: "Contact critique" },
   { id: "final", label: "Final video" },
   { id: "grade", label: "Your grade" },
 ] as const;
@@ -62,7 +71,8 @@ function stateForBackgroundNode(
   if (
     nodeId === "plan" &&
     (run.backgroundCleanupPlan?.approval.status === "draft" ||
-      run.beautifyPlan?.approval.status === "draft")
+      run.beautifyPlan?.approval.status === "draft" ||
+      run.irisPlan?.approval.status === "draft")
   ) {
     return "active";
   }
@@ -78,13 +88,16 @@ function stateForBackgroundNode(
  * not every engine node: v1, one holistic critique, v2, then human grade.
  */
 export function WorkflowRail({ run }: { run: Run }) {
+  const iris = isLampIrisRun(run);
   const beautify = isLampBeautifyRun(run);
-  const background = isLampBackgroundRun(run) || beautify;
-  const stages = beautify
-    ? BEAUTIFY_STAGES
-    : background
-      ? BACKGROUND_STAGES
-      : LAMP_STAGES;
+  const background = isLampBackgroundRun(run) || beautify || iris;
+  const stages = iris
+    ? IRIS_STAGES
+    : beautify
+      ? BEAUTIFY_STAGES
+      : background
+        ? BACKGROUND_STAGES
+        : LAMP_STAGES;
   const initial =
     run.iterations.find((iteration) => iteration.index === 1) ?? run.iterations[0];
   const final =
@@ -137,7 +150,13 @@ export function WorkflowRail({ run }: { run: Run }) {
   return (
     <nav
       aria-label={`${
-        beautify ? "Lamp Beautify" : background ? "Lamp Background" : "Lamp"
+        iris
+          ? "Lamp Iris"
+          : beautify
+            ? "Lamp Beautify"
+            : background
+              ? "Lamp Background"
+              : "Lamp"
       } progress`}
     >
       <p className="text-2xs tabular-nums text-faint">

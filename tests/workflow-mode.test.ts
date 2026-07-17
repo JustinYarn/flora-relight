@@ -4,9 +4,11 @@ import test from "node:test";
 import {
   DEFAULT_WORKFLOW_MODE,
   floraRetiredForNewWork,
+  isTwoPassWorkflowMode,
   parseWorkflowMode,
   runHasStartedWork,
   runWorkflowMode,
+  workflowModeFromExecutionId,
   workflowModeLabel,
 } from "../lib/workflow-mode.ts";
 import {
@@ -24,17 +26,27 @@ test("workflow mode accepts the current mode plus both historical product modes"
   assert.equal(parseWorkflowMode("flora"), "flora");
   assert.equal(parseWorkflowMode("lamp"), "lamp");
   assert.equal(parseWorkflowMode("background"), "background");
+  assert.equal(parseWorkflowMode("iris"), "iris");
   assert.equal(parseWorkflowMode("live"), null);
   assert.equal(parseWorkflowMode(undefined), null);
 });
 
-test("new browser selections default to Lamp Beautify and retain historical labels", () => {
-  assert.equal(DEFAULT_WORKFLOW_MODE, "beautify");
+test("new browser selections default to Lamp Iris and retain historical labels", () => {
+  assert.equal(DEFAULT_WORKFLOW_MODE, "iris");
   assert.equal(RELIGHT_WORKFLOW.id, workflowForMode("beautify").id);
   assert.equal(workflowModeLabel("flora"), "Flora");
   assert.equal(workflowModeLabel("lamp"), "Lamp");
   assert.equal(workflowModeLabel("background"), "Lamp Background");
   assert.equal(workflowModeLabel("beautify"), "Lamp Beautify");
+  assert.equal(workflowModeLabel("iris"), "Lamp Iris");
+});
+
+test("Lamp Iris joins the fixed two-pass plumbing end to end", () => {
+  assert.equal(isTwoPassWorkflowMode("iris"), true);
+  assert.equal(workflowModeFromExecutionId("lamp-iris:run-x"), "iris");
+  assert.equal(workflowModeFromExecutionId("lamp-iris-batch:batch-x"), "iris");
+  assert.equal(runWorkflowMode({ workflowId: "lamp-iris-v1" }), "iris");
+  assert.equal(workflowForMode("iris").id, "lamp-iris-v1");
 });
 
 test("Lamp Background graph is the approved plan-to-blind-grade sequence", () => {

@@ -30,6 +30,11 @@ import {
   LAMP_BEAUTIFY_UI_EVAL_DEFS,
 } from "../../lib/lamp-beautify-read.ts";
 import {
+  isLampIrisRun,
+  lampIrisCompositeForResults,
+  LAMP_IRIS_UI_EVAL_DEFS,
+} from "../../lib/lamp-iris-read.ts";
+import {
   isLampBackgroundRun,
   lampBackgroundCompositeForResults,
   LAMP_BACKGROUND_UI_EVAL_DEFS,
@@ -93,11 +98,19 @@ export function isGradeable(run: Run): boolean {
     run.beautifyPlan.decision === "exceptional-no-op" &&
     run.status === "awaiting-review" &&
     v?.url === run.originalVideo.url;
+  const approvedIrisNoOp =
+    isLampIrisRun(run) &&
+    run.irisPlan?.approval.status === "approved" &&
+    run.irisPlan.runId === run.id &&
+    run.irisPlan.decision === "exceptional-no-op" &&
+    run.status === "awaiting-review" &&
+    v?.url === run.originalVideo.url;
   return (
     (!run.serverExecution || run.serverExecution.status === "awaiting_review") &&
     (serverVerifiedArtifact ||
       approvedBackgroundNoOp ||
-      approvedBeautifyNoOp) &&
+      approvedBeautifyNoOp ||
+      approvedIrisNoOp) &&
     v !== undefined &&
     !v.simulatedFilter
   );
@@ -106,7 +119,12 @@ export function isGradeable(run: Run): boolean {
 /** Lamp's human grade and comparison target is strictly v2. */
 export function finalLampIteration(run: Run): Iteration | undefined {
   const second = run.iterations.find((iteration) => iteration.index === 2);
-  if (isLampRun(run) || isLampBackgroundRun(run) || isLampBeautifyRun(run)) {
+  if (
+    isLampRun(run) ||
+    isLampBackgroundRun(run) ||
+    isLampBeautifyRun(run) ||
+    isLampIrisRun(run)
+  ) {
     return second;
   }
   // Legacy Flora records keep their historical fallback behavior.
@@ -132,14 +150,22 @@ export function needsLampHumanGrade(run: Run): boolean {
     run.beautifyPlan.runId === run.id &&
     run.beautifyPlan.decision === "exceptional-no-op" &&
     run.status === "awaiting-review";
+  const irisNoOp =
+    isLampIrisRun(run) &&
+    run.irisPlan?.approval.status === "approved" &&
+    run.irisPlan.runId === run.id &&
+    run.irisPlan.decision === "exceptional-no-op" &&
+    run.status === "awaiting-review";
   return (
     ((run.serverExecution !== undefined &&
       (run.serverExecution.executionId.startsWith("lamp:") ||
         run.serverExecution.executionId.startsWith("lamp-background:") ||
-        run.serverExecution.executionId.startsWith("lamp-beautify:")) &&
+        run.serverExecution.executionId.startsWith("lamp-beautify:") ||
+        run.serverExecution.executionId.startsWith("lamp-iris:")) &&
       run.serverExecution.status === "awaiting_review") ||
       backgroundNoOp ||
-      beautifyNoOp) &&
+      beautifyNoOp ||
+      irisNoOp) &&
     run.humanGrade === undefined
   );
 }
@@ -254,7 +280,8 @@ export function evalDefsForRuns(runs: Run[]): EvalDefinition[] {
       (run) =>
         !isLampRun(run) &&
         !isLampBackgroundRun(run) &&
-        !isLampBeautifyRun(run)
+        !isLampBeautifyRun(run) &&
+        !isLampIrisRun(run)
     )
       ? [EVAL_DEFS]
       : []),
@@ -264,6 +291,9 @@ export function evalDefsForRuns(runs: Run[]): EvalDefinition[] {
       : []),
     ...(runs.some((run) => isLampBeautifyRun(run))
       ? [LAMP_BEAUTIFY_UI_EVAL_DEFS]
+      : []),
+    ...(runs.some((run) => isLampIrisRun(run))
+      ? [LAMP_IRIS_UI_EVAL_DEFS]
       : []),
   ];
   const definitions = new Map<string, EvalDefinition>();
@@ -346,6 +376,9 @@ export function aiPassRatePct(gradedRuns: Run[]): number | undefined {
   const scored = gradedRuns
     .map((run) => {
       const final = finalLampIteration(run);
+      if (isLampIrisRun(run)) {
+        return lampIrisCompositeForResults(final?.evalResults ?? []);
+      }
       if (isLampBeautifyRun(run)) {
         return lampBeautifyCompositeForResults(final?.evalResults ?? []);
       }

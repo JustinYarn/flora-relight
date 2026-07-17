@@ -23,6 +23,7 @@ import {
   hasReusableFirstCutApproval,
   hasReusableLampBackgroundApproval,
   hasReusableLampBeautifyApproval,
+  hasReusableLampIrisApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
 import {
@@ -39,6 +40,13 @@ import {
 } from "@/lib/lamp-beautify";
 import { lampBeautifyPlanOperationId } from "@/lib/lamp-beautify-operations";
 import { initialLampBeautifyMegaPrompt } from "@/lib/prompts/lamp-beautify";
+import {
+  hashLampIrisPlan,
+  lampIrisPlanRequiresGeneration,
+  parseLampIrisPlan,
+} from "@/lib/lamp-iris";
+import { lampIrisPlanOperationId } from "@/lib/lamp-iris-operations";
+import { initialLampIrisMegaPrompt } from "@/lib/prompts/lamp-iris";
 import {
   runWorkflowMode,
   workflowModeFromExecutionId,
@@ -91,7 +99,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       (current.executionId !== `first-cut:${body.runId}` &&
         current.executionId !== `lamp:${body.runId}` &&
         current.executionId !== `lamp-background:${body.runId}` &&
-        current.executionId !== `lamp-beautify:${body.runId}`))
+        current.executionId !== `lamp-beautify:${body.runId}` &&
+        current.executionId !== `lamp-iris:${body.runId}`))
   ) {
     return NextResponse.json(
       { error: "This run belongs to a different durable execution." },
@@ -129,9 +138,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       ? hasReusableLampBackgroundApproval(run)
       : workflowMode === "beautify"
         ? hasReusableLampBeautifyApproval(run)
-        : workflowMode === "lamp"
-          ? hasReusableLampApproval(run)
-          : hasReusableFirstCutApproval(run, "single");
+        : workflowMode === "iris"
+          ? hasReusableLampIrisApproval(run)
+          : workflowMode === "lamp"
+            ? hasReusableLampApproval(run)
+            : hasReusableFirstCutApproval(run, "single");
   if ((!current || current.status === "queued") && !reusableApproval) {
     return NextResponse.json(
       {
@@ -177,9 +188,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         ? `lamp-background:${body.runId}`
         : workflowMode === "beautify"
           ? `lamp-beautify:${body.runId}`
-          : workflowMode === "lamp"
-            ? `lamp:${body.runId}`
-            : `first-cut:${body.runId}`);
+          : workflowMode === "iris"
+            ? `lamp-iris:${body.runId}`
+            : workflowMode === "lamp"
+              ? `lamp:${body.runId}`
+              : `first-cut:${body.runId}`);
     let renderedPrompt = current?.renderedPrompt;
     let planOperationId = current?.planOperationId;
     let approvedPlanHash = current?.approvedPlanHash;
@@ -267,6 +280,46 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       renderedPrompt = initialLampBeautifyMegaPrompt(beautifyPlan).rendered;
       planOperationId = lampBeautifyPlanOperationId();
       approvedPlanHash = await hashLampBeautifyPlan(beautifyPlan);
+    }
+    if (workflowMode === "iris" && !current) {
+      let irisPlan: ReturnType<typeof parseLampIrisPlan>;
+      try {
+        irisPlan = parseLampIrisPlan(run.irisPlan);
+      } catch {
+        return NextResponse.json(
+          {
+            error:
+              "Lamp Iris recovery requires a valid approved gaze plan for this source.",
+          },
+          {
+            status: 409,
+            headers: {
+              "Cache-Control": "private, no-store, max-age=0",
+            },
+          }
+        );
+      }
+      if (
+        irisPlan.approval.status !== "approved" ||
+        irisPlan.runId !== run.id ||
+        !lampIrisPlanRequiresGeneration(irisPlan)
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "Lamp Iris recovery requires the exact approved gaze plan for this source.",
+          },
+          {
+            status: 409,
+            headers: {
+              "Cache-Control": "private, no-store, max-age=0",
+            },
+          }
+        );
+      }
+      renderedPrompt = initialLampIrisMegaPrompt(irisPlan).rendered;
+      planOperationId = lampIrisPlanOperationId();
+      approvedPlanHash = await hashLampIrisPlan(irisPlan);
     }
     const adopted = await enqueueRunExecution({
       runId: body.runId,

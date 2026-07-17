@@ -1,28 +1,32 @@
 import type { Run, WorkflowMode } from "@/lib/types";
 
-/** This branch focuses on the touch-up method, so Beautify is the default. */
-export const DEFAULT_WORKFLOW_MODE: WorkflowMode = "beautify";
+/** This branch focuses on the eye-contact method, so Iris is the default. */
+export const DEFAULT_WORKFLOW_MODE: WorkflowMode = "iris";
 export const LAMP_BACKGROUND_EXECUTION_PREFIX = "lamp-background:";
 export const LAMP_BACKGROUND_BATCH_EXECUTION_PREFIX =
   "lamp-background-batch:";
 export const LAMP_BEAUTIFY_EXECUTION_PREFIX = "lamp-beautify:";
 export const LAMP_BEAUTIFY_BATCH_EXECUTION_PREFIX = "lamp-beautify-batch:";
+export const LAMP_IRIS_EXECUTION_PREFIX = "lamp-iris:";
+export const LAMP_IRIS_BATCH_EXECUTION_PREFIX = "lamp-iris-batch:";
 
 export function parseWorkflowMode(value: unknown): WorkflowMode | null {
   return value === "flora" ||
     value === "lamp" ||
     value === "background" ||
-    value === "beautify"
+    value === "beautify" ||
+    value === "iris"
     ? value
     : null;
 }
 
 export function workflowModeLabel(
   mode: WorkflowMode
-): "Flora" | "Lamp" | "Lamp Background" | "Lamp Beautify" {
+): "Flora" | "Lamp" | "Lamp Background" | "Lamp Beautify" | "Lamp Iris" {
   if (mode === "flora") return "Flora";
   if (mode === "lamp") return "Lamp";
   if (mode === "background") return "Lamp Background";
+  if (mode === "iris") return "Lamp Iris";
   return "Lamp Beautify";
 }
 
@@ -34,6 +38,7 @@ export function runWorkflowMode(
   run: Pick<Run, "workflowMode" | "workflowId">
 ): WorkflowMode {
   if (run.workflowMode) return run.workflowMode;
+  if (run.workflowId === "lamp-iris-v1") return "iris";
   if (run.workflowId === "lamp-beautify-v1") return "beautify";
   if (run.workflowId === "lamp-background-v1") return "background";
   return run.workflowId === "lamp-v1" ? "lamp" : "flora";
@@ -42,8 +47,13 @@ export function runWorkflowMode(
 /** Every Lamp method uses the fixed Initial → critique → Final contract. */
 export function isTwoPassWorkflowMode(
   mode: WorkflowMode
-): mode is Extract<WorkflowMode, "lamp" | "background" | "beautify"> {
-  return mode === "lamp" || mode === "background" || mode === "beautify";
+): mode is Extract<WorkflowMode, "lamp" | "background" | "beautify" | "iris"> {
+  return (
+    mode === "lamp" ||
+    mode === "background" ||
+    mode === "beautify" ||
+    mode === "iris"
+  );
 }
 
 /**
@@ -53,6 +63,12 @@ export function isTwoPassWorkflowMode(
 export function workflowModeFromExecutionId(
   executionId: string
 ): WorkflowMode {
+  if (
+    executionId.startsWith(LAMP_IRIS_EXECUTION_PREFIX) ||
+    executionId.startsWith(LAMP_IRIS_BATCH_EXECUTION_PREFIX)
+  ) {
+    return "iris";
+  }
   if (
     executionId.startsWith(LAMP_BEAUTIFY_EXECUTION_PREFIX) ||
     executionId.startsWith(LAMP_BEAUTIFY_BATCH_EXECUTION_PREFIX)

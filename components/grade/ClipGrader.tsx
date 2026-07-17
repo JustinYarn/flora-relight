@@ -18,6 +18,7 @@ import { formatRunDate } from "@/components/library/derive";
 import { EvalList } from "@/components/review/EvalList";
 import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
 import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
+import { IrisPlanReview } from "@/components/review/IrisPlanReview";
 import {
   finalLampIteration,
   finalLampVideo,
@@ -341,6 +342,11 @@ export function ClipGrader({
       {run.beautifyPlan?.approval.status === "approved" ? (
         <div className="mt-4">
           <BeautifyPlanReview run={run} interactive={false} compact />
+        </div>
+      ) : null}
+      {run.irisPlan?.approval.status === "approved" ? (
+        <div className="mt-4">
+          <IrisPlanReview run={run} interactive={false} compact />
         </div>
       ) : null}
 
