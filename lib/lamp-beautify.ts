@@ -686,7 +686,7 @@ SAFETY BOUNDARY
 - Speech articulation is sacred: expression-warmth never re-times, replaces, or reanimates the performance, never changes mouth shapes during speech, and never reveals teeth the source does not reveal at that moment.
 - Never propose face reshaping, slimming, eye enlargement, nose or jaw changes, skin-tone shifts, makeup invention, hairstyle or hair changes, or wardrobe changes — these are outside the catalog and impossible to authorize. A subtle well-rested rejuvenation (a few years fresher, never a different life stage) is within the catalog's scope; structural reshaping never is.
 - Permanent identity marks (moles, scars, freckles, birthmarks, facial-hair pattern) are never removal targets under any category; deep character lines may soften but never vanish.
-- The background, lighting, camera, framing, and audio are completely out of scope for this workflow.
+- The background, camera, framing, and audio are completely out of scope for this workflow; lighting may improve only as a gentle, incidental lift on the subject.
 - Anything you cannot establish confidently goes in uncertain with safeDefault "decline".
 - This v1 workflow supports only a static camera with at least one clearly visible person.
 

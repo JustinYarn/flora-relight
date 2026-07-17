@@ -182,17 +182,17 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
   },
   {
     id: "lighting-camera-fidelity",
-    name: "Lighting and camera unchanged",
+    name: "Camera locked, lighting gentle",
     category: "fidelity",
     description:
       "Exposure, color, focus, framing, and camera behavior match the source.",
     method: "holistic-judge",
     hardGate: true,
     weight: 0.04,
-    passThreshold: 85,
-    borderlineThreshold: 70,
+    passThreshold: 78,
+    borderlineThreshold: 62,
     allowedCorrectionActions: ["restore-untouched-surroundings"],
-    rubric: `Compare exposure, contrast, white balance, saturation, focus, depth of field, noise character, framing, crop, scale, perspective, lens feel, and camera position across the full timeline. The source's grain structure and compression fingerprint must carry through unchanged — global denoising, added grain, sharpening, or upscaling all fail. No beauty lighting, glow, bloom, relighting, color grade, or reframing is authorized. Localized, plausible skin response inside approved enhancement regions is the only permitted difference. Added depth-of-field, background blur, soft-focus glow, or any portrait-mode separation of subject from room fails; wardrobe and object colors must match the source hue-for-hue.`,
+    rubric: `Camera and lens are fully locked: compare framing, crop, perspective, lens feel, focus, depth of field, camera position, and motion — reframing, stabilization, added depth-of-field, background blur, soft-focus glow, or any portrait-mode separation of subject from room fails. Lighting has gentle latitude in this beautifying workflow: a soft, flattering lift in exposure or warmth on the subject must not be penalized; fail lighting only for a dramatic relight, changed light direction, a studio look, halo glow, or a room that reads differently lit than the source. Wardrobe and object colors must remain the source garments' and objects' own colors.`,
   },
   {
     id: "enhancement-temporal-stability",
