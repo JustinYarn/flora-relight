@@ -167,7 +167,8 @@ export function assertRunExecution(execution: unknown): RunExecution {
 
   const planFirst =
     candidate.executionId.startsWith("lamp-background:") ||
-    candidate.executionId.startsWith("lamp-beautify:");
+    candidate.executionId.startsWith("lamp-beautify:") ||
+    candidate.executionId.startsWith("lamp-iris:");
   if (
     planFirst !==
     Boolean(candidate.planOperationId && candidate.approvedPlanHash)
