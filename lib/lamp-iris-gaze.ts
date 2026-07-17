@@ -45,6 +45,12 @@ export interface LampIrisGazeMeasurements {
    */
   irisYTrace?: number[];
   /**
+   * Timestamps (seconds) of the irisYTrace samples, index-aligned. The
+   * sustain math splits the clip into time thirds with these; absent or
+   * mismatched timestamps fall back to index thirds.
+   */
+  irisYTraceTimestampsSec?: number[];
+  /**
    * The camera-contact anchor for THIS video: the median irisY of its
    * lens-glance cluster (see lampIrisContactAnchor). "Directly at the
    * viewer" is not knowable from geometry alone — it depends on where the
@@ -79,6 +85,18 @@ export interface LampIrisGazeComparison {
    * source has no anchor or the candidate has no trace.
    */
   onContactFraction?: number;
+  /**
+   * On-contact fraction per time third of the clip (null for a third with no
+   * usable samples). The sustain contract judges the WEAKEST third: contact
+   * held only in the opening seconds is a whole-clip failure.
+   */
+  onContactByThird?: [number | null, number | null, number | null];
+  /**
+   * Vertical lift vs the source per time third (source third median minus
+   * candidate third median). Present whenever both traces exist — the
+   * sustain signal for clips without a measured contact anchor.
+   */
+  verticalLiftByThird?: [number | null, number | null, number | null];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -114,8 +132,50 @@ export function isLampIrisGazeMeasurements(
         (value.irisYTrace as unknown[]).every(
           (y) => typeof y === "number" && Number.isFinite(y)
         ))) &&
+    (value.irisYTraceTimestampsSec === undefined ||
+      (Array.isArray(value.irisYTraceTimestampsSec) &&
+        (value.irisYTraceTimestampsSec as unknown[]).length <= 64 &&
+        (value.irisYTraceTimestampsSec as unknown[]).every(
+          (t) => typeof t === "number" && Number.isFinite(t) && t >= 0
+        ))) &&
     (value.contactAnchorY === undefined || finite01(value.contactAnchorY))
   );
+}
+
+/**
+ * Split a trace into time thirds of the clip. Timestamps drive the split so
+ * uneven blink exclusion cannot shift the boundaries; a missing or
+ * index-mismatched timestamp array falls back to index thirds.
+ */
+export function lampIrisTraceThirds(
+  trace: number[],
+  timestampsSec?: number[]
+): [number[], number[], number[]] {
+  if (
+    timestampsSec !== undefined &&
+    timestampsSec.length === trace.length &&
+    trace.length > 0
+  ) {
+    const end = Math.max(...timestampsSec);
+    if (end > 0) {
+      const thirds: [number[], number[], number[]] = [[], [], []];
+      for (let i = 0; i < trace.length; i += 1) {
+        const t = timestampsSec[i];
+        const segment = t < end / 3 ? 0 : t < (2 * end) / 3 ? 1 : 2;
+        thirds[segment].push(trace[i]);
+      }
+      return thirds;
+    }
+  }
+  const a = Math.floor(trace.length / 3);
+  const b = Math.floor((2 * trace.length) / 3);
+  return [trace.slice(0, a), trace.slice(a, b), trace.slice(b)];
+}
+
+function segmentMedian(segment: number[]): number | null {
+  if (segment.length === 0) return null;
+  const sorted = [...segment].sort((x, y) => x - y);
+  return sorted[Math.floor(sorted.length / 2)];
 }
 
 /**
@@ -175,6 +235,13 @@ export function compareLampIrisGaze(
     1
   );
   const anchorY = source.contactAnchorY;
+  const candidateThirds =
+    candidate.irisYTrace !== undefined && candidate.irisYTrace.length > 0
+      ? lampIrisTraceThirds(
+          candidate.irisYTrace,
+          candidate.irisYTraceTimestampsSec
+        )
+      : null;
   const contact =
     anchorY !== undefined
       ? {
@@ -188,6 +255,33 @@ export function compareLampIrisGaze(
                   ).length / candidate.irisYTrace.length,
               }
             : {}),
+          ...(candidateThirds !== null
+            ? {
+                onContactByThird: candidateThirds.map((segment) =>
+                  segment.length === 0
+                    ? null
+                    : segment.filter(
+                        (y) => Math.abs(y - anchorY) <= LAMP_IRIS_CONTACT_BAND
+                      ).length / segment.length
+                ) as [number | null, number | null, number | null],
+              }
+            : {}),
+        }
+      : {};
+  const sourceThirds =
+    source.irisYTrace !== undefined && source.irisYTrace.length > 0
+      ? lampIrisTraceThirds(source.irisYTrace, source.irisYTraceTimestampsSec)
+      : null;
+  const liftByThird =
+    sourceThirds !== null && candidateThirds !== null
+      ? {
+          verticalLiftByThird: sourceThirds.map((segment, index) => {
+            const sourceMedian = segmentMedian(segment);
+            const candidateMedian = segmentMedian(candidateThirds[index]);
+            return sourceMedian === null || candidateMedian === null
+              ? null
+              : sourceMedian - candidateMedian;
+          }) as [number | null, number | null, number | null],
         }
       : {};
   return {
@@ -196,6 +290,7 @@ export function compareLampIrisGaze(
     blinkDelta: candidate.blinkCount - source.blinkCount,
     blinkTimingMatch: matched / denominator,
     ...contact,
+    ...liftByThird,
   };
 }
 
@@ -243,6 +338,29 @@ export function renderLampIrisGazeMeasurementBlock(input: {
           }. A gaze parked off the anchor in either direction is not eye contact — judge over- and under-shoot against this number.`,
         ]
       : []),
+    ...(comparison.onContactByThird !== undefined ||
+    comparison.verticalLiftByThird !== undefined
+      ? [
+          `- Held across the clip (opening / middle / closing third of the timeline): ${
+            comparison.onContactByThird !== undefined
+              ? `on-contact fraction ${comparison.onContactByThird
+                  .map((value) => (value === null ? "n/a" : fixed(value)))
+                  .join(" / ")}`
+              : ""
+          }${
+            comparison.onContactByThird !== undefined &&
+            comparison.verticalLiftByThird !== undefined
+              ? "; "
+              : ""
+          }${
+            comparison.verticalLiftByThird !== undefined
+              ? `vertical lift ${comparison.verticalLiftByThird
+                  .map((value) => (value === null ? "n/a" : fixed(value)))
+                  .join(" / ")}`
+              : ""
+          }. Judge the weakest third: a correction present early that fades toward the reading pattern by the closing third fails for the whole clip.`,
+        ]
+      : []),
     `- Reading-scan reduction: ${fixed(comparison.scanReduction)} (positive = scanning calmed).`,
     `- Blink delta: ${comparison.blinkDelta >= 0 ? "+" : ""}${comparison.blinkDelta} (contract allows at most ±1); blink timing match ${fixed(comparison.blinkTimingMatch)}.`,
   ].join("\n");
@@ -278,6 +396,47 @@ export function renderLampIrisMeasuredCalibrationCorrection(input: {
       comparison.offsetFromContact > 0
         ? `The source itself contains lens-contact frames at median iris y=${anchor}; the first take's median gaze rests ${offset} aperture units below that measured contact position. Raise the pupils to rest at the measured contact position, not short of it.`
         : `The source itself contains lens-contact frames at median iris y=${anchor}; the first take's median gaze rests ${offset} aperture units above that measured contact position. Lower the pupils to rest at the measured contact position, not past it.`
+    );
+  }
+  const unevenHold = (thirds: (number | null)[]): boolean => {
+    const present = thirds.filter((value): value is number => value !== null);
+    return (
+      present.length >= 2 &&
+      Math.max(...present) - Math.min(...present) > 0.2 &&
+      Math.max(...present) >= 0.15
+    );
+  };
+  if (
+    comparison.onContactByThird !== undefined &&
+    unevenHold(comparison.onContactByThird)
+  ) {
+    parts.push(
+      `Measured across the clip's timeline, the corrected gaze was not held evenly (fraction of frames at the contact position by opening/middle/closing third: ${comparison.onContactByThird
+        .map((value) => (value === null ? "n/a" : value.toFixed(2)))
+        .join(
+          "/"
+        )}). Hold the corrected gaze at one constant level at every timestamp from the first frame to the last; the strongest section's level is the level everywhere, including the closing seconds.`
+    );
+  } else if (
+    comparison.verticalLiftByThird !== undefined &&
+    (() => {
+      const present = comparison.verticalLiftByThird.filter(
+        (value): value is number => value !== null
+      );
+      return (
+        present.length >= 2 &&
+        Math.max(...present) - Math.min(...present) >
+          LAMP_IRIS_NEAR_COPY_LIFT_FLOOR &&
+        Math.max(...present) >= LAMP_IRIS_NEAR_COPY_LIFT_FLOOR
+      );
+    })()
+  ) {
+    parts.push(
+      `Measured across the clip's timeline, the corrected lift was not held evenly (vertical lift by opening/middle/closing third: ${comparison.verticalLiftByThird
+        .map((value) => (value === null ? "n/a" : value.toFixed(3)))
+        .join(
+          "/"
+        )}). Hold the corrected gaze at one constant level at every timestamp from the first frame to the last, including the closing seconds.`
     );
   }
   if (comparison.scanReduction <= 0 && input.source.irisXDispersion > 0.04) {

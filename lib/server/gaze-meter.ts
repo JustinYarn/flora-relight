@@ -662,9 +662,12 @@ export async function measureLampIrisGaze(
     }
     const xs = irisSamples.map((s) => s.irisX);
     const ys = irisSamples.map((s) => s.irisY);
-    // The persisted trace makes the contact anchor and on-contact fraction
-    // replay-stable: every downstream compile reads these exact numbers.
+    // The persisted trace makes the contact anchor, on-contact fraction, and
+    // held-across-the-clip thirds replay-stable: every downstream compile
+    // reads these exact numbers. Timestamps ride beside the values so the
+    // sustain math splits the clip by time, not sample count.
     const irisYTrace = ys.map((y) => round(y, 4));
+    const irisYTraceTimestampsSec = irisSamples.map((s) => s.timestampSec);
     const contactAnchorY = lampIrisContactAnchor(irisYTrace);
 
     return {
@@ -678,6 +681,7 @@ export async function measureLampIrisGaze(
       blinkCount: blinks.blinkCount,
       blinkTimestampsSec: blinks.blinkTimestampsSec,
       irisYTrace,
+      irisYTraceTimestampsSec,
       ...(contactAnchorY !== null
         ? { contactAnchorY: round(contactAnchorY, 4) }
         : {}),
