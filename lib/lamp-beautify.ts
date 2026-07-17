@@ -459,6 +459,69 @@ export function lampBeautifyPlanRequiresGeneration(
   return parseLampBeautifyPlan(plan).decision === "enhance";
 }
 
+/**
+ * The slider: one human-chosen level overrides every approved enhancement's
+ * intensity before approval. It can dial planner-proposed work up or down,
+ * and can never add a category, touch declined or uncertain entries, or
+ * change anything else — the binding check below enforces exactly that.
+ */
+export function applyLampBeautifyIntensityOverride(
+  plan: LampBeautifyPlan,
+  intensity: LampBeautifyIntensity
+): LampBeautifyPlan {
+  const canonical = parseLampBeautifyPlan(plan);
+  if (canonical.decision !== "enhance") {
+    throw new Error(
+      "An intensity override applies only to an enhance decision."
+    );
+  }
+  if (intensity !== 1 && intensity !== 2 && intensity !== 3) {
+    throw new Error("Intensity override must be 1, 2, or 3.");
+  }
+  return {
+    ...canonical,
+    enhance: canonical.enhance.map((item) => ({ ...item, intensity })),
+  };
+}
+
+function intensityNeutralProjection(plan: LampBeautifyPlan): unknown {
+  const canonical = parseLampBeautifyPlan(plan);
+  return {
+    version: canonical.version,
+    id: canonical.id,
+    runId: canonical.runId,
+    createdAt: canonical.createdAt,
+    sourceScope: canonical.sourceScope,
+    decision: canonical.decision,
+    subjectSummary: canonical.subjectSummary,
+    enhance: canonical.enhance.map((item) => ({ ...item, intensity: 1 })),
+    declined: canonical.declined,
+    uncertain: canonical.uncertain,
+    ...(canonical.noOpJustification
+      ? { noOpJustification: canonical.noOpJustification }
+      : {}),
+  };
+}
+
+/**
+ * True when two plans are the same contract apart from approved-item
+ * intensities — the only difference a human slider is allowed to introduce
+ * between the planner's immutable draft and the approved copy.
+ */
+export function lampBeautifyPlansDifferOnlyByIntensity(
+  a: LampBeautifyPlan,
+  b: LampBeautifyPlan
+): boolean {
+  try {
+    return (
+      JSON.stringify(intensityNeutralProjection(a)) ===
+      JSON.stringify(intensityNeutralProjection(b))
+    );
+  } catch {
+    return false;
+  }
+}
+
 function approvalHashProjection(plan: LampBeautifyPlan): unknown {
   return {
     version: plan.version,

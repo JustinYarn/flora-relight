@@ -3,6 +3,7 @@ import "server-only";
 import {
   hashLampBeautifyPlan,
   lampBeautifyPlanRequiresGeneration,
+  lampBeautifyPlansDifferOnlyByIntensity,
   parseLampBeautifyPlan,
   type LampBeautifyPlan,
 } from "@/lib/lamp-beautify";
@@ -81,13 +82,13 @@ export async function validateLampBeautifyPlanBinding(
     );
   }
 
-  const [approvedHash, plannedHash] = await Promise.all([
-    hashLampBeautifyPlan(approvedPlan),
-    hashLampBeautifyPlan(plannedDraft),
-  ]);
+  // The approved copy may differ from the planner's immutable draft ONLY by
+  // the human intensity slider; any other divergence is tampering. The
+  // execution binds the hash of the plan as approved (slider included).
+  const approvedHash = await hashLampBeautifyPlan(approvedPlan);
   if (
     approvedHash !== input.approvedPlanHash ||
-    plannedHash !== input.approvedPlanHash
+    !lampBeautifyPlansDifferOnlyByIntensity(plannedDraft, approvedPlan)
   ) {
     throw new Error(
       "Lamp Beautify's approved plan no longer matches its planner journal."

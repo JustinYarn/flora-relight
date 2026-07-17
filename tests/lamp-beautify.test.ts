@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyLampBeautifyIntensityOverride,
   approveLampBeautifyPlan,
   buildLampBeautifyPlan,
   createMockLampBeautifyPlan,
@@ -9,6 +10,7 @@ import {
   LAMP_BEAUTIFY_CATALOG,
   LAMP_BEAUTIFY_PLAN_PROMPT,
   lampBeautifyPlanRequiresGeneration,
+  lampBeautifyPlansDifferOnlyByIntensity,
   parseLampBeautifyPlan,
   type LampBeautifyPlan,
 } from "../lib/lamp-beautify.ts";
@@ -427,4 +429,97 @@ test("workflow mode plumbing recognizes beautify", () => {
   assert.equal(runWorkflowMode(run), "beautify");
   assert.equal(BEAUTIFY_WORKFLOW.id, "lamp-beautify-v1");
   assert.equal(BEAUTIFY_WORKFLOW.nodes.length, 5);
+});
+
+test("the intensity slider overrides levels and nothing else", async () => {
+  const draft = buildLampBeautifyPlan({
+    raw: enhanceRaw(),
+    planId: "plan-slider-1",
+    runId: "run-slider-1",
+    createdAt: CREATED_AT,
+  });
+
+  const polished = applyLampBeautifyIntensityOverride(draft, 3);
+  assert.deepEqual(
+    polished.enhance.map((item) => item.intensity),
+    draft.enhance.map(() => 3)
+  );
+  // Only intensity moved: ids, rationales, declined, and uncertain are intact.
+  assert.deepEqual(
+    polished.enhance.map((item) => item.id),
+    draft.enhance.map((item) => item.id)
+  );
+  assert.deepEqual(polished.declined, draft.declined);
+  assert.deepEqual(polished.uncertain, draft.uncertain);
+  assert.equal(polished.approval.status, "draft");
+
+  // The dial changes the binding hash — executions bind the plan as approved.
+  assert.notEqual(
+    await hashLampBeautifyPlan(polished),
+    await hashLampBeautifyPlan(draft)
+  );
+
+  // The binding predicate accepts exactly the slider's degree of freedom.
+  assert.equal(lampBeautifyPlansDifferOnlyByIntensity(draft, polished), true);
+  assert.equal(lampBeautifyPlansDifferOnlyByIntensity(draft, draft), true);
+  const tampered = buildLampBeautifyPlan({
+    raw: (() => {
+      const raw = enhanceRaw();
+      raw.enhance[0]!.id = "teeth-brightening" as never;
+      raw.declined = raw.declined.filter(
+        (item) => item.id !== "teeth-brightening"
+      );
+      return raw;
+    })(),
+    planId: "plan-slider-1",
+    runId: "run-slider-1",
+    createdAt: CREATED_AT,
+  });
+  assert.equal(lampBeautifyPlansDifferOnlyByIntensity(draft, tampered), false);
+
+  // The generation prompt renders the dialed level.
+  const approvedPolished = approveLampBeautifyPlan(polished, CREATED_AT + 10);
+  const rendered = initialLampBeautifyMegaPrompt(approvedPolished).rendered;
+  assert.match(rendered, /\[skin-evenness\] intensity 3 of 3/);
+  assert.doesNotMatch(rendered, /intensity 2 of 3/);
+
+  // No-op plans have nothing to dial.
+  const noOp = buildLampBeautifyPlan({
+    raw: {
+      sourceScope: {
+        cameraMotion: "static",
+        visiblePeople: "single-person",
+      },
+      decision: "exceptional-no-op",
+      subjectSummary:
+        "Static single-person webcam framing that is already fully camera-ready.",
+      enhance: [],
+      declined: [
+        { id: "skin-evenness", reason: "Skin is already even on camera." },
+      ],
+      uncertain: [],
+      noOpJustification: {
+        reasonCode: "already-camera-ready",
+        confidence: 0.97,
+        summary:
+          "Every catalog region is already presentation ready and no enhancement at any intensity would make the subject read as better prepared for camera.",
+        regionEvidence: [
+          { region: "skin", finding: "Even tone with no shine or blemishes." },
+          { region: "under-eyes", finding: "No visible shadows or puffiness." },
+          { region: "teeth", finding: "Natural tone during brief visibility." },
+          { region: "eyes", finding: "Clear sclera without redness." },
+          { region: "hair", finding: "No flyaways around the silhouette." },
+        ],
+        whyEnhancementWouldNotImprovePresentation:
+          "The subject already reads as fully camera ready in every catalog region today.",
+      },
+    },
+    planId: "plan-slider-noop",
+    runId: "run-slider-noop",
+    createdAt: CREATED_AT,
+  });
+  assert.throws(
+    () => applyLampBeautifyIntensityOverride(noOp, 2),
+    /applies only to an enhance decision/
+  );
 });

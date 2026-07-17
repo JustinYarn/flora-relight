@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import {
+  applyLampBeautifyIntensityOverride,
   approveLampBeautifyPlan,
   hashLampBeautifyPlan,
+  type LampBeautifyIntensity,
 } from "@/lib/lamp-beautify";
 import { lampBeautifyPlanOperationId } from "@/lib/lamp-beautify-operations";
 import {
@@ -111,6 +113,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     runId?: unknown;
     planHash?: unknown;
     approveLiveSpend?: unknown;
+    intensityOverride?: unknown;
   };
   try {
     body = (await req.json()) as typeof body;
@@ -129,6 +132,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     typeof body.approveLiveSpend !== "boolean"
   ) {
     return jsonError(400, "approveLiveSpend must be a boolean.");
+  }
+  if (
+    body.intensityOverride !== undefined &&
+    body.intensityOverride !== 1 &&
+    body.intensityOverride !== 2 &&
+    body.intensityOverride !== 3
+  ) {
+    return jsonError(400, "intensityOverride must be 1, 2, or 3.");
   }
 
   const storage = getStorage();
@@ -155,11 +166,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (operation.result.status !== "ready") {
     return jsonError(409, operation.result.reason);
   }
-  const draftPlan = operation.result.plan;
+  let draftPlan = operation.result.plan;
   if (draftPlan.runId !== run.id) {
     return jsonError(
       409,
       "The enhancement plan belongs to a different source run and cannot be approved."
+    );
+  }
+  if (body.intensityOverride !== undefined) {
+    if (draftPlan.decision !== "enhance") {
+      return jsonError(
+        409,
+        "An intensity override applies only to an enhance decision."
+      );
+    }
+    draftPlan = applyLampBeautifyIntensityOverride(
+      draftPlan,
+      body.intensityOverride as LampBeautifyIntensity
     );
   }
   const canonicalHash = await hashLampBeautifyPlan(draftPlan);

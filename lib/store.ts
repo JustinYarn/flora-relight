@@ -31,9 +31,11 @@ import {
 } from "@/lib/lamp-background";
 import { lampBackgroundNoOpPromptForRun } from "@/lib/lamp-background-read";
 import {
+  applyLampBeautifyIntensityOverride,
   approveLampBeautifyPlan,
   hashLampBeautifyPlan,
   lampBeautifyPlanRequiresGeneration,
+  type LampBeautifyIntensity,
   type LampBeautifyPlan,
 } from "@/lib/lamp-beautify";
 import { lampBeautifyNoOpPromptForRun } from "@/lib/lamp-beautify-read";
@@ -127,7 +129,10 @@ interface AppStore {
    */
   approveBeautifyPlan(
     runId: string,
-    opts?: { approveLiveSpend?: boolean }
+    opts?: {
+      approveLiveSpend?: boolean;
+      intensityOverride?: LampBeautifyIntensity;
+    }
   ): Promise<void>;
   approveBackgroundPlan(
     runId: string,
@@ -757,8 +762,16 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       return;
     }
 
+    const override =
+      opts?.intensityOverride !== undefined && plan.decision === "enhance"
+        ? opts.intensityOverride
+        : undefined;
     if (get().mode === "live") {
-      const planHash = await hashLampBeautifyPlan(plan);
+      const hashedPlan =
+        override !== undefined
+          ? applyLampBeautifyIntensityOverride(plan, override)
+          : plan;
+      const planHash = await hashLampBeautifyPlan(hashedPlan);
       const response = await fetch("/api/beautify-plan/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -766,6 +779,9 @@ export const useAppStore = create<AppStore>()((set, get) => ({
           runId,
           planHash,
           approveLiveSpend: opts?.approveLiveSpend === true,
+          ...(override !== undefined
+            ? { intensityOverride: override }
+            : {}),
         }),
       });
       const payload = (await response.json().catch(() => null)) as
@@ -790,7 +806,12 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       return;
     }
 
-    const approvedPlan = approveLampBeautifyPlan(plan, Date.now());
+    const approvedPlan = approveLampBeautifyPlan(
+      override !== undefined
+        ? applyLampBeautifyIntensityOverride(plan, override)
+        : plan,
+      Date.now()
+    );
     if (!lampBeautifyPlanRequiresGeneration(approvedPlan)) {
       set((state) => ({
         runs: state.runs.map((item) =>

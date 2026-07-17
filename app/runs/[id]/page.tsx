@@ -100,7 +100,9 @@ export default function RunReviewPage() {
     run.backgroundCleanupPlan?.approval.status === "approved" &&
     run.backgroundCleanupPlan.decision === "exceptional-no-op";
   const planAwaitingApproval =
-    backgroundRun && run.backgroundCleanupPlan?.approval.status === "draft";
+    (backgroundRun && run.backgroundCleanupPlan?.approval.status === "draft") ||
+    (run.workflowMode === "beautify" &&
+      run.beautifyPlan?.approval.status === "draft");
   // Default to the delivered v2 final; mid-flight, follow the newest stage.
   const autoKey = run.finalVideo ? "final" : latest ? `iter-${latest.index}` : null;
   const activeKey = userSelected ?? autoKey;
@@ -170,9 +172,14 @@ export default function RunReviewPage() {
             relitLabel={relitLabel}
             fallback={run.fallback}
             generating={
-              run.status === "running" && !planAwaitingApproval
-                ? <GenerationTheater run={run} />
-                : undefined
+              run.status === "running" && !planAwaitingApproval ? (
+                <GenerationTheater run={run} />
+              ) : planAwaitingApproval ? (
+                <div className="flex h-full w-full items-center justify-center bg-raised px-6 text-center text-2xs leading-relaxed text-faint">
+                  nothing is generating yet — approve the plan above to start
+                  the two-pass edit; no provider spend happens until then
+                </div>
+              ) : undefined
             }
           />
 

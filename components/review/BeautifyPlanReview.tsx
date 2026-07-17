@@ -10,6 +10,7 @@ import {
 import type {
   LampBeautifyDeclinedItem,
   LampBeautifyEnhanceItem,
+  LampBeautifyIntensity,
   LampBeautifyPlan,
   LampBeautifyUncertainItem,
 } from "@/lib/lamp-beautify";
@@ -200,11 +201,18 @@ export function BeautifyPlanReview({
   const [confirmingSpend, setConfirmingSpend] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [intensityOverride, setIntensityOverride] = useState<
+    LampBeautifyIntensity | null
+  >(null);
   const plan = run.beautifyPlan;
   if (run.workflowMode !== "beautify" || !plan) return null;
 
   const approved = plan.approval.status === "approved";
   const enhance = plan.decision === "enhance";
+  const effectiveEnhance =
+    !approved && enhance && intensityOverride !== null
+      ? plan.enhance.map((item) => ({ ...item, intensity: intensityOverride }))
+      : plan.enhance;
   const pausedForApproval =
     run.serverExecution?.status === "user_action_required" ||
     (mode === "live" &&
@@ -222,7 +230,12 @@ export function BeautifyPlanReview({
     setBusy(true);
     setError(null);
     try {
-      await approveBeautifyPlan(run.id, { approveLiveSpend });
+      await approveBeautifyPlan(run.id, {
+        approveLiveSpend,
+        ...(intensityOverride !== null
+          ? { intensityOverride }
+          : {}),
+      });
       setConfirmingSpend(false);
     } catch (approvalError) {
       setError(
@@ -260,10 +273,69 @@ export function BeautifyPlanReview({
         <div
           className={`mt-4 grid gap-3 ${compact ? "lg:grid-cols-3" : "md:grid-cols-3"}`}
         >
-          <EnhanceItems items={plan.enhance} />
+          <EnhanceItems items={effectiveEnhance} />
           <DeclinedItems items={plan.declined} />
           <UncertainItems items={plan.uncertain} />
         </div>
+
+        {!approved && enhance && interactive ? (
+          <div className="mt-4 rounded-xl bg-raised p-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-sm font-medium text-ink">
+                  Touch-up intensity
+                </p>
+                <p className="mt-0.5 max-w-xl text-pretty text-2xs leading-relaxed text-muted">
+                  One dial over every approved item — the same ladder the
+                  prompts and the evaluator read. &ldquo;As planned&rdquo;
+                  keeps the planner&apos;s per-item levels.
+                </p>
+              </div>
+              <div
+                role="radiogroup"
+                aria-label="Touch-up intensity"
+                className="flex overflow-hidden rounded-lg border border-edge"
+              >
+                {(
+                  [
+                    [null, "As planned"],
+                    [1, "1 · Subtle"],
+                    [2, "2 · Balanced"],
+                    [3, "3 · Polished"],
+                  ] as Array<[LampBeautifyIntensity | null, string]>
+                ).map(([value, label]) => {
+                  const selected = intensityOverride === value;
+                  return (
+                    <button
+                      key={label}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      disabled={busy}
+                      onClick={() => setIntensityOverride(value)}
+                      className={`px-3 py-1.5 text-2xs font-medium transition-colors ${
+                        selected
+                          ? "bg-accent-soft text-accent"
+                          : "text-muted hover:text-ink"
+                      } border-l border-edge first:border-l-0`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <p className="mt-2 text-2xs leading-relaxed text-faint">
+              {intensityOverride === null
+                ? "Approving with the planner's proposed intensities."
+                : intensityOverride === 1
+                  ? "Every approved item at 1 — barely perceptible, deniable."
+                  : intensityOverride === 2
+                    ? "Every approved item at 2 — noticeable side-by-side, natural in isolation."
+                    : "Every approved item at 3 — clearly groomed for camera, still physically plausible."}
+            </p>
+          </div>
+        ) : null}
 
         <div className="mt-4 border-t border-edge pt-4">
           <ApprovalCopy plan={plan} />
@@ -324,6 +396,9 @@ export function BeautifyPlanReview({
             `${run.originalVideo.label} — ${run.originalVideo.durationSec.toFixed(1)}s`,
             `Estimated provider cost after plan approval: ${formatUsd(estimate.totalUsd)}`,
             `Spend authorization: the server reserves ${formatReservationUsd(reservation)} for exactly two touch-up generations, two whole-video evaluations, and at most one Final Lipsync-2-Pro repair. The completed planning call is excluded.`,
+            intensityOverride === null
+              ? "Approving with the planner's proposed per-item intensities."
+              : `Intensity override: every approved item at ${intensityOverride} of 3 — the prompts and the evaluator's intensity contract both follow the dial.`,
             "Initial and Final both start from the immutable source and are bound to this exact enhance / declined / uncertain plan.",
             "There is one correction pass and no open-ended regeneration loop.",
           ]}
