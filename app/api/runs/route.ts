@@ -93,7 +93,7 @@ import {
   lampBeautifyPlanOperationId,
 } from "@/lib/lamp-beautify-operations";
 import {
-  compileLampBeautifyFinalPrompt,
+  compileLampBeautifyFinalPromptCandidates,
   initialLampBeautifyMegaPrompt,
 } from "@/lib/prompts/lamp-beautify";
 import {
@@ -882,14 +882,14 @@ function lampBeautifyPlanBindingValid(
   }
 }
 
-function lampBeautifyFinalPrompt(
+function lampBeautifyFinalPromptCandidates(
   run: Run,
   execution: RunExecution,
   evaluations: LampBeautifyEvaluationProjection
 ) {
   const first = lampBeautifyArtifact(evaluations.first, 1);
   if (!first || !run.beautifyPlan) return undefined;
-  return compileLampBeautifyFinalPrompt(
+  return compileLampBeautifyFinalPromptCandidates(
     execution.renderedPrompt,
     run.beautifyPlan,
     first
@@ -916,9 +916,12 @@ function providerOperationMatchesLampBeautifyExecution(
   }
   if (operation.iteration !== 2) return false;
   try {
+    // A legacy run's final pass billed under the correction vocabulary of
+    // its era — any faithful compile of the immutable inputs is a match.
     return (
-      operation.renderedPrompt ===
-      lampBeautifyFinalPrompt(run, execution, evaluations)?.rendered
+      lampBeautifyFinalPromptCandidates(run, execution, evaluations)?.some(
+        (candidate) => candidate.rendered === operation.renderedPrompt
+      ) ?? false
     );
   } catch {
     return false;
@@ -934,8 +937,19 @@ function mergeLampBeautifyEvaluationResults(
   if (!candidate.beautifyPlan) return;
   const first = lampBeautifyArtifact(evaluations.first, 1);
   const final = lampBeautifyArtifact(evaluations.final, 2);
-  const finalPrompt = final
-    ? lampBeautifyFinalPrompt(candidate, execution, evaluations)
+  // Show the form the provider journal proves was billed; fall back to the
+  // current vocabulary only when no journal entry pins it.
+  const finalPromptCandidates = final
+    ? lampBeautifyFinalPromptCandidates(candidate, execution, evaluations)
+    : undefined;
+  const billedFinalOperation = candidate.providerOperations?.find(
+    (operation) =>
+      operation.kind === "video_generation" && operation.iteration === 2
+  );
+  const finalPrompt = finalPromptCandidates
+    ? (finalPromptCandidates.find(
+        (compiled) => compiled.rendered === billedFinalOperation?.renderedPrompt
+      ) ?? finalPromptCandidates[0])
     : undefined;
   for (const iteration of candidate.iterations) {
     if (iteration.index === 1 && first) {

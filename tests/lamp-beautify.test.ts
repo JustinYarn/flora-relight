@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -23,13 +24,20 @@ import {
 } from "../lib/lamp-beautify-evaluation.ts";
 import {
   compileLampBeautifyFinalPrompt,
+  compileLampBeautifyFinalPromptCandidates,
   initialLampBeautifyMegaPrompt,
   isPersistedInitialLampBeautifyPrompt,
   LEGACY_V1_BEAUTIFY_BASE_PROMPT,
+  LEGACY_V2_BEAUTIFY_BASE_PROMPT,
+  LEGACY_V3_BEAUTIFY_BASE_PROMPT,
+  LEGACY_V4_BEAUTIFY_BASE_PROMPT,
   renderLampBeautifyCorrection,
   renderLampBeautifyMegaPrompt,
+  renderLegacyLampBeautifyCorrectionV1,
   renderLampBeautifyPlanBlock,
   renderLegacyLampBeautifyPlanBlockV1,
+  renderLegacyLampBeautifyPlanBlockV2,
+  renderLegacyLampBeautifyPlanBlockV3,
 } from "../lib/prompts/lamp-beautify.ts";
 import { BEAUTIFY_WORKFLOW } from "../lib/beautify-workflow-def.ts";
 import {
@@ -613,6 +621,235 @@ test("hair-tidy era runs stay valid through the frozen first generation", () => 
   const final = compileLampBeautifyFinalPrompt(legacyV1, plan, artifact);
   assert.equal(final.version, 2);
   assert.match(final.rendered, /LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v2/);
+});
+
+test("ladder-v3 and clean-generation era runs stay valid through their frozen forms", () => {
+  const plan = approveLampBeautifyPlan(
+    buildLampBeautifyPlan({
+      raw: (() => {
+        const raw = enhanceRaw();
+        raw.enhance = [
+          {
+            id: "expression-warmth",
+            intensity: 3,
+            rationale:
+              "A gentle warmth lift reads as more engaged and enthusiastic.",
+            evidence: "The resting expression sits flatter than the tone of voice.",
+          },
+          raw.enhance[0]!,
+        ];
+        return raw;
+      })(),
+      planId: "plan-ladder-era-1",
+      runId: "run-ladder-era-1",
+      createdAt: CREATED_AT,
+    }),
+    CREATED_AT + 1_000
+  );
+  const artifact = buildLampBeautifyEvaluationArtifact({
+    raw: allPassRaw(),
+    plan,
+    iteration: 1,
+    audioVerified: true,
+    costUsd: 0,
+  });
+
+  // Both eras share the V3 plan block — the clean-generation commit changed
+  // only the base — so each era is that base plus the V3 block.
+  const eraForms: string[] = [];
+  for (const base of [
+    LEGACY_V3_BEAUTIFY_BASE_PROMPT,
+    LEGACY_V4_BEAUTIFY_BASE_PROMPT,
+  ]) {
+    const persisted = renderLampBeautifyMegaPrompt({
+      version: 1,
+      base,
+      plan,
+      corrections: [],
+    }).replace(
+      renderLampBeautifyPlanBlock(plan),
+      renderLegacyLampBeautifyPlanBlockV3(plan)
+    );
+    assert.notEqual(persisted, initialLampBeautifyMegaPrompt(plan).rendered);
+    assert.equal(isPersistedInitialLampBeautifyPrompt(plan, persisted), true);
+
+    const final = compileLampBeautifyFinalPrompt(persisted, plan, artifact);
+    assert.equal(final.version, 2);
+    assert.match(final.rendered, /LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v2/);
+    eraForms.push(persisted);
+  }
+  assert.notEqual(eraForms[0], eraForms[1]);
+});
+
+test("frozen generations are byte-pinned — an in-place edit fails here first", () => {
+  const pin = (value: unknown) =>
+    createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+  // Bases, hashed as canonical JSON. These hashes were taken from the exact
+  // git-history bytes each generation shipped with (2b5daec, f93e52c,
+  // d6ba601, d6ab069). If one of these assertions fails, a frozen constant
+  // was edited in place: revert the constant — never update the pin.
+  assert.equal(
+    pin(LEGACY_V1_BEAUTIFY_BASE_PROMPT),
+    "e7f26bcd2c4955293ac51e81ce40a17dd38946e0400cc2810f3d8c3cbf4f3083"
+  );
+  assert.equal(
+    pin(LEGACY_V2_BEAUTIFY_BASE_PROMPT),
+    "e0a157dd93a561c2765ca7c93bdf4d434b4101ec6fc17144391c6b05f76afd8f"
+  );
+  assert.equal(
+    pin(LEGACY_V3_BEAUTIFY_BASE_PROMPT),
+    "a300e7244c99f943fa0e74be508d719dcad154e7a7d7daf105671dcb145cedbf"
+  );
+  assert.equal(
+    pin(LEGACY_V4_BEAUTIFY_BASE_PROMPT),
+    "746c1d89fedbf1dcc9f3041b71fd6211a15d89e7762630331f1f5041420fa2b8"
+  );
+
+  // Block renderers, pinned through a fixed fixture that exercises every
+  // active category and all three intensity lines. The fixture is literal on
+  // purpose: its bytes are part of the pin.
+  const pinPlan = approveLampBeautifyPlan(
+    buildLampBeautifyPlan({
+      raw: {
+        sourceScope: { cameraMotion: "static", visiblePeople: "single-person" },
+        decision: "enhance",
+        subjectSummary: "Byte-pin fixture subject.",
+        enhance: [
+          { id: "expression-warmth", intensity: 1, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+          { id: "skin-evenness", intensity: 2, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+          { id: "under-eye-softening", intensity: 3, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+          { id: "teeth-brightening", intensity: 1, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+          { id: "eye-clarity", intensity: 2, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+        ],
+        declined: [],
+        uncertain: [],
+      },
+      planId: "plan-pin-active",
+      runId: "run-pin-active",
+      createdAt: CREATED_AT,
+    }),
+    CREATED_AT + 1_000
+  );
+  assert.equal(
+    pin(renderLegacyLampBeautifyPlanBlockV3(pinPlan)),
+    "2a0dc756f6e0b35182654cd4d7f626c6417c3b5d15b20031b78f85c530b7fd68"
+  );
+  assert.equal(
+    pin(renderLegacyLampBeautifyPlanBlockV2(pinPlan)),
+    "ad9ff66bc359bde6679c92de305e4fa69f9678a3f48e2709857592f966822720"
+  );
+
+  const pinPlanV1Era = approveLampBeautifyPlan(
+    buildLampBeautifyPlan({
+      raw: {
+        sourceScope: { cameraMotion: "static", visiblePeople: "single-person" },
+        decision: "enhance",
+        subjectSummary: "Byte-pin fixture subject.",
+        enhance: [
+          { id: "skin-evenness", intensity: 2, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+          { id: "hair-tidy", intensity: 1, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+        ],
+        declined: [],
+        uncertain: [],
+      },
+      planId: "plan-pin-v1",
+      runId: "run-pin-v1",
+      createdAt: CREATED_AT,
+    }),
+    CREATED_AT + 1_000
+  );
+  assert.equal(
+    pin(renderLegacyLampBeautifyPlanBlockV1(pinPlanV1Era)),
+    "251bb951086286163eb92d50375c6c08427bf1adc73fb1ec40af506608e40ffa"
+  );
+
+  // The frozen correction vocabulary — the final pass of every run billed
+  // before the steady-state rewrite embedded these exact sentences.
+  const vocabulary = (
+    [
+      { action: "restore-identity", planItemIds: [] },
+      { action: "restore-performance-lipsync", planItemIds: [] },
+      { action: "complete-approved-enhancement", planItemIds: ["skin-evenness"] },
+      { action: "reduce-enhancement-intensity", planItemIds: ["skin-evenness"] },
+      { action: "remove-unapproved-beautification", planItemIds: [] },
+      { action: "repair-skin-texture", planItemIds: [] },
+      { action: "restore-untouched-surroundings", planItemIds: [] },
+    ] as const
+  ).map((correction) =>
+    renderLegacyLampBeautifyCorrectionV1(pinPlan, {
+      id: `pin-${correction.action}`,
+      sourceEvalId: "enhancement-adherence",
+      aspect: "byte-pin-fixture",
+      action: correction.action,
+      severity: "critical",
+      planItemIds: [...correction.planItemIds],
+    })
+  );
+  assert.equal(
+    pin(vocabulary),
+    "6877fe5637380107b9d27def13fc5e05fe1873c6cfe1b67551b4628a8ff9ca2c"
+  );
+});
+
+test("legacy-billed final prompts stay valid through the frozen correction vocabulary", () => {
+  const plan = approvedPlan();
+  const withViolations = allPassRaw();
+  withViolations.results = withViolations.results.map((result) =>
+    result.evalId === "enhancement-adherence"
+      ? {
+          ...result,
+          score: 40,
+          violations: [
+            {
+              aspect: "shine-still-present",
+              severity: "critical",
+              description: "Approved skin-evenness was left unapplied.",
+              frameTimestampSec: 2.5,
+              correctionAction: "complete-approved-enhancement",
+              planItemIds: ["skin-evenness"],
+            },
+          ],
+          reasoning: "Adherence failures observed.",
+        }
+      : result
+  );
+  const flawed = buildLampBeautifyEvaluationArtifact({
+    raw: withViolations,
+    plan,
+    iteration: 1,
+    audioVerified: true,
+    costUsd: 0.01,
+  });
+  const persisted = initialLampBeautifyMegaPrompt(plan).rendered;
+
+  const candidates = compileLampBeautifyFinalPromptCandidates(
+    persisted,
+    plan,
+    flawed
+  );
+  assert.equal(candidates.length, 2);
+  // Index 0 is the only form new executions may bill with.
+  assert.equal(
+    candidates[0]!.rendered,
+    compileLampBeautifyFinalPrompt(persisted, plan, flawed).rendered
+  );
+  assert.match(candidates[0]!.rendered, /Fully and UNIFORMLY apply/);
+  assert.match(
+    candidates[1]!.rendered,
+    /Fully apply these approved enhancements at their approved intensity wherever the region is visible:/
+  );
+  assert.notEqual(candidates[0]!.rendered, candidates[1]!.rendered);
+  // The vocabularies differ only inside the corrections body: everything
+  // through the locks section is byte-identical.
+  const boundary = candidates[0]!.rendered.indexOf(
+    "[ACTIVE CORRECTIONS FROM EVALUATION]"
+  );
+  assert.ok(boundary > 0);
+  assert.equal(
+    candidates[0]!.rendered.slice(0, boundary),
+    candidates[1]!.rendered.slice(0, boundary)
+  );
 });
 
 test("the clean-generation layer anchors source noise and names the artifacts", () => {
