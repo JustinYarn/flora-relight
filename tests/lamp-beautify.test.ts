@@ -33,14 +33,17 @@ import {
   LEGACY_V3_BEAUTIFY_BASE_PROMPT,
   LEGACY_V4_BEAUTIFY_BASE_PROMPT,
   LEGACY_V5_BEAUTIFY_BASE_PROMPT,
+  LEGACY_V6_BEAUTIFY_BASE_PROMPT,
   renderLampBeautifyCorrection,
   renderLampBeautifyMegaPrompt,
   renderLegacyLampBeautifyCorrectionV1,
+  renderLegacyLampBeautifyCorrectionV2,
   renderLampBeautifyPlanBlock,
   renderLegacyLampBeautifyPlanBlockV1,
   renderLegacyLampBeautifyPlanBlockV2,
   renderLegacyLampBeautifyPlanBlockV3,
   renderLegacyLampBeautifyPlanBlockV5,
+  renderLegacyLampBeautifyPlanBlockV6,
 } from "../lib/prompts/lamp-beautify.ts";
 import { BEAUTIFY_WORKFLOW } from "../lib/beautify-workflow-def.ts";
 import {
@@ -812,6 +815,62 @@ test("frozen generations are byte-pinned — an in-place edit fails here first",
     pin(LEGACY_V5_BEAUTIFY_BASE_PROMPT),
     "44cd85ade6dbb334a3b12126fca9ec55c845759d051c3e1cc04babee77d02bc4"
   );
+  assert.equal(
+    pin(LEGACY_V6_BEAUTIFY_BASE_PROMPT),
+    "b3604976a58f06801ce7f0a7f9453ace07cbd913be2c85c95badf7a9060be0e9"
+  );
+
+  // The sixth generation carries only the active catalog, so its block pin
+  // uses an active-only fixture.
+  const pinPlanV6 = approveLampBeautifyPlan(
+    buildLampBeautifyPlan({
+      raw: {
+        sourceScope: { cameraMotion: "static", visiblePeople: "single-person" },
+        decision: "enhance",
+        subjectSummary: "Byte-pin fixture subject.",
+        enhance: [
+          { id: "expression-warmth", intensity: 1, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+          { id: "skin-evenness", intensity: 2, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+          { id: "under-eye-softening", intensity: 3, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+          { id: "eye-clarity", intensity: 2, rationale: "Deterministic byte pin fixture rationale.", evidence: "Deterministic byte pin fixture evidence." },
+        ],
+        declined: [],
+        uncertain: [],
+      },
+      planId: "plan-pin-v6",
+      runId: "run-pin-v6",
+      createdAt: CREATED_AT,
+    }),
+    CREATED_AT + 1_000
+  );
+  assert.equal(
+    pin(renderLegacyLampBeautifyPlanBlockV6(pinPlanV6)),
+    "e6647e44ecd6770f3d754e2b3747b7ce0e8189db46d9091c76b134cdb6dc7cb5"
+  );
+  const v2Vocabulary = (
+    [
+      { action: "restore-identity", planItemIds: [] },
+      { action: "restore-performance-lipsync", planItemIds: [] },
+      { action: "complete-approved-enhancement", planItemIds: ["skin-evenness"] },
+      { action: "reduce-enhancement-intensity", planItemIds: ["skin-evenness"] },
+      { action: "remove-unapproved-beautification", planItemIds: [] },
+      { action: "repair-skin-texture", planItemIds: [] },
+      { action: "restore-untouched-surroundings", planItemIds: [] },
+    ] as const
+  ).map((correction) =>
+    renderLegacyLampBeautifyCorrectionV2(pinPlanV6, {
+      id: `pin-${correction.action}`,
+      sourceEvalId: "enhancement-adherence",
+      aspect: "byte-pin-fixture",
+      action: correction.action,
+      severity: "critical",
+      planItemIds: [...correction.planItemIds],
+    })
+  );
+  assert.equal(
+    pin(v2Vocabulary),
+    "ac4ee857d4331ae2e01eb86c0eb54c77e6d225f469e1408460735d23458684ca"
+  );
 
   // Block renderers, pinned through a fixed fixture that exercises every
   // active category and all three intensity lines. The fixture is literal on
@@ -939,18 +998,18 @@ test("legacy-billed final prompts stay valid through the frozen correction vocab
     plan,
     flawed
   );
-  assert.equal(candidates.length, 2);
+  assert.equal(candidates.length, 3);
   // Index 0 is the only form new executions may bill with.
   assert.equal(
     candidates[0]!.rendered,
     compileLampBeautifyFinalPrompt(persisted, plan, flawed).rendered
   );
-  assert.match(candidates[0]!.rendered, /Fully and UNIFORMLY apply/);
+  assert.match(candidates[1]!.rendered, /Fully and UNIFORMLY apply/);
   assert.match(
-    candidates[1]!.rendered,
+    candidates[2]!.rendered,
     /Fully apply these approved enhancements at their approved intensity wherever the region is visible:/
   );
-  assert.notEqual(candidates[0]!.rendered, candidates[1]!.rendered);
+  assert.notEqual(candidates[1]!.rendered, candidates[2]!.rendered);
   // The vocabularies differ only inside the corrections body: everything
   // through the locks section is byte-identical.
   const boundary = candidates[0]!.rendered.indexOf(
@@ -960,6 +1019,10 @@ test("legacy-billed final prompts stay valid through the frozen correction vocab
   assert.equal(
     candidates[0]!.rendered.slice(0, boundary),
     candidates[1]!.rendered.slice(0, boundary)
+  );
+  assert.equal(
+    candidates[0]!.rendered.slice(0, boundary),
+    candidates[2]!.rendered.slice(0, boundary)
   );
 });
 
