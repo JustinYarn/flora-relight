@@ -4,8 +4,10 @@
  * here is a plain function over persisted Runs so both modes of the Grade
  * page (and any future export) compute identical numbers.
  *
- * The AI side of every Lamp comparison is v2's evalResults. The grader shows
- * the delivered final video, so the human and AI compare the same cut.
+ * The AI side of every Lamp comparison is the DELIVERED take's evalResults —
+ * v2 everywhere except a Lamp Iris best-of-two run whose settlement delivered
+ * the Initial (serverExecution.deliveredIteration === 1). The grader shows
+ * the delivered video, so the human and AI compare the same cut.
  */
 
 import type {
@@ -116,9 +118,26 @@ export function isGradeable(run: Run): boolean {
   );
 }
 
-/** Lamp's human grade and comparison target is strictly v2. */
+/**
+ * True when Lamp Iris best-of-two settlement delivered the INITIAL take.
+ * `deliveredIteration` is server-owned and written only at iris settlement;
+ * absent (legacy iris and every other mode) means the Final was delivered.
+ */
+export function deliveredInitialBestOfTwo(run: Run): boolean {
+  return (
+    isLampIrisRun(run) && (run.serverExecution?.deliveredIteration ?? 2) === 1
+  );
+}
+
+/**
+ * Lamp's human grade and comparison target: the DELIVERED take — strictly v2
+ * except for a Lamp Iris best-of-two run that delivered the Initial.
+ */
 export function finalLampIteration(run: Run): Iteration | undefined {
   const second = run.iterations.find((iteration) => iteration.index === 2);
+  if (deliveredInitialBestOfTwo(run)) {
+    return run.iterations.find((iteration) => iteration.index === 1);
+  }
   if (
     isLampRun(run) ||
     isLampBackgroundRun(run) ||
@@ -131,7 +150,7 @@ export function finalLampIteration(run: Run): Iteration | undefined {
   return second ?? run.iterations.at(-1);
 }
 
-/** The delivered remux when present, otherwise Lamp's generated v2 artifact. */
+/** The delivered remux when present, otherwise the delivered take's artifact. */
 export function finalLampVideo(run: Run): VideoAsset | undefined {
   return run.finalVideo ?? finalLampIteration(run)?.generatedVideo;
 }

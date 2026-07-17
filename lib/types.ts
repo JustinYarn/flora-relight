@@ -489,6 +489,13 @@ export interface RunExecution {
   updatedAt: number;
   workflowRunId?: string;
   error?: string;
+  /**
+   * Lamp Iris best-of-two: which take (1 = Initial, 2 = Final) settlement
+   * selected for delivery. Server-owned, written only at settle; absent on
+   * every other mode and on runs settled before the policy existed (those
+   * delivered Final).
+   */
+  deliveredIteration?: 1 | 2;
 }
 
 export interface RunLogEntry {

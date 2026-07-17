@@ -43,9 +43,10 @@ import {
 import {
   lampIrisEvaluationOperationId,
 } from "@/lib/lamp-iris-operations";
-import type {
-  LampIrisEvalResult,
-  LampIrisEvaluationArtifact,
+import {
+  selectLampIrisDeliveredIteration,
+  type LampIrisEvalResult,
+  type LampIrisEvaluationArtifact,
 } from "@/lib/lamp-iris-evaluation";
 import type { LampIrisPlan } from "@/lib/lamp-iris";
 import { compileLampIrisFinalPrompt } from "@/lib/prompts/lamp-iris";
@@ -74,6 +75,7 @@ import {
 } from "@/lib/server/video-generation-start";
 import { PaidOperationAuthorizationError } from "@/lib/server/paid-operation";
 import {
+  analyzeInitialCandidateSync,
   analyzeV2Candidate,
   ensureSourceSyncBaseline,
   finalizeV2Lipsync,
@@ -2710,7 +2712,32 @@ async function settleIrisExecution(
       "Lamp Iris's Final prompt no longer reproduces from its approved plan and Initial evaluation."
     );
   }
-  await settleExecutionRecord(execution, workflowRunId, 2, input.executionId);
+  // Best-of-two: generation variance dominates prompt steering, so deliver
+  // the better-judged take. An Initial may only win delivery after clearing
+  // the same source-relative SyncNet verdict the Final cleared; the analysis
+  // is free and fails open to delivering the already-gated Final.
+  const selection = selectLampIrisDeliveredIteration(
+    firstEvaluation.result,
+    finalEvaluation.result
+  );
+  let deliveredIteration: 1 | 2 = selection.iteration;
+  if (deliveredIteration === 1) {
+    const initialSync = await analyzeInitialCandidateSync(input.runId);
+    if (
+      !initialSync ||
+      (!initialSync.silent &&
+        !v2SyncVerdict(initialSync.metrics, initialSync.sourceSync).pass)
+    ) {
+      deliveredIteration = 2;
+    }
+  }
+  await settleExecutionRecord(
+    execution,
+    workflowRunId,
+    2,
+    input.executionId,
+    deliveredIteration
+  );
   await setVideoGenerationWorkflowState(
     input.runId,
     2,
@@ -2725,7 +2752,8 @@ async function settleExecutionRecord(
   execution: RunExecution,
   workflowRunId: string,
   iteration: 1 | 2,
-  executionId: string
+  executionId: string,
+  deliveredIteration?: 1 | 2
 ): Promise<void> {
   const storage = getStorage();
   if (execution.status === "awaiting_review" && execution.phase === "complete") {
@@ -2742,6 +2770,7 @@ async function settleExecutionRecord(
     revision: execution.revision + 1,
     updatedAt: Math.max(Date.now(), execution.updatedAt),
     error: undefined,
+    ...(deliveredIteration !== undefined ? { deliveredIteration } : {}),
   };
   const advanced = await storage.advanceRunExecution(candidate, execution.revision);
   const durable = advanced.execution;

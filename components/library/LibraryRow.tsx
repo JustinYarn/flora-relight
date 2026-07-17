@@ -9,7 +9,10 @@ import { useAppStore } from "@/lib/store";
 import { CheckList } from "@/components/library/CheckList";
 import { PairPlayer } from "@/components/library/PairPlayer";
 import { DownloadSideBySide } from "@/components/review/DownloadSideBySide";
-import { needsLampHumanGrade } from "@/components/grade/derive";
+import {
+  deliveredInitialBestOfTwo,
+  needsLampHumanGrade,
+} from "@/components/grade/derive";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { isLampBackgroundRun } from "@/lib/lamp-background-read";
 import { isTwoPassWorkflowMode, runWorkflowMode } from "@/lib/workflow-mode";
@@ -175,6 +178,8 @@ function RowBody({ run }: { run: Run }) {
         relitLabel={
           backgroundNoOp
             ? "UNCHANGED SOURCE · APPROVED NO-OP"
+            : deliveredInitialBestOfTwo(run) && shipped?.index === 1
+            ? "RELIT v1 · BEST OF TWO"
             : background && shipped?.index === 2
             ? "CLEANED · FINAL"
             : fixedTwoPass && shipped?.index === 2
@@ -394,7 +399,13 @@ export function LibraryRow({
 
         <span
           className="w-20 shrink-0"
-          title={fixedTwoPass ? "Overall score of Final" : "Overall score of the shipped cut"}
+          title={
+            fixedTwoPass
+              ? deliveredInitialBestOfTwo(run)
+                ? "Overall score of the delivered Initial (best of two)"
+                : "Overall score of Final"
+              : "Overall score of the shipped cut"
+          }
         >
           {composite && verdict ? (
             <>

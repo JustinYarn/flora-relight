@@ -19,7 +19,12 @@ import {
   renderLampIrisHolisticEvaluatorPrompt,
   type LampIrisEvalResult,
   type LampIrisEvaluationArtifact,
+  type LampIrisGazeMeasurementPair,
 } from "@/lib/lamp-iris-evaluation";
+import {
+  lampIrisGazeMeasurementsUsable,
+} from "@/lib/lamp-iris-gaze";
+import { measureLampIrisGaze } from "@/lib/server/gaze-meter";
 import {
   parseLampIrisPlan,
   type LampIrisPlan,
@@ -151,9 +156,32 @@ export async function runLampIrisHolisticEvaluation(input: {
     );
   }
 
+  // GazeMeter runs BEFORE the paid-operation claim because its output is
+  // part of the judge prompt (canonical input) — the LAMP-INTENSITY.md
+  // ordering rule. It touches only local files and fails open; provider
+  // upload still happens strictly after the claim.
+  const [sourcePath, candidatePath] = await Promise.all([
+    resolveSourceUrl(run.originalVideo.url),
+    resolveSourceUrl(generation.result.videoUrl),
+  ]);
+  let gazeMeasurements: LampIrisGazeMeasurementPair | undefined;
+  const [sourceGaze, candidateGaze] = await Promise.all([
+    measureLampIrisGaze(sourcePath),
+    measureLampIrisGaze(candidatePath),
+  ]);
+  if (
+    sourceGaze &&
+    candidateGaze &&
+    lampIrisGazeMeasurementsUsable(sourceGaze) &&
+    lampIrisGazeMeasurementsUsable(candidateGaze)
+  ) {
+    gazeMeasurements = { source: sourceGaze, candidate: candidateGaze };
+  }
+
   const prompt = renderLampIrisHolisticEvaluatorPrompt({
     plan,
     iteration: input.iteration,
+    gazeMeasurements,
   });
   const operationId = lampIrisEvaluationOperationId(input.iteration);
   const claim = await beginPaidOperation({
@@ -171,6 +199,7 @@ export async function runLampIrisHolisticEvaluation(input: {
       generationPrompt: generation.renderedPrompt,
       plan,
       audioVerified: generation.result.audioVerified,
+      gazeMeasurements: gazeMeasurements ?? null,
       prompt,
     },
   });
@@ -188,10 +217,6 @@ export async function runLampIrisHolisticEvaluation(input: {
   }
 
   try {
-    const [sourcePath, candidatePath] = await Promise.all([
-      resolveSourceUrl(run.originalVideo.url),
-      resolveSourceUrl(generation.result.videoUrl),
-    ]);
     const [source, candidate] = await Promise.all([
       uploadVideoCached(sourcePath),
       uploadVideoCached(candidatePath),
@@ -241,6 +266,7 @@ export async function runLampIrisHolisticEvaluation(input: {
       previousResults: input.previousResults,
       usage,
       costUsd: geminiProCostFromUsage(usage),
+      gazeMeasurements,
     });
     return completePaidOperation(claim.operation, artifact);
   } catch (error) {

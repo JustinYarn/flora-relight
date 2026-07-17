@@ -10,6 +10,7 @@ import {
   type LampIrisCorrection,
   type LampIrisEvaluationArtifact,
 } from "../lamp-iris-evaluation.ts";
+import { renderLampIrisMeasuredCalibrationCorrection } from "../lamp-iris-gaze.ts";
 
 export interface LampIrisBasePrompt {
   task: string;
@@ -32,6 +33,12 @@ export interface LampIrisMegaPrompt {
   base: LampIrisBasePrompt;
   plan: LampIrisPlan;
   corrections: LampIrisCorrection[];
+  /**
+   * Deterministic GazeMeter steering compiled from the Initial evaluation's
+   * persisted measurements — pass 2's concrete magnitude instruction.
+   * Undefined when no usable measurements exist (fail-open).
+   */
+  measuredCalibration?: string;
   rendered: string;
 }
 
@@ -577,20 +584,25 @@ export function renderLampIrisCorrection(
 function renderCorrections(
   plan: LampIrisPlan,
   corrections: LampIrisCorrection[],
-  eol = "\n"
+  eol = "\n",
+  measuredCalibration?: string
 ): string {
-  if (corrections.length === 0) {
+  const lines: string[] = [];
+  if (measuredCalibration) {
+    lines.push(`1. [CRITICAL] MEASURED CALIBRATION — ${measuredCalibration}`);
+  }
+  for (const correction of corrections) {
+    lines.push(
+      `${lines.length + 1}. [${correction.severity.toUpperCase()}] ${renderLampIrisCorrection(
+        plan,
+        correction
+      )}`
+    );
+  }
+  if (lines.length === 0) {
     return "(none — first pass or no safe structured correction was available)";
   }
-  return corrections
-    .map(
-      (correction, index) =>
-        `${index + 1}. [${correction.severity.toUpperCase()}] ${renderLampIrisCorrection(
-          plan,
-          correction
-        )}`
-    )
-    .join(eol);
+  return lines.join(eol);
 }
 
 export function renderLampIrisMegaPrompt(
@@ -626,7 +638,7 @@ export function renderLampIrisMegaPrompt(
     base.application,
     "",
     CORRECTIONS_HEADING,
-    renderCorrections(plan, prompt.corrections),
+    renderCorrections(plan, prompt.corrections, "\n", prompt.measuredCalibration),
     "",
     NEVER_DO_HEADING,
     base.negative.map((instruction) => `- ${instruction}`).join("\n"),
@@ -718,7 +730,8 @@ function sectionBoundary(
 function renderPersistedV2(
   persistedV1: string,
   plan: LampIrisPlan,
-  corrections: LampIrisCorrection[]
+  corrections: LampIrisCorrection[],
+  measuredCalibration?: string
 ): string {
   if (!persistedV1.startsWith(V1_HEADER)) {
     throw new Error(
@@ -759,7 +772,12 @@ function renderPersistedV2(
   const offset = V2_HEADER.length - V1_HEADER.length;
   return (
     withV2Header.slice(0, correctionsSection.bodyStart + offset) +
-    renderCorrections(plan, corrections, correctionsSection.eol) +
+    renderCorrections(
+      plan,
+      corrections,
+      correctionsSection.eol,
+      measuredCalibration
+    ) +
     withV2Header.slice(correctionsSection.bodyEnd + offset)
   );
 }
@@ -782,11 +800,26 @@ export function compileLampIrisFinalPrompt(
     throw new Error("Lamp Iris final prompt requires persisted initial bytes.");
   }
   const corrections = collectLampIrisCorrections(firstEvaluation, canonical);
+  // Measurements live on the persisted evaluation artifact, so this compile
+  // is byte-stable across deploys and replay paths (the LAMP-INTENSITY.md
+  // durability rule). No usable measurements → no calibration line.
+  const measuredCalibration = firstEvaluation.gazeMeasurements
+    ? renderLampIrisMeasuredCalibrationCorrection({
+        source: firstEvaluation.gazeMeasurements.source,
+        initial: firstEvaluation.gazeMeasurements.candidate,
+      }) ?? undefined
+    : undefined;
   return {
     version: 2,
     base: LAMP_IRIS_BASE_PROMPT,
     plan: canonical,
     corrections,
-    rendered: renderPersistedV2(persistedInitialRendered, canonical, corrections),
+    ...(measuredCalibration !== undefined ? { measuredCalibration } : {}),
+    rendered: renderPersistedV2(
+      persistedInitialRendered,
+      canonical,
+      corrections,
+      measuredCalibration
+    ),
   };
 }

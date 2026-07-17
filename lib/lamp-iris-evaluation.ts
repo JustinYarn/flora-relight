@@ -1,3 +1,9 @@
+import {
+  isLampIrisGazeMeasurements,
+  lampIrisGazeMeasurementsUsable,
+  renderLampIrisGazeMeasurementBlock,
+  type LampIrisGazeMeasurements,
+} from "./lamp-iris-gaze.ts";
 import { parseLampIrisPlan, type LampIrisPlan } from "./lamp-iris.ts";
 import type {
   GeminiProUsageSnapshot,
@@ -260,6 +266,11 @@ export interface LampIrisEvalResult {
   deltaFromPrevious?: number;
 }
 
+export interface LampIrisGazeMeasurementPair {
+  source: LampIrisGazeMeasurements;
+  candidate: LampIrisGazeMeasurements;
+}
+
 export interface LampIrisEvaluationArtifact {
   version: typeof LAMP_IRIS_EVALUATOR_VERSION;
   planVersion: LampIrisPlan["version"];
@@ -268,6 +279,13 @@ export interface LampIrisEvaluationArtifact {
   evalResults: LampIrisEvalResult[];
   usage: GeminiProUsageSnapshot;
   costUsd: number;
+  /**
+   * Deterministic GazeMeter readings taken before the paid judge claim.
+   * Optional and fail-open: artifacts without measurements behave exactly as
+   * before. Persisted here so Final-prompt recompiles (route, coordinator,
+   * settlement, workflow replay) stay byte-stable across deploys.
+   */
+  gazeMeasurements?: LampIrisGazeMeasurementPair;
 }
 
 export interface LampIrisCorrection {
@@ -504,6 +522,7 @@ export function buildLampIrisEvaluationArtifact(input: {
   costUsd: number;
   usage?: GeminiProUsageSnapshot;
   previousResults?: LampIrisEvalResult[];
+  gazeMeasurements?: LampIrisGazeMeasurementPair;
 }): LampIrisEvaluationArtifact {
   const plan = parseLampIrisPlan(input.plan);
   if (input.iteration !== 1 && input.iteration !== 2) {
@@ -556,6 +575,17 @@ export function buildLampIrisEvaluationArtifact(input: {
     }
     return result;
   });
+  // Measurements attach only when both readings are structurally valid AND
+  // usable (enough frames, face actually found) — otherwise the artifact is
+  // built exactly as before and every downstream consumer fails open.
+  const gazeMeasurements =
+    input.gazeMeasurements &&
+    isLampIrisGazeMeasurements(input.gazeMeasurements.source) &&
+    isLampIrisGazeMeasurements(input.gazeMeasurements.candidate) &&
+    lampIrisGazeMeasurementsUsable(input.gazeMeasurements.source) &&
+    lampIrisGazeMeasurementsUsable(input.gazeMeasurements.candidate)
+      ? input.gazeMeasurements
+      : undefined;
   return {
     version: LAMP_IRIS_EVALUATOR_VERSION,
     planVersion: plan.version,
@@ -567,6 +597,94 @@ export function buildLampIrisEvaluationArtifact(input: {
     ],
     usage,
     costUsd: input.costUsd,
+    ...(gazeMeasurements ? { gazeMeasurements } : {}),
+  };
+}
+
+export interface LampIrisArtifactComposite {
+  score: number;
+  passed: boolean;
+  hardGateFailures: LampIrisEvalId[];
+}
+
+/**
+ * Weighted composite + hard-gate outcome straight from a persisted artifact.
+ * Mirrors the UI composite math so the workflow and the run page can never
+ * disagree about which take scored better.
+ */
+export function lampIrisArtifactComposite(
+  artifact: LampIrisEvaluationArtifact
+): LampIrisArtifactComposite {
+  let weighted = 0;
+  let totalWeight = 0;
+  const hardGateFailures: LampIrisEvalId[] = [];
+  for (const definition of LAMP_IRIS_EVAL_DEFS) {
+    const result = artifact.evalResults.find(
+      (entry) => entry.evalId === definition.id
+    );
+    if (!result) {
+      throw new Error(
+        `Lamp Iris composite requires a result for ${definition.id}.`
+      );
+    }
+    weighted += definition.weight * result.score;
+    totalWeight += definition.weight;
+    if (definition.hardGate && result.verdict !== "pass") {
+      hardGateFailures.push(definition.id);
+    }
+  }
+  return {
+    score: Math.round((totalWeight > 0 ? weighted / totalWeight : 0) * 10) / 10,
+    passed: hardGateFailures.length === 0,
+    hardGateFailures,
+  };
+}
+
+export interface LampIrisDeliverySelection {
+  iteration: 1 | 2;
+  reason: string;
+}
+
+/**
+ * Best-of-two: generation variance dominates prompt steering on this
+ * provider (no seed control), so the delivered take is the better-judged
+ * take, never blindly the last. Hard-gate-passing iterations strictly
+ * dominate; composites break the tie; an exact tie ships Final.
+ */
+export function selectLampIrisDeliveredIteration(
+  first: LampIrisEvaluationArtifact,
+  final: LampIrisEvaluationArtifact
+): LampIrisDeliverySelection {
+  if (first.iteration !== 1 || final.iteration !== 2) {
+    throw new Error(
+      "Best-of-two selection requires the Initial and Final artifacts in order."
+    );
+  }
+  const initial = lampIrisArtifactComposite(first);
+  const corrected = lampIrisArtifactComposite(final);
+  if (initial.passed !== corrected.passed) {
+    return initial.passed
+      ? {
+          iteration: 1,
+          reason: `Initial passed every hard gate (${initial.score}) while Final did not (${corrected.score}).`,
+        }
+      : {
+          iteration: 2,
+          reason: `Final passed every hard gate (${corrected.score}) while Initial did not (${initial.score}).`,
+        };
+  }
+  if (initial.score > corrected.score) {
+    return {
+      iteration: 1,
+      reason: `Initial outscored Final ${initial.score} to ${corrected.score}; best-of-two delivers the better take.`,
+    };
+  }
+  return {
+    iteration: 2,
+    reason:
+      initial.score === corrected.score
+        ? `Initial and Final tied at ${corrected.score}; the correction pass ships on a tie.`
+        : `Final outscored Initial ${corrected.score} to ${initial.score}.`,
   };
 }
 
@@ -656,6 +774,7 @@ const INTENSITY_EXPECTATION: Record<1 | 2 | 3, string> = {
 export function renderLampIrisHolisticEvaluatorPrompt(input: {
   plan: LampIrisPlan;
   iteration: 1 | 2;
+  gazeMeasurements?: LampIrisGazeMeasurementPair;
 }): string {
   const plan = parseLampIrisPlan(input.plan);
   const gazeContract =
@@ -672,6 +791,10 @@ export function renderLampIrisHolisticEvaluatorPrompt(input: {
     (definition) =>
       `- ${definition.id} (weight ${definition.weight}): ${definition.rubric}`
   ).join("\n");
+  const measuredBlock =
+    input.gazeMeasurements !== undefined
+      ? [renderLampIrisGazeMeasurementBlock(input.gazeMeasurements), ""]
+      : [];
   return [
     `You are the holistic evaluator for Lamp Iris iteration ${input.iteration}.`,
     "You are given the ORIGINAL source video and one CANDIDATE eye-contact correction of its primary subject.",
@@ -682,6 +805,7 @@ export function renderLampIrisHolisticEvaluatorPrompt(input: {
     "",
     gazeContract,
     "",
+    ...measuredBlock,
     "Evaluation principles:",
     "- The near-copy is this workflow's characteristic undershoot: when the eye region at corresponding timestamps is essentially indistinguishable from the source, OR the gaze moved only as far as a screen or near-lens point that still misses the viewer's eyes, gaze-adherence has failed regardless of overall fidelity — report it with correctionAction complete-approved-gaze-correction.",
     "- The subject is reading a script; the delivered audio is the untouched source track. Lip-sync and speech articulation are product-critical and judged at full strictness.",

@@ -117,6 +117,7 @@ import {
   lampIrisPromptForRun,
   projectLampIrisEvaluationForRead,
 } from "@/lib/lamp-iris-read";
+import { selectLampIrisDeliveredIteration } from "@/lib/lamp-iris-evaluation";
 import {
   lampIrisEvaluationOperationId,
   lampIrisPlanOperationId,
@@ -1262,6 +1263,9 @@ function mergeLampIrisEvaluationResults(
   const finalPrompt = final
     ? lampIrisFinalPrompt(candidate, execution, evaluations)
     : undefined;
+  // Best-of-two: the blind-grading hide tracks the settlement's DELIVERED
+  // take. Legacy executions without the marker delivered Final (2).
+  const deliveredIteration = execution.deliveredIteration ?? 2;
   for (const iteration of candidate.iterations) {
     if (iteration.index === 1 && first) {
       const projection = projectLampIrisEvaluationForRead({
@@ -1269,6 +1273,8 @@ function mergeLampIrisEvaluationResults(
         artifact: first,
         irisPlan: candidate.irisPlan,
         humanGradeSaved: candidate.humanGrade !== undefined,
+        hideFinalEvaluation,
+        deliveredIteration,
       });
       iteration.evalResults = projection.evalResults;
       if (projection.composite) iteration.composite = projection.composite;
@@ -1283,6 +1289,7 @@ function mergeLampIrisEvaluationResults(
         irisPlan: candidate.irisPlan,
         humanGradeSaved: candidate.humanGrade !== undefined,
         hideFinalEvaluation,
+        deliveredIteration,
       });
       iteration.evalResults = projection.evalResults;
       if (projection.composite) iteration.composite = projection.composite;
@@ -2225,7 +2232,19 @@ function materializeServerResults(
           : "blind human grade required; approved plan remains visible",
       };
 
-      delete materialized.bestIterationIndex;
+      // Best-of-two delivery: the settled execution may select the Initial
+      // take. The legacy best-of marker then points delivered-video readers
+      // (Library, batch summaries, legacy resolvers) at v1. A Final delivery
+      // — or any unsettled/legacy execution — keeps the field absent exactly
+      // as before.
+      const deliveredInitial =
+        execution.status === "awaiting_review" &&
+        execution.deliveredIteration === 1;
+      if (deliveredInitial) {
+        materialized.bestIterationIndex = 1;
+      } else {
+        delete materialized.bestIterationIndex;
+      }
       delete materialized.finalVideo;
       delete materialized.fallback;
       const logKey = `server execution ${execution.executionId}`;
@@ -2253,6 +2272,37 @@ function materializeServerResults(
               : "info",
           message,
         });
+      }
+      if (deliveredInitial) {
+        const bestOfTwoKey = `best-of-two ${execution.executionId}`;
+        if (
+          !materialized.log.some((entry) =>
+            entry.message.includes(bestOfTwoKey)
+          )
+        ) {
+          // Reproduce the settlement's own selection math for the log line;
+          // deliveredIteration 1 is only ever written when this selector
+          // chose the Initial, so the recomputed reason is the settled one.
+          const selectionReason = (() => {
+            if (firstEvaluation && finalEvaluation) {
+              try {
+                return selectLampIrisDeliveredIteration(
+                  firstEvaluation,
+                  finalEvaluation
+                ).reason;
+              } catch {
+                // Fall through to the generic explanation below.
+              }
+            }
+            return "the Initial outscored the corrected Final.";
+          })();
+          materialized.log.push({
+            at: execution.updatedAt,
+            nodeId: "review",
+            level: "info",
+            message: `${bestOfTwoKey}: ${selectionReason} Delivering the Initial take (v1) for human grading.`,
+          });
+        }
       }
       return materialized;
     }

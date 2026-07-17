@@ -271,10 +271,18 @@ export function projectLampIrisEvaluationForRead(input: {
   irisPlan: LampIrisPlan;
   humanGradeSaved: boolean;
   hideFinalEvaluation?: boolean;
+  /**
+   * Best-of-two: which take settlement delivered (1 = Initial, 2 = Final).
+   * The blind-grading hide applies to the DELIVERED take — the one the human
+   * grades — while the other take's evaluation stays visible. Absent = legacy
+   * Final-delivered records, preserving the historical iteration-2 hide.
+   */
+  deliveredIteration?: 1 | 2;
 }): { evalResults: EvalResult[]; composite?: IterationComposite } {
+  const deliveredIteration = input.deliveredIteration ?? 2;
   if (
     !input.artifact ||
-    (input.iteration === 2 &&
+    (input.iteration === deliveredIteration &&
       !input.humanGradeSaved &&
       input.hideFinalEvaluation === true)
   ) {

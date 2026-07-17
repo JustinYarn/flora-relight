@@ -237,6 +237,54 @@ export async function analyzeV2Candidate(
   }
 }
 
+const INITIAL_NAME = "relit-v1.mp4";
+
+export type InitialCandidateSyncCheck =
+  | { silent: true }
+  | {
+      silent: false;
+      metrics: SyncNetMetrics;
+      sourceSync: SyncNetMetrics | null;
+    };
+
+/**
+ * Free SyncNet analysis of the Initial take for Lamp Iris best-of-two: an
+ * Initial may only be DELIVERED when it clears the same source-relative gate
+ * the Final cleared. Fail-open by contract — any analyzer or storage failure
+ * returns null and the caller ships the already-gated Final instead. This
+ * path never bills and never repairs; the paid Lipsync repair remains
+ * Final-only.
+ */
+export async function analyzeInitialCandidateSync(
+  runId: string
+): Promise<InitialCandidateSyncCheck | null> {
+  const storage = getStorage();
+  try {
+    if (!(await storage.mediaExists(runId, INITIAL_NAME))) return null;
+    if (!(await storage.mediaExists(runId, SOURCE_AUDIO_NAME))) {
+      // A silent source has no lip-sync dimension; the composite comparison
+      // alone is sufficient to deliver the Initial.
+      return { silent: true };
+    }
+    const initialPath = await mediaPath(storage, runId, INITIAL_NAME);
+    const metrics = await analyzeVideoSync(initialPath);
+    return {
+      silent: false,
+      metrics,
+      sourceSync: await ensureSourceSyncBaseline(runId),
+    };
+  } catch (error) {
+    console.warn(
+      `[iris best-of-two] Initial sync analysis failed open — delivering Final: ${
+        error instanceof Error ? error.message.slice(0, 160) : "unknown error"
+      }`
+    );
+    return null;
+  } finally {
+    await cleanupRemoteScratch(storage, runId).catch(() => undefined);
+  }
+}
+
 /** Upload retry-safe Replicate inputs before claiming the billed prediction. */
 export async function prepareV2LipsyncInputs(
   runId: string

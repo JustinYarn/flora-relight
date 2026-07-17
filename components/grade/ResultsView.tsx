@@ -11,6 +11,7 @@ import {
   biggestDisagreements,
   biggestDivergence,
   collectComparisons,
+  deliveredInitialBestOfTwo,
   evalDefsForRuns,
   finalLampIteration,
   finalLampVideo,
@@ -65,6 +66,8 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
   const [open, setOpen] = useState(defaultOpen);
   const final = finalLampIteration(run);
   const relit = finalLampVideo(run);
+  // Lamp Iris best-of-two delivered the Initial take; label it honestly.
+  const bestOfTwoInitial = deliveredInitialBestOfTwo(run);
   const aiResults = final?.evalResults ?? [];
   const definitions = evalDefsForRun(run);
   const definitionIds = new Set(definitions.map((definition) => definition.id));
@@ -86,8 +89,10 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
           {run.originalVideo.label}
         </span>
         <span className="text-2xs tabular-nums text-muted">
-          Final v{final?.index ?? 2} · {availableCount} of {definitions.length} AI
-          results
+          {bestOfTwoInitial
+            ? `Delivered v${final?.index ?? 1} · best of two`
+            : `Final v${final?.index ?? 2}`}{" "}
+          · {availableCount} of {definitions.length} AI results
         </span>
         <span
           className="text-2xs font-medium"
@@ -108,7 +113,11 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
             original={run.originalVideo}
             relit={relit}
             audible="relit"
-            relitLabel={`FINAL VIDEO · v${final?.index ?? 2}`}
+            relitLabel={
+              bestOfTwoInitial
+                ? `DELIVERED VIDEO · v${final?.index ?? 1} · BEST OF TWO`
+                : `FINAL VIDEO · v${final?.index ?? 2}`
+            }
           />
         </div>
       ) : null}
@@ -232,7 +241,9 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         <SectionTitle
           right={
             <span className="text-2xs text-faint">
-              human grade vs final v2 AI evaluation
+              {gradedRuns.some(deliveredInitialBestOfTwo)
+                ? "human grade vs the delivered take's AI evaluation"
+                : "human grade vs final v2 AI evaluation"}
             </span>
           }
         >
