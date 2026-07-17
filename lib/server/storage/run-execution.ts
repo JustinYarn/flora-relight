@@ -164,10 +164,26 @@ export function assertRunExecution(execution: unknown): RunExecution {
     );
   }
   assertOptionalText(candidate.error, "error", MAX_ERROR_LENGTH);
+  if (
+    candidate.deliveredIteration !== undefined &&
+    candidate.deliveredIteration !== 1 &&
+    candidate.deliveredIteration !== 2
+  ) {
+    throw new Error("Run execution deliveredIteration must be 1 or 2");
+  }
+  if (
+    candidate.deliveredIteration !== undefined &&
+    !candidate.executionId.startsWith("lamp-iris:")
+  ) {
+    throw new Error(
+      "deliveredIteration is a Lamp Iris best-of-two field and is invalid on other executions"
+    );
+  }
 
   const planFirst =
     candidate.executionId.startsWith("lamp-background:") ||
-    candidate.executionId.startsWith("lamp-beautify:");
+    candidate.executionId.startsWith("lamp-beautify:") ||
+    candidate.executionId.startsWith("lamp-iris:");
   if (
     planFirst !==
     Boolean(candidate.planOperationId && candidate.approvedPlanHash)

@@ -3,7 +3,9 @@ import test from "node:test";
 
 import { parseHumanGrade } from "../lib/human-grade.ts";
 import { LAMP_BACKGROUND_EVAL_IDS } from "../lib/lamp-background-evaluation.ts";
+import { LAMP_BEAUTIFY_EVAL_IDS } from "../lib/lamp-beautify-evaluation.ts";
 import { LAMP_EVAL_IDS } from "../lib/lamp-evaluation.ts";
+import { LAMP_IRIS_EVAL_IDS } from "../lib/lamp-iris-evaluation.ts";
 import { EVAL_DEFS } from "../lib/prompts/eval-defs.ts";
 
 const FLORA_EVAL_IDS = EVAL_DEFS.map((definition) => definition.id);
@@ -98,6 +100,35 @@ test("Lamp rejects partial, unknown, and non-canonical score payloads", () => {
     }),
     null
   );
+});
+
+test("Lamp Beautify and Lamp Iris require their own rows, never Flora's", () => {
+  // The grade-save gate once fell back to Flora's key set for these modes,
+  // rejecting every real submission with 400. Their scopes are exact: the
+  // mode's own rows parse, and Flora's same-length set stays invalid in both
+  // directions (no legacy acceptance ever existed for these modes).
+  for (const evalIds of [LAMP_BEAUTIFY_EVAL_IDS, LAMP_IRIS_EVAL_IDS]) {
+    const parsed = parseHumanGrade({
+      value: grade(evalIds),
+      requiredEvalIds: evalIds,
+    });
+    assert.ok(parsed);
+    assert.deepEqual(Object.keys(parsed.scores), evalIds);
+    assert.equal(
+      parseHumanGrade({
+        value: grade(FLORA_EVAL_IDS),
+        requiredEvalIds: evalIds,
+      }),
+      null
+    );
+    assert.equal(
+      parseHumanGrade({
+        value: grade(evalIds),
+        requiredEvalIds: FLORA_EVAL_IDS,
+      }),
+      null
+    );
+  }
 });
 
 test("Flora continues to require all eleven rows", () => {

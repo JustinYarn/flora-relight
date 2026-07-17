@@ -95,9 +95,10 @@ function validateBody(body: StartBody): string | null {
     body.workflowMode !== "flora" &&
     body.workflowMode !== "lamp" &&
     body.workflowMode !== "background" &&
-    body.workflowMode !== "beautify"
+    body.workflowMode !== "beautify" &&
+    body.workflowMode !== "iris"
   ) {
-    return 'workflowMode must be "flora", "lamp", "background", or "beautify".';
+    return 'workflowMode must be "flora", "lamp", "background", "beautify", or "iris".';
   }
   return null;
 }
@@ -335,6 +336,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       {
         error:
           "Lamp Beautify v1 supports one clip at a time because every subject needs its own approved enhancement plan. Beautify batches are not started.",
+      },
+      { status: 409 }
+    );
+  }
+  if (body.workflowMode === "iris") {
+    return NextResponse.json(
+      {
+        error:
+          "Lamp Iris v1 supports one clip at a time because every subject needs its own approved gaze plan. Iris batches are not started.",
       },
       { status: 409 }
     );

@@ -11,6 +11,7 @@ import type { EvalDefinition, EvalMethod, WorkflowMode } from "@/lib/types";
 import { workflowForMode } from "@/lib/workflow-def";
 import { LAMP_EVAL_DEFS } from "@/lib/lamp-evaluation";
 import { LAMP_BACKGROUND_UI_EVAL_DEFS } from "@/lib/lamp-background-read";
+import { LAMP_IRIS_UI_EVAL_DEFS } from "@/lib/lamp-iris-read";
 import {
   lampBackgroundDisplayPrompt,
   sampleApprovedLampBackgroundPlan,
@@ -38,6 +39,7 @@ const FILTERS: Array<{ id: CheckFilter; label: string }> = [
 function definitionsForMode(workflowMode: WorkflowMode): EvalDefinition[] {
   if (workflowMode === "lamp") return LAMP_EVAL_DEFS;
   if (workflowMode === "background") return LAMP_BACKGROUND_UI_EVAL_DEFS;
+  if (workflowMode === "iris") return LAMP_IRIS_UI_EVAL_DEFS;
   return EVAL_DEFS;
 }
 

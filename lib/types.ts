@@ -382,7 +382,7 @@ export interface WorkflowDefinition {
  * interpreted from their workflow id so existing Flora and Lamp runs keep
  * their original execution semantics after Lamp Background is introduced.
  */
-export type WorkflowMode = "flora" | "lamp" | "background" | "beautify";
+export type WorkflowMode = "flora" | "lamp" | "background" | "beautify" | "iris";
 
 export type NodeRunStatus =
   | "idle"
@@ -489,6 +489,13 @@ export interface RunExecution {
   updatedAt: number;
   workflowRunId?: string;
   error?: string;
+  /**
+   * Lamp Iris best-of-two: which take (1 = Initial, 2 = Final) settlement
+   * selected for delivery. Server-owned, written only at settle; absent on
+   * every other mode and on runs settled before the policy existed (those
+   * delivered Final).
+   */
+  deliveredIteration?: 1 | 2;
 }
 
 export interface RunLogEntry {
@@ -636,7 +643,9 @@ export interface SpendApproval {
     | "background_plan"
     | "background_two_pass"
     | "beautify_plan"
-    | "beautify_two_pass";
+    | "beautify_two_pass"
+    | "iris_plan"
+    | "iris_two_pass";
   batchId?: string;
   /** Canonical durable ingest identity and facts this approval was priced for. */
   runId: string;
@@ -710,6 +719,7 @@ export interface Run {
    */
   backgroundCleanupPlan?: import("./lamp-background").LampBackgroundCleanupPlan;
   beautifyPlan?: import("./lamp-beautify").LampBeautifyPlan;
+  irisPlan?: import("./lamp-iris").LampIrisPlan;
   iterations: Iteration[];
   /** Legacy best-of tracking. Lamp leaves this unset because v2 is always Final. */
   bestIterationIndex?: number;

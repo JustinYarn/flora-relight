@@ -22,6 +22,11 @@ import {
   lampBeautifyEvaluationOperationId,
   lampBeautifyPlanOperationId,
 } from "../lamp-beautify-operations.ts";
+import {
+  LAMP_IRIS_HOLISTIC_EVAL_ID,
+  lampIrisEvaluationOperationId,
+  lampIrisPlanOperationId,
+} from "../lamp-iris-operations.ts";
 import { lampEvaluationOperationId } from "../lamp-evaluation.ts";
 import { LIPSYNC_OPERATION_ID } from "../v2-sync.ts";
 import type {
@@ -84,13 +89,16 @@ export function createSpendApproval(
     throw new Error("Single-run spend approval cannot carry a batch identity.");
   }
   const maxIterations =
-    scope === "background_plan" || scope === "beautify_plan"
+    scope === "background_plan" ||
+    scope === "beautify_plan" ||
+    scope === "iris_plan"
       ? 0
       : scope === "first_cut"
         ? 1
         : scope === "lamp_two_pass" ||
             scope === "background_two_pass" ||
-            scope === "beautify_two_pass"
+            scope === "beautify_two_pass" ||
+            scope === "iris_two_pass"
           ? 2
           : FLORA_WORKFLOW.config.maxIterations;
   return {
@@ -108,10 +116,13 @@ export function createSpendApproval(
         ? microsToUsd(firstCutMaximumMicros())
         : scope === "lamp_two_pass"
           ? microsToUsd(lampMaximumMicros())
-          : scope === "background_plan" || scope === "beautify_plan"
+          : scope === "background_plan" ||
+              scope === "beautify_plan" ||
+              scope === "iris_plan"
             ? microsToUsd(lampBackgroundPlanMaximumMicros())
             : scope === "background_two_pass" ||
-                scope === "beautify_two_pass"
+                scope === "beautify_two_pass" ||
+                scope === "iris_two_pass"
               ? microsToUsd(lampBackgroundMaximumMicros())
               : estimateRun(video.durationSec, maxIterations).totalUsd,
     maxIterations,
@@ -123,14 +134,19 @@ function approvalIterationsAreValid(
   maxIterations: number
 ): boolean {
   if (!Number.isSafeInteger(maxIterations)) return false;
-  if (scope === "background_plan" || scope === "beautify_plan") {
+  if (
+    scope === "background_plan" ||
+    scope === "beautify_plan" ||
+    scope === "iris_plan"
+  ) {
     return maxIterations === 0;
   }
   if (scope === "first_cut") return maxIterations === 1;
   if (
     scope === "lamp_two_pass" ||
     scope === "background_two_pass" ||
-    scope === "beautify_two_pass"
+    scope === "beautify_two_pass" ||
+    scope === "iris_two_pass"
   ) {
     return maxIterations === 2;
   }
@@ -170,7 +186,9 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
       approval.scope !== "background_plan" &&
       approval.scope !== "background_two_pass" &&
       approval.scope !== "beautify_plan" &&
-      approval.scope !== "beautify_two_pass") ||
+      approval.scope !== "beautify_two_pass" &&
+      approval.scope !== "iris_plan" &&
+      approval.scope !== "iris_two_pass") ||
     !approvalIterationsAreValid(approval.scope, approval.maxIterations)
   ) {
     throw new Error("Live spend approval is invalid.");
@@ -184,10 +202,12 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
       : approval.scope === "lamp_two_pass"
         ? microsToUsd(lampMaximumMicros())
         : approval.scope === "background_plan" ||
-            approval.scope === "beautify_plan"
+            approval.scope === "beautify_plan" ||
+            approval.scope === "iris_plan"
           ? microsToUsd(lampBackgroundPlanMaximumMicros())
           : approval.scope === "background_two_pass" ||
-              approval.scope === "beautify_two_pass"
+              approval.scope === "beautify_two_pass" ||
+              approval.scope === "iris_two_pass"
             ? microsToUsd(lampBackgroundMaximumMicros())
             : estimateRun(
                 run.originalVideo.durationSec,
@@ -199,10 +219,12 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
       : approval.scope === "lamp_two_pass"
         ? lampMaximumMicros()
         : approval.scope === "background_plan" ||
-            approval.scope === "beautify_plan"
+            approval.scope === "beautify_plan" ||
+            approval.scope === "iris_plan"
           ? lampBackgroundPlanMaximumMicros()
           : approval.scope === "background_two_pass" ||
-              approval.scope === "beautify_two_pass"
+              approval.scope === "beautify_two_pass" ||
+              approval.scope === "iris_two_pass"
             ? lampBackgroundMaximumMicros()
             : null;
   if (
@@ -351,6 +373,46 @@ export function hasReusableLampBeautifyApproval(
   }
 }
 
+/** Reuse only the exact one-call planner grant bound to this source owner. */
+export function hasReusableLampIrisPlanApproval(
+  run: Run,
+  source: SpendApproval["source"] = "single",
+  batchId?: string,
+  now = Date.now()
+): boolean {
+  try {
+    const approval = assertApprovalCoversRun(run, now);
+    return (
+      approval.scope === "iris_plan" &&
+      approval.source === source &&
+      approval.batchId === batchId &&
+      approval.maxIterations === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Reuse only the execution-only eye-contact grant; planner spend is excluded. */
+export function hasReusableLampIrisApproval(
+  run: Run,
+  source: SpendApproval["source"] = "single",
+  batchId?: string,
+  now = Date.now()
+): boolean {
+  try {
+    const approval = assertApprovalCoversRun(run, now);
+    return (
+      approval.scope === "iris_two_pass" &&
+      approval.source === source &&
+      approval.batchId === batchId &&
+      approval.maxIterations === 2
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Authorize a new synchronous paid operation. Cache reads and reconciliation
  * never call this because they cannot incur new provider spend.
@@ -446,6 +508,37 @@ export function assertPaidOperationAuthorized(
     if (!holisticEvaluation && !finalLipsyncRepair) {
       throw new Error(
         "Lamp Beautify execution authorizes its two holistic evaluations and at most one Lipsync-2-Pro repair for Final; planning requires a separate approval."
+      );
+    }
+    return;
+  }
+  if (approval.scope === "iris_plan") {
+    const exactPlanOperation =
+      kind === "plan" &&
+      iteration === undefined &&
+      evalId === undefined &&
+      operationId === lampIrisPlanOperationId();
+    if (!exactPlanOperation) {
+      throw new Error(
+        "Lamp Iris planning authorizes exactly one gaze-correction-plan operation and no generation or evaluation spend."
+      );
+    }
+    return;
+  }
+  if (approval.scope === "iris_two_pass") {
+    const holisticEvaluation =
+      kind === "judge" &&
+      evalId === LAMP_IRIS_HOLISTIC_EVAL_ID &&
+      operationId === lampIrisEvaluationOperationId(iteration ?? 0) &&
+      (iteration === 1 || iteration === 2);
+    const finalLipsyncRepair =
+      kind === "lipsync" &&
+      iteration === 2 &&
+      evalId === undefined &&
+      operationId === LIPSYNC_OPERATION_ID;
+    if (!holisticEvaluation && !finalLipsyncRepair) {
+      throw new Error(
+        "Lamp Iris execution authorizes its two holistic evaluations and at most one Lipsync-2-Pro repair for Final; planning requires a separate approval."
       );
     }
     return;

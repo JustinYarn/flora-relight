@@ -26,12 +26,16 @@ function withNewestHumanGrade(base: Run, local: Run, incoming: Run): Run {
   const grade = source.humanGrade;
   if (!grade) return base;
 
+  // The grade pairs with the DELIVERED take's evaluation: v2 everywhere
+  // except a Lamp Iris best-of-two run whose settlement delivered the
+  // Initial (serverExecution.deliveredIteration === 1).
+  const deliveredIndex = base.serverExecution?.deliveredIteration ?? 2;
   const sourceFinal = source.iterations.find(
-    (iteration) => iteration.index === 2
+    (iteration) => iteration.index === deliveredIndex
   );
   let foundFinal = false;
   const iterations = base.iterations.map((iteration) => {
-    if (iteration.index !== 2 || !sourceFinal) return iteration;
+    if (iteration.index !== deliveredIndex || !sourceFinal) return iteration;
     foundFinal = true;
     if (sourceFinal.evalResults.length < iteration.evalResults.length) {
       return iteration;

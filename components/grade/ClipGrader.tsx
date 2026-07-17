@@ -18,7 +18,9 @@ import { formatRunDate } from "@/components/library/derive";
 import { EvalList } from "@/components/review/EvalList";
 import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
 import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
+import { IrisPlanReview } from "@/components/review/IrisPlanReview";
 import {
+  deliveredInitialBestOfTwo,
   finalLampIteration,
   finalLampVideo,
   SCALE,
@@ -137,6 +139,8 @@ export function ClipGrader({
 
   const shipped = finalLampIteration(run);
   const relit = finalLampVideo(run);
+  // Lamp Iris best-of-two delivered the Initial take; label it honestly.
+  const bestOfTwoInitial = deliveredInitialBestOfTwo(run);
   const lampRun = isLampRun(run);
   const backgroundRun = isLampBackgroundRun(run);
   const exceptionalBackgroundNoOp =
@@ -312,8 +316,12 @@ export function ClipGrader({
         </h2>
         <span className="text-2xs text-faint">
           {formatRunDate(run.createdAt)}
-          {shipped ? ` · final v${shipped.index}` : ""} · {remaining}{" "}
-          {remaining === 1 ? "clip" : "clips"} in the queue
+          {shipped
+            ? bestOfTwoInitial
+              ? ` · delivered v${shipped.index} · best of two`
+              : ` · final v${shipped.index}`
+            : ""}{" "}
+          · {remaining} {remaining === 1 ? "clip" : "clips"} in the queue
         </span>
       </div>
 
@@ -327,7 +335,9 @@ export function ClipGrader({
             run.finalVideo
               ? `FINAL VIDEO${shipped ? ` · v${shipped.index}` : ""}`
               : shipped
-                ? `FINAL VIDEO · v${shipped.index}`
+                ? bestOfTwoInitial
+                  ? `DELIVERED VIDEO · v${shipped.index} · BEST OF TWO`
+                  : `FINAL VIDEO · v${shipped.index}`
                 : "FINAL VIDEO"
           }
         />
@@ -341,6 +351,11 @@ export function ClipGrader({
       {run.beautifyPlan?.approval.status === "approved" ? (
         <div className="mt-4">
           <BeautifyPlanReview run={run} interactive={false} compact />
+        </div>
+      ) : null}
+      {run.irisPlan?.approval.status === "approved" ? (
+        <div className="mt-4">
+          <IrisPlanReview run={run} interactive={false} compact />
         </div>
       ) : null}
 

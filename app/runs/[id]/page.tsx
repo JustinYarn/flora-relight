@@ -27,6 +27,7 @@ import { WorkflowRail } from "@/components/review/WorkflowRail";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
 import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
+import { IrisPlanReview } from "@/components/review/IrisPlanReview";
 
 const STATUS_COLOR: Record<RunStatus, string> = {
   running: "var(--running)",
@@ -102,7 +103,9 @@ export default function RunReviewPage() {
   const planAwaitingApproval =
     (backgroundRun && run.backgroundCleanupPlan?.approval.status === "draft") ||
     (run.workflowMode === "beautify" &&
-      run.beautifyPlan?.approval.status === "draft");
+      run.beautifyPlan?.approval.status === "draft") ||
+    (run.workflowMode === "iris" &&
+      run.irisPlan?.approval.status === "draft");
   // Default to the delivered v2 final; mid-flight, follow the newest stage.
   const autoKey = run.finalVideo ? "final" : latest ? `iter-${latest.index}` : null;
   const activeKey = userSelected ?? autoKey;
@@ -162,6 +165,7 @@ export default function RunReviewPage() {
         <div className="min-w-0 xl:flex-1">
           <BackgroundPlanReview run={run} />
           <BeautifyPlanReview run={run} />
+          <IrisPlanReview run={run} />
 
           {/* HERO — original next to relit, one shared transport. While the
           selected attempt is still generating, the relit slot becomes the
