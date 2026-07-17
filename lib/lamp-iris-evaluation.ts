@@ -648,9 +648,9 @@ function evaluatorPlanProjection(plan: LampIrisPlan): unknown {
 }
 
 const INTENSITY_EXPECTATION: Record<1 | 2 | 3, string> = {
-  1: "natural assist — the clear reading pattern is calmed while every natural glance-away and the full blink pattern survive; a gaze still visibly anchored to reading material is undershoot, and erased natural breaks are overshoot",
-  2: "presenter — contact is the steady state through all spoken passages with brief natural breaks surviving at phrase boundaries; residual reading anchor or scanning is undershoot, and a break-free continuous lock is overshoot",
-  3: "anchor — near-continuous contact except blinks and momentary natural micro-breaks; any habitual off-lens rest is undershoot, and a frozen unblinking stare is overshoot",
+  1: "assist — the reading pattern is really reduced and findable in a side-by-side; an eye region essentially indistinguishable from the source at corresponding timestamps is undershoot, and erased natural breaks are overshoot",
+  2: "presenter — redirected eyes evident at a glance in a same-timestamp side-by-side, with contact the steady state through speech; an eye region hard to distinguish from the source is a failed near-copy and must score as undershoot, and a break-free continuous lock is overshoot",
+  3: "anchor — unmistakable to-lens contact in effectively every frame even without the source for comparison; any habitual off-lens rest is undershoot, and a frozen unblinking stare is overshoot",
 };
 
 export function renderLampIrisHolisticEvaluatorPrompt(input: {
@@ -683,6 +683,7 @@ export function renderLampIrisHolisticEvaluatorPrompt(input: {
     gazeContract,
     "",
     "Evaluation principles:",
+    "- The near-copy is this workflow's characteristic undershoot: when the eye region at corresponding timestamps is essentially indistinguishable from the source, gaze-adherence has failed regardless of overall fidelity — report it with correctionAction complete-approved-gaze-correction.",
     "- The subject is reading a script; the delivered audio is the untouched source track. Lip-sync and speech articulation are product-critical and judged at full strictness.",
     "- Blinks are never currency: no approved intensity buys the removal, addition, or retiming of a single blink.",
     "- The head never re-aims; contact achieved by head pose change instead of eye redirection is a motion-lipsync failure.",
