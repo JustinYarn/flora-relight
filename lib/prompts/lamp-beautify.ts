@@ -88,6 +88,9 @@ export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Apply each approved enhancement uniformly and continuously across the full timeline, tracking the subject through motion, occlusion, and lighting variation.",
     "Warmth must read as genuine mood, not a pasted smile: it lives in micro-lifts at the mouth corners, the eyes, and the cheeks, and it still moves naturally with the words being spoken.",
     "Real skin keeps texture and natural micro-variation at every intensity; refinement may tighten the visual appearance of pores and temporary blemishes, and it never manufactures a poreless surface.",
+    "Reproduce the source's exact grain structure, sensor-noise character, and compression fingerprint everywhere, including inside enhanced regions — that organic imperfection is what makes footage read as real; its absence is what reads as artificial.",
+    "Every edit sits under the source noise floor: enhanced pixels carry the same noise statistics as their neighbors, with no denoised, sharpened, upscaled, or synthetically clean patches.",
+    "Each enhancement resolves to ONE stable physical reality, locked to the face through motion — texture and color decided once, then tracked, never re-invented frame to frame.",
     "The result must read as the same person on their best, most enthusiastic day — never as a filter, a different mood track, or a re-acted take.",
   ].join(" "),
   negative: [
@@ -103,6 +106,7 @@ export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Do not change the background, room content, lighting, color grade, focus, framing, or camera.",
     "Do not add text, captions, logos, watermarks, graphics, or visible masks.",
     "Do not change playback speed, duration, frame cadence, event timing, or source audio.",
+    "Generation artifacts to exclude entirely: temporal flicker, shimmer, strobing, luminance pumping, boiling or crawling texture, texture reinvention between frames, morphing or warping features, ghosting, double edges, edge halos, over-sharpening ringing, banding in smooth gradients, color drift, chroma blotches, blockiness, moiré, added grain, denoised or waxy patches, AI smoothness, uncanny-valley sheen.",
   ],
 };
 
@@ -161,6 +165,9 @@ export const LEGACY_V2_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Apply each approved enhancement uniformly and continuously across the full timeline, tracking the subject through motion, occlusion, and lighting variation.",
     "Warmth must read as genuine mood, not a pasted smile: it lives in micro-lifts at the mouth corners, the eyes, and the cheeks, and it still moves naturally with the words being spoken.",
     "Real skin keeps texture and natural micro-variation at every intensity; refinement may tighten the visual appearance of pores and temporary blemishes, and it never manufactures a poreless surface.",
+    "Reproduce the source's exact grain structure, sensor-noise character, and compression fingerprint everywhere, including inside enhanced regions — that organic imperfection is what makes footage read as real; its absence is what reads as artificial.",
+    "Every edit sits under the source noise floor: enhanced pixels carry the same noise statistics as their neighbors, with no denoised, sharpened, upscaled, or synthetically clean patches.",
+    "Each enhancement resolves to ONE stable physical reality, locked to the face through motion — texture and color decided once, then tracked, never re-invented frame to frame.",
     "The result must read as the same person on their best, most enthusiastic day — never as a filter, a different mood track, or a re-acted take.",
   ].join(" "),
   negative: [
@@ -176,6 +183,7 @@ export const LEGACY_V2_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Do not change the background, room content, lighting, color grade, focus, framing, or camera.",
     "Do not add text, captions, logos, watermarks, graphics, or visible masks.",
     "Do not change playback speed, duration, frame cadence, event timing, or source audio.",
+    "Generation artifacts to exclude entirely: temporal flicker, shimmer, strobing, luminance pumping, boiling or crawling texture, texture reinvention between frames, morphing or warping features, ghosting, double edges, edge halos, over-sharpening ringing, banding in smooth gradients, color drift, chroma blotches, blockiness, moiré, added grain, denoised or waxy patches, AI smoothness, uncanny-valley sheen.",
   ],
 };
 
@@ -292,6 +300,7 @@ export const LEGACY_V1_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Do not change the background, room content, lighting, color grade, focus, framing, or camera.",
     "Do not add text, captions, logos, watermarks, graphics, or visible masks.",
     "Do not change playback speed, duration, frame cadence, event timing, or source audio.",
+    "Generation artifacts to exclude entirely: temporal flicker, shimmer, strobing, luminance pumping, boiling or crawling texture, texture reinvention between frames, morphing or warping features, ghosting, double edges, edge halos, over-sharpening ringing, banding in smooth gradients, color drift, chroma blotches, blockiness, moiré, added grain, denoised or waxy patches, AI smoothness, uncanny-valley sheen.",
   ],
 };
 

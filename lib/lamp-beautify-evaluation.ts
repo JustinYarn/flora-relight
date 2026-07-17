@@ -122,7 +122,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 88,
     borderlineThreshold: 74,
     allowedCorrectionActions: ["repair-skin-texture"],
-    rubric: `Inspect skin at speech, motion, and lighting extremes. Enhancement may reduce temporary blemishes and shine and may refine the visual appearance of pores at the approved intensity, but real texture, complexion micro-variation, and natural specular response must survive everywhere. Plastic, waxy, blurred, fully poreless, or uniformly matte skin fails, as does invented texture that does not exist in the source.`,
+    rubric: `Inspect skin at speech, motion, and lighting extremes. Enhancement may reduce temporary blemishes and shine and may refine the visual appearance of pores at the approved intensity, but real texture, complexion micro-variation, natural specular response, and the source's own noise character must survive everywhere. Plastic, waxy, blurred, fully poreless, denoised-clean, or uniformly matte skin fails, as does invented texture or synthetic grain that does not exist in the source.`,
   },
   {
     id: "permanent-features-integrity",
@@ -192,7 +192,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 85,
     borderlineThreshold: 70,
     allowedCorrectionActions: ["restore-untouched-surroundings"],
-    rubric: `Compare exposure, contrast, white balance, saturation, focus, depth of field, noise character, framing, crop, scale, perspective, lens feel, and camera position across the full timeline. No beauty lighting, glow, bloom, relighting, color grade, or reframing is authorized. Localized, plausible skin response inside approved enhancement regions is the only permitted difference.`,
+    rubric: `Compare exposure, contrast, white balance, saturation, focus, depth of field, noise character, framing, crop, scale, perspective, lens feel, and camera position across the full timeline. The source's grain structure and compression fingerprint must carry through unchanged — global denoising, added grain, sharpening, or upscaling all fail. No beauty lighting, glow, bloom, relighting, color grade, or reframing is authorized. Localized, plausible skin response inside approved enhancement regions is the only permitted difference.`,
   },
   {
     id: "enhancement-temporal-stability",
@@ -206,7 +206,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 85,
     borderlineThreshold: 70,
     allowedCorrectionActions: ["complete-approved-enhancement"],
-    rubric: `Inspect the complete video for enhancement flicker, pulsing, drifting strength, or regions where an approved item visibly switches on and off across frames, occlusions, or head turns. Each approved enhancement must read as one continuous physical reality, locked to the subject through motion.`,
+    rubric: `Inspect the complete video for enhancement flicker, pulsing, drifting strength, or regions where an approved item visibly switches on and off across frames, occlusions, or head turns. Also sweep for generation artifacts anywhere in frame: shimmer, boiling or crawling texture, morphing or warping, ghosting, double edges, edge halos, banding, chroma blotches, blockiness, moiré. Each approved enhancement must read as one continuous physical reality, locked to the subject through motion, rendered at the source's own grain and compression character.`,
   },
   {
     id: "audio-integrity",

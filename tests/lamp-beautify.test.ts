@@ -610,3 +610,20 @@ test("hair-tidy era runs stay valid through the frozen first generation", () => 
   assert.equal(final.version, 2);
   assert.match(final.rendered, /LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v2/);
 });
+
+test("the clean-generation layer anchors source noise and names the artifacts", () => {
+  const plan = approvedPlan();
+  const rendered = initialLampBeautifyMegaPrompt(plan).rendered;
+
+  // Positive fidelity anchors — preserving the source's own imperfection is
+  // the realism lever; its absence is what reads as artificial.
+  assert.match(rendered, /grain structure, sensor-noise character, and compression fingerprint/);
+  assert.match(rendered, /sits under the source noise floor/);
+  assert.match(rendered, /decided once, then tracked, never re-invented frame to frame/);
+
+  // The artifact taxonomy rides in noun form (the Veo-guidance shape).
+  assert.match(rendered, /Generation artifacts to exclude entirely: temporal flicker/);
+  assert.match(rendered, /boiling or crawling texture/);
+  assert.match(rendered, /edge halos, over-sharpening ringing, banding/);
+  assert.match(rendered, /denoised or waxy patches, AI smoothness/);
+});
