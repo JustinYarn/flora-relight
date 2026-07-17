@@ -7,9 +7,13 @@ import { useAppStore } from "@/lib/store";
 import { probeVideo } from "@/lib/frames";
 import {
   estimateFirstCut,
+  estimateLampBackgroundPlan,
+  estimateLampBackgroundTwoPass,
   estimateLampRun,
   FIRST_CUT_MAX_OUTPUT_SECONDS,
   formatUsd,
+  lampBackgroundPlanReservationUsd,
+  lampBackgroundTwoPassReservationUsd,
   lampRunReservationUsd,
   omniGenerationReservationUsd,
 } from "@/lib/cost";
@@ -76,6 +80,29 @@ const LAMP_FLOW = [
   },
 ] as const;
 
+const BACKGROUND_FLOW = [
+  {
+    title: "Approved cleanup plan",
+    description:
+      "Classify visual clutter as remove, preserve, or uncertain before generation.",
+  },
+  {
+    title: "Initial + critique",
+    description:
+      "Generate from the source, then evaluate the whole result against the approved plan.",
+  },
+  {
+    title: "Final cleanup",
+    description:
+      "Regenerate once from the source with every actionable correction from the critique.",
+  },
+  {
+    title: "Your grade",
+    description:
+      "Grade Final with the cleanup plan visible and AI scores hidden until after save.",
+  },
+] as const;
+
 const MODE_COPY: Record<
   WorkflowMode,
   { eyebrow: string; title: string; description: string }
@@ -92,18 +119,31 @@ const MODE_COPY: Record<
     description:
       "Lamp generates an Initial from the mega prompt, critiques the complete video, and regenerates once. You grade Final blind before comparing your calls with the AI evaluation.",
   },
+  background: {
+    eyebrow: "Focused background cleanup",
+    title: "Clear the clutter. Keep the original video intact.",
+    description:
+      "Lamp Background turns an approved cleanup plan into an Initial and one corrected Final while preserving the person, performance, camera, lighting, and audio.",
+  },
 };
 
 function estimateWorkflowRun(mode: WorkflowMode, durationSec: number) {
-  return mode === "lamp"
-    ? estimateLampRun(durationSec)
-    : estimateFirstCut(durationSec);
+  if (mode === "lamp") return estimateLampRun(durationSec);
+  if (mode === "background") {
+    return estimateLampBackgroundTwoPass(durationSec);
+  }
+  return estimateFirstCut(durationSec);
 }
 
-function workflowReservationUsd(mode: WorkflowMode): number {
-  return mode === "lamp"
-    ? lampRunReservationUsd(FIRST_CUT_MAX_OUTPUT_SECONDS)
-    : omniGenerationReservationUsd(FIRST_CUT_MAX_OUTPUT_SECONDS);
+function workflowReservationUsd(
+  mode: WorkflowMode,
+  durationSec = FIRST_CUT_MAX_OUTPUT_SECONDS
+): number {
+  if (mode === "lamp") return lampRunReservationUsd(durationSec);
+  if (mode === "background") {
+    return lampBackgroundTwoPassReservationUsd(durationSec);
+  }
+  return omniGenerationReservationUsd(durationSec);
 }
 
 /** Display the next whole cent so a matching optional cap can admit the clip. */
@@ -397,6 +437,12 @@ function isResumableSingleRun(
   if (run.serverExecution?.status === "user_action_required") {
     return run.serverExecution.source === "single";
   }
+  if (
+    run.workflowMode === "background" &&
+    run.backgroundCleanupPlan?.approval.status === "draft"
+  ) {
+    return true;
+  }
   if (run.iterations.length !== 0) return false;
   if (!run.spendApproval && !run.serverExecution) return true;
   return (
@@ -421,8 +467,15 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
       ? evals.reduce((sum, r) => sum + r.confidence, 0) / evals.length
       : undefined;
   const isLampRun = run.workflowMode === "lamp";
+  const isTwoPassRun =
+    isLampRun || run.workflowMode === "background";
+  const backgroundPlanDraft =
+    run.workflowMode === "background" &&
+    run.backgroundCleanupPlan?.approval.status === "draft";
   const status = readyToStart
-    ? run.serverExecution?.status === "user_action_required"
+    ? backgroundPlanDraft
+      ? { color: "var(--borderline)", label: "plan review" }
+      : run.serverExecution?.status === "user_action_required"
       ? { color: "var(--borderline)", label: "approval needed" }
       : { color: "var(--running)", label: "ready to start" }
     : STATUS_META[run.status];
@@ -441,7 +494,14 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
           <div className="flex items-center gap-1.5">
             <span className="font-mono text-xs text-ink">{run.id.slice(0, 14)}</span>
             {inBatch ? <Badge>batch</Badge> : null}
-            <Badge color={run.workflowMode === "lamp" ? "var(--accent)" : "var(--muted)"}>
+            <Badge
+              color={
+                run.workflowMode === "lamp" ||
+                run.workflowMode === "background"
+                  ? "var(--accent)"
+                  : "var(--muted)"
+              }
+            >
               {workflowModeLabel(run.workflowMode ?? "flora")}
             </Badge>
           </div>
@@ -455,18 +515,22 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
       </td>
       <td className="px-4 py-3 text-sm text-muted">
         {run.status === "failed"
-          ? isLampRun && run.iterations.length >= 2
+          ? isTwoPassRun && run.iterations.length >= 2
             ? "Stopped after final"
             : run.iterations.length === 1
-              ? isLampRun
+              ? isTwoPassRun
                 ? "Stopped after initial"
                 : "Stopped after first cut"
               : "Not started"
-          : isLampRun && run.iterations.length >= 2
+          : isTwoPassRun && run.iterations.length >= 2
             ? "Final ready"
             : run.iterations.length === 1
-              ? isLampRun
-                ? "Initial ready"
+              ? isTwoPassRun
+                ? run.workflowMode === "background" &&
+                  run.backgroundCleanupPlan?.decision ===
+                    "exceptional-no-op"
+                  ? "Unchanged source ready"
+                  : "Initial ready"
                 : "First cut ready"
               : "—"}
       </td>
@@ -905,6 +969,12 @@ export default function DashboardPage() {
 
   const handleMany = useCallback(
     async (files: File[]) => {
+      if (workflowMode === "background") {
+        appendError(
+          "Lamp Background v1 starts one clip at a time because every source needs its own cleanup plan and explicit approval before generation. Select a single video."
+        );
+        return;
+      }
       const reservations = files.map((file) => ({
         runId: uid("run"),
         label: file.name,
@@ -1036,7 +1106,12 @@ export default function DashboardPage() {
     [budgetInput]
   );
   const workflowCopy = MODE_COPY[workflowMode];
-  const workflowFlow = workflowMode === "lamp" ? LAMP_FLOW : FLORA_FLOW;
+  const workflowFlow =
+    workflowMode === "background"
+      ? BACKGROUND_FLOW
+      : workflowMode === "lamp"
+        ? LAMP_FLOW
+        : FLORA_FLOW;
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-5 px-6 py-8">
       <div className="grid items-end gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
@@ -1088,9 +1163,11 @@ export default function DashboardPage() {
           </ol>
         </Card>
 
-        {/* New single run or batch */}
+        {/* New single run or historical Lamp/Flora batch */}
         <Card className="p-5 lg:col-span-2">
-          <SectionTitle>Choose videos</SectionTitle>
+          <SectionTitle>
+            {workflowMode === "background" ? "Choose one video" : "Choose videos"}
+          </SectionTitle>
           <div
             role="button"
             tabIndex={0}
@@ -1138,10 +1215,14 @@ export default function DashboardPage() {
                   ? "Checking production readiness…"
                   : readiness.phase === "blocked"
                     ? "Uploads paused"
-                    : "Drop one or more clips, or click to browse"}
+                    : workflowMode === "background"
+                      ? "Drop one clip, or click to browse"
+                      : "Drop one or more clips, or click to browse"}
             </p>
             <p className="max-w-xs text-pretty text-2xs text-faint">
-              {mode === "live"
+              {workflowMode === "background"
+                ? "video/* · v1 accepts one static-camera clip with at least one visible person — everyone in frame is preserved exactly — so its cleanup plan stays source-specific"
+                : mode === "live"
                 ? `video/* · one clip starts a ${workflowModeLabel(workflowMode)} run · multiple clips start a live ${workflowModeLabel(workflowMode)} batch after cost review`
                 : `video/* · one clip starts a demo run · multiple clips start a ${workflowModeLabel(workflowMode)} demo batch`}
             </p>
@@ -1161,7 +1242,7 @@ export default function DashboardPage() {
             ref={inputRef}
             type="file"
             accept="video/*"
-            multiple
+            multiple={workflowMode !== "background"}
             disabled={!hydrated || readiness.phase !== "ready"}
             className="hidden"
             onChange={(e) => {
@@ -1195,67 +1276,91 @@ export default function DashboardPage() {
       ) : null}
 
       {!pendingLaunch
-        ? resumableSingles.map((resumableSingle) => (
-            <Card
-              key={`resume-${resumableSingle.id}`}
-              className="flex flex-wrap items-center gap-3 p-4"
-            >
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-ink">
-                  {resumableSingle.serverExecution?.status ===
-                  "user_action_required"
-                    ? `${workflowModeLabel(runWorkflowMode(resumableSingle))} is paused for approval`
-                    : "Uploaded clip ready to generate"}
-                </p>
-                <p className="mt-0.5 truncate text-2xs text-faint">
-                  {resumableSingle.serverExecution?.status ===
-                  "user_action_required"
-                    ? `${resumableSingle.originalVideo.label} is safely checkpointed. Renew the same exact two-pass approval to resume it without repeating completed provider work.`
-                    : `${resumableSingle.originalVideo.label} is safely prepared. You can resume the spend confirmation without uploading it again.`}
-                </p>
-              </div>
-              <Button
-                disabled={launching === "run"}
-                onClick={async () => {
-                  setLaunchError(null);
-                  const approvalResume =
-                    resumableSingle.serverExecution?.status ===
-                    "user_action_required";
-                  if (mode === "mock" && !approvalResume) {
-                    if (launching) return;
-                    setLaunching("run");
-                    try {
-                      const id = await startRun(resumableSingle.originalVideo, {
-                        workflowMode: runWorkflowMode(resumableSingle),
-                      });
-                      router.push(`/runs/${id}`);
-                    } catch (error) {
-                      appendError(
-                        error instanceof Error
-                          ? error.message
-                          : "The saved run could not be resumed."
-                      );
-                    } finally {
-                      setLaunching(null);
-                    }
-                    return;
-                  }
-                  setPendingLaunch({
-                    video: resumableSingle.originalVideo,
-                    trimNote: null,
-                    workflowMode: runWorkflowMode(resumableSingle),
-                  });
-                }}
+        ? resumableSingles.map((resumableSingle) => {
+            const backgroundPlanDraft =
+              resumableSingle.workflowMode === "background" &&
+              resumableSingle.backgroundCleanupPlan?.approval.status === "draft";
+            return (
+              <Card
+                key={`resume-${resumableSingle.id}`}
+                className="flex flex-wrap items-center gap-3 p-4"
               >
-                {resumableSingle.serverExecution?.status ===
-                "user_action_required"
-                  ? "Review and resume"
-                  : mode === "live"
-                    ? "Review and generate"
-                    : "Resume run"}
-              </Button>
-            </Card>
-          ))
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-ink">
+                    {backgroundPlanDraft
+                      ? "Cleanup plan ready for your review"
+                      : resumableSingle.serverExecution?.status ===
+                          "user_action_required"
+                        ? `${workflowModeLabel(runWorkflowMode(resumableSingle))} is paused for approval`
+                        : "Uploaded clip ready to generate"}
+                  </p>
+                  <p className="mt-0.5 truncate text-2xs text-faint">
+                    {backgroundPlanDraft
+                      ? `${resumableSingle.originalVideo.label} has a source-specific remove / preserve / uncertain plan waiting for approval.`
+                      : resumableSingle.serverExecution?.status ===
+                          "user_action_required"
+                        ? `${resumableSingle.originalVideo.label} is safely checkpointed. Renew the same exact two-pass approval to resume it without repeating completed provider work.`
+                        : `${resumableSingle.originalVideo.label} is safely prepared. You can resume the spend confirmation without uploading it again.`}
+                  </p>
+                </div>
+                <Button
+                  disabled={launching === "run"}
+                  onClick={async () => {
+                    setLaunchError(null);
+                    if (backgroundPlanDraft) {
+                      router.push(`/runs/${resumableSingle.id}`);
+                      return;
+                    }
+                    const approvalResume =
+                      resumableSingle.serverExecution?.status ===
+                      "user_action_required";
+                    if (
+                      approvalResume &&
+                      runWorkflowMode(resumableSingle) === "background"
+                    ) {
+                      router.push(`/runs/${resumableSingle.id}`);
+                      return;
+                    }
+                    if (mode === "mock" && !approvalResume) {
+                      if (launching) return;
+                      setLaunching("run");
+                      try {
+                        const id = await startRun(resumableSingle.originalVideo, {
+                          workflowMode: runWorkflowMode(resumableSingle),
+                        });
+                        router.push(`/runs/${id}`);
+                      } catch (error) {
+                        appendError(
+                          error instanceof Error
+                            ? error.message
+                            : "The saved run could not be resumed."
+                        );
+                      } finally {
+                        setLaunching(null);
+                      }
+                      return;
+                    }
+                    setPendingLaunch({
+                      video: resumableSingle.originalVideo,
+                      trimNote: null,
+                      workflowMode: runWorkflowMode(resumableSingle),
+                    });
+                  }}
+                >
+                  {backgroundPlanDraft
+                    ? "Review cleanup plan"
+                    : resumableSingle.serverExecution?.status ===
+                        "user_action_required"
+                      ? runWorkflowMode(resumableSingle) === "background"
+                        ? "Open and resume"
+                        : "Review and resume"
+                      : mode === "live"
+                        ? "Review and generate"
+                        : "Resume run"}
+                </Button>
+              </Card>
+            );
+          })
         : null}
 
       {resumableBatch && pendingBatchId !== resumableBatch.id ? (
@@ -1301,7 +1406,11 @@ export default function DashboardPage() {
         {runs.length === 0 ? (
           <EmptyState
             title="No runs yet"
-            hint={`Choose one clip above to start a ${workflowModeLabel(workflowMode)} run, or choose several for a batch.`}
+            hint={
+              workflowMode === "background"
+                ? "Choose one clip above to analyze its source-specific background cleanup plan."
+                : `Choose one clip above to start a ${workflowModeLabel(workflowMode)} run, or choose several for a batch.`
+            }
           />
         ) : (
           <div className="overflow-x-auto">
@@ -1342,9 +1451,22 @@ export default function DashboardPage() {
       {/* Live mode only: uploads confirm their spend before the run starts. */}
       {pendingLaunch ? (
         <ConfirmSpend
-          title={`Run ${workflowModeLabel(pendingLaunch.workflowMode)} for this video?`}
+          title={
+            pendingLaunch.workflowMode === "background"
+              ? "Analyze this video and propose a cleanup plan?"
+              : `Run ${workflowModeLabel(pendingLaunch.workflowMode)} for this video?`
+          }
           lines={
-            pendingLaunch.workflowMode === "lamp"
+            pendingLaunch.workflowMode === "background"
+              ? [
+                  `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
+                  `Estimated planning cost: ${formatUsd(estimateLampBackgroundPlan().totalUsd)}`,
+                  `Spend authorization: the server reserves ${formatReservationUsd(lampBackgroundPlanReservationUsd())} for exactly one Gemini whole-video planning call. No video generation is authorized at this step.`,
+                  "The planner must classify scene content as remove, preserve, or uncertain. You review and explicitly approve that source-specific plan before any cleanup begins.",
+                  "If cleanup is approved, the separate fixed two-pass generation spend is shown next. A rare exceptional no-op can deliver the exact source without generation.",
+                  ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
+                ]
+              : pendingLaunch.workflowMode === "lamp"
               ? [
                   `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
                   `Estimated provider cost: ${formatUsd(estimateLampRun(pendingLaunch.video.durationSec).totalUsd)}`,
@@ -1362,7 +1484,9 @@ export default function DashboardPage() {
                 ]
           }
           confirmLabel={
-            pendingLaunch.workflowMode === "lamp"
+            pendingLaunch.workflowMode === "background"
+              ? "Analyze cleanup plan"
+              : pendingLaunch.workflowMode === "lamp"
               ? "Generate Initial + Final"
               : "Generate Flora cut"
           }
@@ -1374,7 +1498,14 @@ export default function DashboardPage() {
             setLaunchError(null);
             try {
               const id = await startRun(pendingLaunch.video, {
-                approveLiveSpend: true,
+                approveLiveSpend:
+                  pendingLaunch.workflowMode === "background"
+                    ? undefined
+                    : true,
+                approvePlanSpend:
+                  pendingLaunch.workflowMode === "background"
+                    ? true
+                    : undefined,
                 workflowMode: pendingLaunch.workflowMode,
               });
               setPendingLaunch(null);
@@ -1396,7 +1527,7 @@ export default function DashboardPage() {
         />
       ) : null}
 
-      {/* Both methods support provider-owned live batches and zero-spend demos. */}
+      {/* Historical Lamp and Flora modes retain their batch flow. */}
       {pendingBatch && pendingBatchAssets.length > 0 ? (
         <ConfirmSpend
           title={`Start ${workflowModeLabel(pendingBatch.workflowMode ?? "flora")} batch of ${pendingBatchAssets.length} clips?`}

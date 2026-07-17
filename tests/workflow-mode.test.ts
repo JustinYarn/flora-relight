@@ -15,22 +15,47 @@ import {
 } from "../lib/prompts/mega-prompt.ts";
 import { mergeBatch } from "../lib/server/storage/batch-merge.ts";
 import type { Batch } from "../lib/types.ts";
-import { workflowForMode } from "../lib/workflow-def.ts";
+import {
+  RELIGHT_WORKFLOW,
+  workflowForMode,
+} from "../lib/workflow-def.ts";
 
-test("workflow mode accepts only the two public product modes", () => {
+test("workflow mode accepts the current mode plus both historical product modes", () => {
   assert.equal(parseWorkflowMode("flora"), "flora");
   assert.equal(parseWorkflowMode("lamp"), "lamp");
+  assert.equal(parseWorkflowMode("background"), "background");
   assert.equal(parseWorkflowMode("live"), null);
   assert.equal(parseWorkflowMode(undefined), null);
 });
 
-test("new browser selections default to Lamp and retain product labels", () => {
-  assert.equal(DEFAULT_WORKFLOW_MODE, "lamp");
+test("new browser selections default to Lamp Background and retain historical labels", () => {
+  assert.equal(DEFAULT_WORKFLOW_MODE, "background");
+  assert.equal(RELIGHT_WORKFLOW.id, workflowForMode("background").id);
   assert.equal(workflowModeLabel("flora"), "Flora");
   assert.equal(workflowModeLabel("lamp"), "Lamp");
+  assert.equal(workflowModeLabel("background"), "Lamp Background");
 });
 
-test("Lamp graph has nine eval nodes while Flora retains its two additional checks", () => {
+test("Lamp Background graph is the approved plan-to-blind-grade sequence", () => {
+  const background = workflowForMode("background");
+  assert.equal(background.id, "lamp-background-v1");
+  assert.deepEqual(
+    background.nodes.map((node) => node.id),
+    ["plan", "initial", "critique", "final", "review"]
+  );
+  assert.deepEqual(
+    background.edges.map((edge) => [edge.source, edge.target]),
+    [
+      ["plan", "initial"],
+      ["initial", "critique"],
+      ["critique", "final"],
+      ["final", "review"],
+    ]
+  );
+  assert.equal(background.config.maxIterations, 2);
+});
+
+test("historical Lamp and Flora graphs retain their original evaluation sets", () => {
   const lampEvalIds = workflowForMode("lamp").nodes.flatMap((node) =>
     node.evalId ? [node.evalId] : []
   );
@@ -64,6 +89,10 @@ test("Flora and Lamp prompts preserve method labels without changing prompt sema
   const nextLamp = nextMegaPrompt(lamp, []).rendered;
   assert.match(nextLamp, /^=== LAMP RELIGHT MEGA PROMPT v2 ===/);
   assert.doesNotMatch(nextLamp, /\banchor\b/i);
+  assert.throws(
+    () => initialMegaPrompt("background"),
+    /human-approved cleanup plan/
+  );
 });
 
 test("a later browser batch snapshot cannot change the batch method", () => {
@@ -97,10 +126,17 @@ test("Flora is retired for new work but persisted Flora records may continue", (
   assert.equal(floraRetiredForNewWork("lamp", null), false);
   assert.equal(floraRetiredForNewWork("lamp", "flora"), false);
   assert.equal(floraRetiredForNewWork("lamp", "lamp"), false);
+  assert.equal(floraRetiredForNewWork("background", null), false);
+  assert.equal(floraRetiredForNewWork("background", "flora"), false);
+  assert.equal(floraRetiredForNewWork("background", "lamp"), false);
 });
 
 test("legacy records without a saved mode resolve it from the workflow id", () => {
   assert.equal(runWorkflowMode({ workflowId: workflowForMode("lamp").id }), "lamp");
+  assert.equal(
+    runWorkflowMode({ workflowId: workflowForMode("background").id }),
+    "background"
+  );
   assert.equal(
     runWorkflowMode({ workflowId: workflowForMode("flora").id }),
     "flora"
@@ -109,6 +145,13 @@ test("legacy records without a saved mode resolve it from the workflow id", () =
   assert.equal(
     runWorkflowMode({ workflowMode: "flora", workflowId: "lamp-v1" }),
     "flora"
+  );
+  assert.equal(
+    runWorkflowMode({
+      workflowMode: "lamp",
+      workflowId: "lamp-background-v1",
+    }),
+    "lamp"
   );
 });
 

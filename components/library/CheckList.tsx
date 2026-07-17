@@ -14,7 +14,6 @@ import {
   VerdictBadge,
   verdictColor,
 } from "@/components/ui";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { formatTime } from "@/lib/util";
 
 /*
@@ -160,12 +159,12 @@ function CheckRow({
 export function CheckList({
   iteration,
   runActive,
-  definitions = EVAL_DEFS,
+  definitions,
 }: {
   iteration?: Iteration;
   /** False once the run has settled — a still-"running" attempt then reads as never finished, not in flight. */
   runActive: boolean;
-  definitions?: readonly EvalDefinition[];
+  definitions: readonly EvalDefinition[];
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
 

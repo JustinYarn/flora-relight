@@ -44,7 +44,7 @@ import type {
 import {
   isLipsyncOperationResult,
   LIPSYNC_OPERATION_ID,
-  v2SyncPasses,
+  v2SyncVerdict,
 } from "@/lib/v2-sync";
 
 export interface DurableRelightBatchInput {
@@ -190,7 +190,10 @@ function completedLampArtifacts(input: {
     (input.paid.lipsync !== null &&
       (input.paid.lipsync.status !== "completed" ||
         !isLipsyncOperationResult(input.paid.lipsync.result) ||
-        !v2SyncPasses(input.paid.lipsync.result.postSync)))
+        !v2SyncVerdict(
+          input.paid.lipsync.result.postSync,
+          input.run.originalVideo.syncBaseline ?? null
+        ).pass))
   ) {
     return null;
   }

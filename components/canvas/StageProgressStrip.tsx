@@ -7,17 +7,19 @@
  */
 
 import { Fragment } from "react";
-import type { Run, RunConfig } from "@/lib/types";
+import type { Run, RunConfig, WorkflowMode } from "@/lib/types";
 import { deriveStageChips, STAGE_STATE_COLOR } from "@/components/canvas/derive";
 
 export function StageProgressStrip({
   run,
   config,
+  workflowMode,
 }: {
   run?: Run;
   config: RunConfig;
+  workflowMode: WorkflowMode;
 }) {
-  const chips = deriveStageChips(run, config);
+  const chips = deriveStageChips(run, config, workflowMode);
   return (
     <div
       className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-edge bg-surface px-4 py-2"

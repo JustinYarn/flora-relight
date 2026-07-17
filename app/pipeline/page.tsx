@@ -9,6 +9,8 @@ import { PipelineCanvas } from "@/components/canvas/PipelineCanvas";
 import { NodeInspector } from "@/components/canvas/NodeInspector";
 import { StageProgressStrip } from "@/components/canvas/StageProgressStrip";
 import { STAGE_LANES } from "@/components/canvas/layout";
+import { runWorkflowMode } from "@/lib/workflow-mode";
+import { workflowForMode } from "@/lib/workflow-def";
 
 /**
  * Minimal structural view of the Batch contract (lib/types.ts gains the full
@@ -38,7 +40,7 @@ function runStatusColor(status: RunStatus): string {
 }
 
 export default function PipelinePage() {
-  const workflow = useAppStore((s) => s.workflow);
+  const defaultWorkflow = useAppStore((s) => s.workflow);
   const runs = useAppStore((s) => s.runs);
   const mode = useAppStore((s) => s.mode);
   const workflowMode = useAppStore((s) => s.workflowMode);
@@ -48,15 +50,6 @@ export default function PipelinePage() {
 
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-
-  /* Rubrics deep-links to the graph without making the URL the source of
-     truth for normal canvas clicks. Invalid node ids are simply ignored. */
-  useEffect(() => {
-    const requested = new URLSearchParams(window.location.search).get("node");
-    if (requested && workflow.nodes.some((node) => node.id === requested)) {
-      setSelectedNodeId(requested);
-    }
-  }, [workflow.nodes]);
 
   const selectNode = useCallback((nodeId: string | null) => {
     setSelectedNodeId(nodeId);
@@ -79,7 +72,31 @@ export default function PipelinePage() {
     }
     return runs[0];
   }, [runs, selectedRunId]);
+  const displayedWorkflowMode = activeRun
+    ? runWorkflowMode(activeRun)
+    : workflowMode;
+  const workflow = useMemo(
+    () =>
+      activeRun
+        ? workflowForMode(displayedWorkflowMode)
+        : defaultWorkflow,
+    [activeRun, defaultWorkflow, displayedWorkflowMode]
+  );
   const displayedMode = activeRun ? (activeRun.live ? "live" : "mock") : mode;
+
+  /* Rubrics deep-links to the graph without making the URL the source of
+     truth for normal canvas clicks. Invalid node ids are simply ignored. */
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get("node");
+    if (requested && workflow.nodes.some((node) => node.id === requested)) {
+      setSelectedNodeId(requested);
+    } else if (
+      selectedNodeId &&
+      !workflow.nodes.some((node) => node.id === selectedNodeId)
+    ) {
+      setSelectedNodeId(null);
+    }
+  }, [selectedNodeId, workflow.nodes]);
 
   const selectedNode = selectedNodeId
     ? workflow.nodes.find((n) => n.id === selectedNodeId) ?? null
@@ -133,7 +150,7 @@ export default function PipelinePage() {
 
         {/* Lane-oriented legend: stage names, not raw kind colors. */}
         <div className="ml-auto hidden items-center gap-2.5 xl:flex">
-          {STAGE_LANES.map((lane) => (
+          {(workflow.id === "lamp-background-v1" ? [] : STAGE_LANES).map((lane) => (
             <span
               key={lane.id}
               className="flex items-center gap-1 text-2xs text-faint"
@@ -171,7 +188,11 @@ export default function PipelinePage() {
       </div>
 
       {/* Live stage progress — what is happening right now, in plain words. */}
-      <StageProgressStrip run={activeRun} config={workflow.config} />
+      <StageProgressStrip
+        run={activeRun}
+        config={workflow.config}
+        workflowMode={displayedWorkflowMode}
+      />
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge bg-canvas px-4 py-2">
         <Badge color="var(--accent)">prompt map</Badge>
@@ -225,7 +246,7 @@ export default function PipelinePage() {
             run={activeRun}
             config={workflow.config}
             mode={mode}
-            workflowMode={workflowMode}
+            workflowMode={displayedWorkflowMode}
             onSelectNode={selectNode}
             onClose={closeInspector}
           />

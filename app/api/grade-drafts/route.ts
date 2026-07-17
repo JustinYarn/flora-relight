@@ -16,6 +16,7 @@ import type {
   GradeDraftAnswer,
 } from "@/lib/types";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import { LAMP_BACKGROUND_EVAL_IDS } from "@/lib/lamp-background-evaluation";
 import { isValidRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
 
@@ -26,7 +27,10 @@ const DEFAULT_DRAFT_ID = "default";
 const MAX_CLIPS = 5_000;
 const MAX_NOTE_LENGTH = 4_000;
 const MAX_OVERALL_NOTE_LENGTH = 8_000;
-const EVAL_IDS = new Set(EVAL_DEFS.map((definition) => definition.id));
+const EVAL_IDS = new Set([
+  ...EVAL_DEFS.map((definition) => definition.id),
+  ...LAMP_BACKGROUND_EVAL_IDS,
+]);
 
 function noStoreJson(body: unknown, init?: { status?: number }): NextResponse {
   return NextResponse.json(body, {

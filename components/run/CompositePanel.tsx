@@ -1,8 +1,7 @@
 "use client";
 
-import type { Iteration, Verdict } from "@/lib/types";
+import type { EvalDefinition, Iteration, Verdict } from "@/lib/types";
 import { Badge, Card, ScoreMeter, SectionTitle, verdictColor } from "@/components/ui";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 
 /**
  * Composite score for the selected iteration plus the hard-gate checklist.
@@ -12,12 +11,14 @@ import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 export function CompositePanel({
   iteration,
   threshold,
+  definitions,
 }: {
   iteration?: Iteration;
   threshold: number;
+  definitions: readonly EvalDefinition[];
 }) {
   const composite = iteration?.composite;
-  const hardGates = EVAL_DEFS.filter((d) => d.hardGate);
+  const hardGates = definitions.filter((d) => d.hardGate);
 
   const meterVerdict: Verdict = composite
     ? composite.passed

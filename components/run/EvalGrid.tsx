@@ -14,7 +14,6 @@ import {
   SectionTitle,
   VerdictBadge,
 } from "@/components/ui";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { formatTime, LOW_CONFIDENCE } from "@/lib/util";
 
 function severityColor(s: ViolationSeverity): string {
@@ -135,8 +134,14 @@ function EvalCard({
   );
 }
 
-/** One card per eval, always rendered in registry order. */
-export function EvalGrid({ iteration }: { iteration?: Iteration }) {
+/** One card per eval, always rendered in the run's registry order. */
+export function EvalGrid({
+  iteration,
+  definitions,
+}: {
+  iteration?: Iteration;
+  definitions: readonly EvalDefinition[];
+}) {
   return (
     <section>
       <SectionTitle
@@ -148,7 +153,7 @@ export function EvalGrid({ iteration }: { iteration?: Iteration }) {
       </SectionTitle>
       {iteration ? (
         <div className="grid grid-cols-2 gap-4 xl:grid-cols-3">
-          {EVAL_DEFS.map((def) => (
+          {definitions.map((def) => (
             <EvalCard
               key={def.id}
               def={def}

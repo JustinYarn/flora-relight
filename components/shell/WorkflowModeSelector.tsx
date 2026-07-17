@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * Flora (legacy one-pass) is retired for new work, so the old two-button
- * selector is now a static Lamp panel. Existing Flora runs remain viewable
- * and resumable from their own records; only new work is Lamp.
+ * Lamp Background is the only method offered for new work in this experiment.
+ * Historical Flora and Lamp runs remain viewable and resumable from their own
+ * records without changing their saved workflow identity.
  */
 export function WorkflowModeSelector({
   className = "",
@@ -12,20 +12,22 @@ export function WorkflowModeSelector({
 }) {
   return (
     <section
-      aria-label="Relight workflow"
+      aria-label="Background cleanup workflow"
       className={`rounded-xl bg-raised p-1 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)] ${className}`}
     >
       <div className="rounded-lg bg-surface px-3 py-2 text-left shadow-[0_1px_2px_rgba(0,0,0,0.28),0_0_0_1px_rgba(255,255,255,0.06)]">
-        <span className="block text-xs font-semibold text-ink">Lamp</span>
+        <span className="block text-xs font-semibold text-ink">
+          Lamp Background
+        </span>
         <span className="mt-0.5 block text-2xs text-muted">
-          Exact two-pass
+          Plan + two-pass cleanup
         </span>
       </div>
       <p className="px-2 pb-2 pt-2.5 text-pretty text-2xs leading-relaxed text-muted">
-        <span className="font-medium text-ink">Lamp:</span> Generate, evaluate
-        the whole video, regenerate once, then grade the Final blind before
-        comparing with AI. Flora (legacy one-pass) is retired; existing Flora
-        runs stay viewable.
+        <span className="font-medium text-ink">Lamp Background:</span> Approve a
+        cleanup plan, generate Initial, critique the whole video once, generate
+        Final from the source, then grade it blind before comparing with AI.
+        Existing Flora and Lamp runs stay viewable.
       </p>
     </section>
   );

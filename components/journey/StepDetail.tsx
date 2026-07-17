@@ -8,11 +8,17 @@
 
 import type { ReactNode } from "react";
 import Link from "next/link";
-import type { Iteration, Run, ViolationSeverity } from "@/lib/types";
+import type {
+  EvalDefinition,
+  Iteration,
+  Run,
+  ViolationSeverity,
+} from "@/lib/types";
 import { Badge } from "@/components/ui";
-import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
+import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { formatUsd } from "@/lib/cost";
 import { formatClock, formatTime } from "@/lib/util";
+import { isTwoPassWorkflowMode, runWorkflowMode } from "@/lib/workflow-mode";
 import type { JourneyStep } from "./chain";
 import { firstDataUrl } from "./chain";
 
@@ -28,15 +34,17 @@ function severityColor(s: ViolationSeverity): string {
       : "var(--muted)";
 }
 
-function evalName(id: string): string {
-  return EVAL_DEFS.find((d) => d.id === id)?.name ?? id;
-}
-
-const EVAL_ORDER = new Map(EVAL_DEFS.map((d, i) => [d.id, i]));
-
-function orderedResults(iteration: Iteration) {
+function orderedResults(
+  iteration: Iteration,
+  definitions: readonly EvalDefinition[]
+) {
+  const order = new Map(
+    definitions.map((definition, index) => [definition.id, index])
+  );
   return [...iteration.evalResults].sort(
-    (a, b) => (EVAL_ORDER.get(a.evalId) ?? 99) - (EVAL_ORDER.get(b.evalId) ?? 99)
+    (a, b) =>
+      (order.get(a.evalId) ?? Number.MAX_SAFE_INTEGER) -
+      (order.get(b.evalId) ?? Number.MAX_SAFE_INTEGER)
   );
 }
 
@@ -192,23 +200,31 @@ function AnchorDetail({ run }: { run: Run }) {
 function AttemptDetail({
   iteration,
   threshold,
-  lamp,
+  definitions,
+  twoPass,
+  noOp,
 }: {
   iteration: Iteration;
   threshold: number;
-  lamp: boolean;
+  definitions: readonly EvalDefinition[];
+  twoPass: boolean;
+  noOp: boolean;
 }) {
   const mp = iteration.megaPrompt;
   const active = mp.corrections.filter((c) => !c.resolved);
   const lightingLine = mp.base.lighting.style.split(". ")[0];
   const composite = iteration.composite;
-  const results = orderedResults(iteration);
+  const results = orderedResults(iteration, definitions);
+  const evalName = (id: string): string =>
+    definitions.find((definition) => definition.id === id)?.name ?? id;
   const hasDeltas = results.some((r) => r.deltaFromPrevious !== undefined);
   const before = iteration.beforeFrames.find((f) => f.dataUrl);
   const after = iteration.afterFrames.find((f) => f.dataUrl);
   const failures = composite?.hardGateFailures ?? [];
 
-  const hint = lamp
+  const hint = noOp
+    ? "the approved exceptional no-op delivers the exact source — no generation or AI evaluation ran"
+    : twoPass
     ? results.length > 0
       ? iteration.index === 1
         ? "whole-video critique complete — every actionable finding feeds Final"
@@ -227,7 +243,9 @@ function AttemptDetail({
   return (
     <DetailShell
       title={
-        lamp
+        noOp
+          ? "Exact source"
+          : twoPass
           ? iteration.index === 1
             ? "Initial"
             : iteration.index === 2
@@ -244,12 +262,16 @@ function AttemptDetail({
             className="text-2xs font-semibold uppercase tracking-[0.14em] text-muted"
             title={`Generation brief v${mp.version} (mega prompt)`}
           >
-            What went in — generation brief v{mp.version}
+            {noOp
+              ? "Approved no-op record"
+              : `What went in — generation brief v${mp.version}`}
           </p>
           <p className="mt-3 text-sm text-ink">{lightingLine}.</p>
           <div className="mt-5">
             <p className="text-2xs text-faint">
-              {active.length === 0
+              {noOp
+                ? "No correction ledger — generation was not authorized."
+                : active.length === 0
                 ? "Fix list empty — base brief and lighting instructions only."
                 : `${active.length} fix${active.length === 1 ? "" : "es"} on the list`}
             </p>
@@ -282,7 +304,7 @@ function AttemptDetail({
           </div>
           <details className="mt-5">
             <summary className="cursor-pointer text-2xs text-faint transition hover:text-muted">
-              Full generation brief, as sent
+              {noOp ? "Full approved no-op record" : "Full generation brief, as sent"}
             </summary>
             <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-edge bg-canvas p-3 font-mono text-2xs leading-relaxed text-muted">
               {mp.rendered}
@@ -306,18 +328,23 @@ function AttemptDetail({
               <span
                 className="text-2xs text-faint"
                 title={
-                  lamp
+                  twoPass
                     ? "Weighted summary of every applicable automated result"
                     : "Overall score (weighted composite) vs the pass threshold"
                 }
               >
-                {lamp
+                {twoPass
                   ? iteration.index === 1
                     ? "AI summary · Final is generated once regardless of score"
                     : "final AI summary · no best-of selection"
                   : `Overall score · needs ${threshold} to pass`}
               </span>
             </div>
+          ) : noOp ? (
+            <p className="mt-3 text-sm text-muted">
+              No AI evaluation ran. Human grading decides whether leaving this
+              already presentation-ready background unchanged was correct.
+            </p>
           ) : (
             <p className="status-pulse mt-3 text-sm text-muted">checking…</p>
           )}
@@ -388,15 +415,19 @@ function AttemptDetail({
 
 function CorrectionsDetail({
   step,
-  lamp,
+  twoPass,
 }: {
   step: Extract<JourneyStep, { kind: "corrections" }>;
-  lamp: boolean;
+  twoPass: boolean;
 }) {
   const { prev, next, added, resolved } = step;
   return (
     <DetailShell
-      title={lamp ? "Corrections — Initial → Final" : `Fix list — v${prev.index} → v${next.index}`}
+      title={
+        twoPass
+          ? "Corrections — Initial → Final"
+          : `Fix list — v${prev.index} → v${next.index}`
+      }
       hint="what changed on the fix list going into the next brief (technical: constraint ledger)"
     >
       {added.length === 0 && resolved.length === 0 ? (
@@ -534,6 +565,12 @@ export function StepDetail({
   step: JourneyStep;
   threshold: number;
 }) {
+  const definitions = evalDefsForRun(run);
+  const twoPass = isTwoPassWorkflowMode(runWorkflowMode(run));
+  const noOp =
+    runWorkflowMode(run) === "background" &&
+    run.backgroundCleanupPlan?.approval.status === "approved" &&
+    run.backgroundCleanupPlan.decision === "exceptional-no-op";
   switch (step.kind) {
     case "source":
       return <SourceDetail run={run} />;
@@ -546,11 +583,13 @@ export function StepDetail({
         <AttemptDetail
           iteration={step.iteration}
           threshold={threshold}
-          lamp={run.workflowId === "lamp-v1"}
+          definitions={definitions}
+          twoPass={twoPass}
+          noOp={noOp}
         />
       );
     case "corrections":
-      return <CorrectionsDetail step={step} lamp={run.workflowId === "lamp-v1"} />;
+      return <CorrectionsDetail step={step} twoPass={twoPass} />;
     case "fallback":
       return <FallbackDetail run={run} />;
     case "remux":

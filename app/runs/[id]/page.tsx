@@ -7,6 +7,9 @@ import { useAppStore } from "@/lib/store";
 import { useRunDetails } from "@/lib/useRunDetails";
 import type { Iteration, Run, RunStatus } from "@/lib/types";
 import { isLampRun } from "@/lib/lamp-evaluation";
+import { isLampBackgroundRun } from "@/lib/lamp-background-read";
+import { workflowForMode } from "@/lib/workflow-def";
+import { runWorkflowMode } from "@/lib/workflow-mode";
 import { Badge, EmptyState } from "@/components/ui";
 import { DownloadSideBySide } from "@/components/review/DownloadSideBySide";
 import { RunTabs } from "@/components/review/RunTabs";
@@ -22,6 +25,7 @@ import { ReviewActions } from "@/components/review/ReviewActions";
 import { LostGenerationRecovery } from "@/components/review/LostGenerationRecovery";
 import { WorkflowRail } from "@/components/review/WorkflowRail";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
+import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
 
 const STATUS_COLOR: Record<RunStatus, string> = {
   running: "var(--running)",
@@ -42,7 +46,7 @@ const STATUS_LABEL: Record<RunStatus, string> = {
 /** Resolve the evaluation attached to the delivered artifact for either workflow. */
 function finalIteration(run: Run): Iteration | undefined {
   const last = run.iterations[run.iterations.length - 1];
-  if (isLampRun(run)) {
+  if (isLampRun(run) || isLampBackgroundRun(run)) {
     return run.iterations.find((iteration) => iteration.index === 2) ?? last;
   }
 
@@ -62,7 +66,6 @@ function finalIteration(run: Run): Iteration | undefined {
 export default function RunReviewPage() {
   const params = useParams<{ id: string }>();
   const run = useRunDetails(params.id);
-  const workflow = useAppStore((s) => s.workflow);
   const submitReview = useAppStore((s) => s.submitReview);
   // null = follow the newest attempt automatically; a string pins the view.
   const [userSelected, setUserSelected] = useState<string | null>(null);
@@ -86,9 +89,18 @@ export default function RunReviewPage() {
     );
   }
 
+  const workflow = workflowForMode(runWorkflowMode(run));
   const latest = run.iterations[run.iterations.length - 1];
   const lampRun = isLampRun(run);
-  // Default to Lamp's delivered v2 final; mid-flight, follow the newest stage.
+  const backgroundRun = isLampBackgroundRun(run);
+  const twoPassRun = lampRun || backgroundRun;
+  const backgroundNoOp =
+    backgroundRun &&
+    run.backgroundCleanupPlan?.approval.status === "approved" &&
+    run.backgroundCleanupPlan.decision === "exceptional-no-op";
+  const planAwaitingApproval =
+    backgroundRun && run.backgroundCleanupPlan?.approval.status === "draft";
+  // Default to the delivered v2 final; mid-flight, follow the newest stage.
   const autoKey = run.finalVideo ? "final" : latest ? `iter-${latest.index}` : null;
   const activeKey = userSelected ?? autoKey;
   const isFinal = activeKey === "final" && Boolean(run.finalVideo);
@@ -99,15 +111,19 @@ export default function RunReviewPage() {
 
   const relitVideo = isFinal ? run.finalVideo : selectedIteration?.generatedVideo;
   const relitLabel = isFinal
-    ? `${lampRun ? "FINAL VIDEO" : "FLORA VIDEO"}${selectedIteration ? ` · v${selectedIteration.index}` : ""}`
+    ? backgroundNoOp
+      ? "EXACT SOURCE · APPROVED NO-OP"
+      : `${twoPassRun ? "FINAL VIDEO" : "FLORA VIDEO"}${selectedIteration ? ` · v${selectedIteration.index}` : ""}`
     : selectedIteration
-      ? lampRun && selectedIteration.index === 1
+      ? twoPassRun && selectedIteration.index === 1
         ? "INITIAL VIDEO · v1"
-        : lampRun && selectedIteration.index === 2
+        : twoPassRun && selectedIteration.index === 2
           ? "FINAL VIDEO · v2"
           : `VIDEO · v${selectedIteration.index}`
-      : lampRun
-        ? "LAMP VIDEO"
+      : backgroundRun
+        ? "LAMP BACKGROUND VIDEO"
+        : lampRun
+          ? "LAMP VIDEO"
         : "FLORA VIDEO";
 
   const shortId = run.id.length > 12 ? `${run.id.slice(0, 12)}…` : run.id;
@@ -141,6 +157,8 @@ export default function RunReviewPage() {
           (xl screens); the rail stacks below everything on smaller ones. */}
       <div className="xl:flex xl:items-start xl:gap-10">
         <div className="min-w-0 xl:flex-1">
+          <BackgroundPlanReview run={run} />
+
           {/* HERO — original next to relit, one shared transport. While the
           selected attempt is still generating, the relit slot becomes the
           generation theater instead of dead air. */}
@@ -150,43 +168,58 @@ export default function RunReviewPage() {
             relitLabel={relitLabel}
             fallback={run.fallback}
             generating={
-              run.status === "running" ? <GenerationTheater run={run} /> : undefined
+              run.status === "running" && !planAwaitingApproval
+                ? <GenerationTheater run={run} />
+                : undefined
             }
           />
 
-          {/* RECOVERY — only for a durable execution stopped in
-              reconcile_required; the provider-lost case gets a safe re-run
-              action, anything else renders as read-only evidence. */}
-          <LostGenerationRecovery run={run} />
+          {planAwaitingApproval ? (
+            <p className="mt-4 text-pretty text-xs leading-relaxed text-faint">
+              Generation is paused here. Approving the plan above is the only
+              action that can authorize cleanup or the rare exact-source no-op.
+            </p>
+          ) : (
+            <>
+              {/* RECOVERY — only for a durable execution stopped in
+                  reconcile_required; the provider-lost case gets a safe re-run
+                  action, anything else renders as read-only evidence. */}
+              <LostGenerationRecovery run={run} />
 
-          {/* VERDICT LINE */}
-          <div className="mt-8">
-            <VerdictLine
-              run={run}
-              iteration={selectedIteration}
-              threshold={workflow.config.compositePassThreshold}
-            />
-          </div>
+              {/* VERDICT LINE */}
+              <div className="mt-8">
+                <VerdictLine
+                  run={run}
+                  iteration={selectedIteration}
+                  threshold={workflow.config.compositePassThreshold}
+                />
+              </div>
 
-          {/* ATTEMPT SWITCHER */}
-          <div className="py-3">
-            <AttemptSwitcher run={run} activeKey={activeKey} onSelect={setUserSelected} />
-          </div>
+              {/* ATTEMPT SWITCHER */}
+              <div className="py-3">
+                <AttemptSwitcher
+                  run={run}
+                  activeKey={activeKey}
+                  onSelect={setUserSelected}
+                />
+              </div>
 
-          {/* EVALS — nine Lamp rows, eleven Flora rows */}
-          <EvalList
-            iteration={selectedIteration}
-            definitions={evalDefsForRun(run)}
-            evalsUnderway={run.status !== "running" || evalPhaseReached(run)}
-          />
+              {/* EVALS — method-scoped rows */}
+              <EvalList
+                iteration={selectedIteration}
+                definitions={evalDefsForRun(run)}
+                evalsUnderway={run.status !== "running" || evalPhaseReached(run)}
+              />
 
-          {/* REVIEW */}
-          <div className="mt-6">
-            <ReviewActions
-              run={run}
-              onSubmit={(decision, notes) => submitReview(run.id, decision, notes)}
-            />
-          </div>
+              {/* REVIEW */}
+            <div className="mt-6">
+              <ReviewActions
+                run={run}
+                onSubmit={(decision, notes) => submitReview(run.id, decision, notes)}
+              />
+            </div>
+            </>
+          )}
         </div>
 
         {/* WORKFLOW RAIL — how far along the engine is, at a glance */}

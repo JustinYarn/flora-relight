@@ -1,6 +1,7 @@
 "use client";
 
 import type { Iteration, Run } from "@/lib/types";
+import { isTwoPassWorkflowMode, runWorkflowMode } from "@/lib/workflow-mode";
 
 function dotColor(status: Iteration["status"]): string {
   return status === "running"
@@ -36,7 +37,11 @@ export function AttemptSwitcher({
       active ? "bg-raised text-ink" : "text-muted hover:text-ink"
     }`;
 
-  const lampRun = run.workflowMode === "lamp" || run.workflowId === "lamp-v1";
+  const lampRun = isTwoPassWorkflowMode(runWorkflowMode(run));
+  const backgroundNoOp =
+    runWorkflowMode(run) === "background" &&
+    run.backgroundCleanupPlan?.approval.status === "approved" &&
+    run.backgroundCleanupPlan.decision === "exceptional-no-op";
   // Older single-cut runs have one delivered artifact. Name that output Final
   // instead of rendering duplicate Initial/Final controls for the same file.
   const singleDelivered = run.iterations.length === 1 && Boolean(run.finalVideo);
@@ -44,12 +49,14 @@ export function AttemptSwitcher({
   return (
     <div className="flex flex-wrap items-center gap-1">
       <span className="mr-2 text-2xs uppercase tracking-[0.14em] text-faint">
-        Videos
+        {backgroundNoOp ? "Delivery" : "Videos"}
       </span>
       {run.iterations.map((it) => {
         const lampFinal = lampRun && (singleDelivered || it.index === 2);
         const key = lampFinal && run.finalVideo ? "final" : `iter-${it.index}`;
-        const label = lampRun
+        const label = backgroundNoOp
+          ? "Exact source"
+          : lampRun
           ? singleDelivered
             ? "Final"
             : it.index === 1

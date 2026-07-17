@@ -35,7 +35,7 @@ import {
 import { getEvalDef } from "@/lib/prompts/eval-defs";
 import { PRICE_TABLE } from "@/lib/cost";
 import { clamp, verdictFor } from "@/lib/util";
-import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
+import { FLORA_WORKFLOW } from "@/lib/workflow-def";
 import { isValidRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
 import {
@@ -338,7 +338,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (evalDef.method === "deterministic") {
     return jsonError(400, "Deterministic evals cannot issue paid judge calls.");
   }
-  if (!RELIGHT_WORKFLOW.config.judges.includes(judge)) {
+  if (!FLORA_WORKFLOW.config.judges.includes(judge)) {
     return jsonError(400, "Judge is not enabled by the canonical workflow.");
   }
   if (typeof rubric !== "string" || rubric.length === 0) {
@@ -426,11 +426,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       [beforeFrames, afterFrames] = await Promise.all([
         extractServerFrames(
           canonicalBeforeUrl,
-          RELIGHT_WORKFLOW.config.frameTimestamps
+          FLORA_WORKFLOW.config.frameTimestamps
         ),
         extractServerFrames(
           canonicalAfterUrl,
-          RELIGHT_WORKFLOW.config.frameTimestamps
+          FLORA_WORKFLOW.config.frameTimestamps
         ),
       ]);
       // Parse every canonical extraction before taking a paid claim. A local

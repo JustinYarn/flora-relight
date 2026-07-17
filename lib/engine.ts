@@ -22,6 +22,8 @@ import {
 } from "@/lib/mock/scenario";
 import { workflowForMode } from "@/lib/workflow-def";
 import {
+  estimateLampBackgroundPlan,
+  estimateLampBackgroundTwoPass,
   estimateLampRun,
   estimateRun,
   formatUsd,
@@ -33,12 +35,33 @@ import {
   lampCompositeForResults,
   LAMP_VISUAL_EVAL_DEFS,
 } from "@/lib/lamp-evaluation";
+import {
+  buildLampBackgroundEvaluationArtifact,
+  LAMP_BACKGROUND_VISUAL_EVAL_DEFS,
+  type LampBackgroundEvalId,
+  type LampBackgroundEvaluationArtifact,
+} from "@/lib/lamp-background-evaluation";
+import {
+  lampBackgroundPlanRequiresGeneration,
+  parseLampBackgroundCleanupPlan,
+  type LampBackgroundCleanupPlan,
+} from "@/lib/lamp-background";
+import {
+  lampBackgroundArtifactResultsForRun,
+  lampBackgroundCompositeForResults,
+  lampBackgroundPromptForRun,
+} from "@/lib/lamp-background-read";
 import { getEvalDef } from "@/lib/prompts/eval-defs";
 import {
   canonicalLiveAnchorPrompt,
   DEMO_ANCHOR_PROMPT,
 } from "@/lib/prompts/anchor";
+import {
+  compileLampBackgroundFinalPrompt,
+  initialLampBackgroundMegaPrompt,
+} from "@/lib/prompts/lamp-background";
 import { initialMegaPrompt, nextMegaPrompt } from "@/lib/prompts/mega-prompt";
+import { runWorkflowMode } from "@/lib/workflow-mode";
 import { extractFrames } from "@/lib/frames";
 import { clamp, LOW_CONFIDENCE, sleep, uid, verdictFor } from "@/lib/util";
 import type {
@@ -537,6 +560,358 @@ async function runLampMockWorkflow(input: {
   );
 }
 
+type MockLampBackgroundRawResult = {
+  evalId: LampBackgroundEvalId;
+  score: number;
+  confidence: number;
+  violations: Array<{
+    aspect: string;
+    severity: "critical" | "major" | "minor";
+    description: string;
+    correctionAction?: string;
+    planItemIds?: string[];
+  }>;
+  reasoning: string;
+};
+
+function mockLampBackgroundEvaluation(
+  cleanupPlan: LampBackgroundCleanupPlan,
+  iteration: 1 | 2,
+  previous?: LampBackgroundEvaluationArtifact
+): LampBackgroundEvaluationArtifact {
+  const removalIds = cleanupPlan.remove.map((item) => item.id);
+  const initialScores: Partial<Record<LampBackgroundEvalId, number>> = {
+    "identity-preservation": 97,
+    "skin-texture-age": 96,
+    "appearance-fidelity": 96,
+    "motion-lipsync": 95,
+    "cleanup-plan-adherence": 66,
+    "background-cleanup-quality": 64,
+    "background-temporal-stability": 73,
+    "inpainting-artifacts": 72,
+    "lighting-camera-fidelity": 97,
+  };
+  const finalScores: Partial<Record<LampBackgroundEvalId, number>> = {
+    "identity-preservation": 98,
+    "skin-texture-age": 97,
+    "appearance-fidelity": 97,
+    "motion-lipsync": 97,
+    "cleanup-plan-adherence": 95,
+    "background-cleanup-quality": 93,
+    "background-temporal-stability": 94,
+    "inpainting-artifacts": 94,
+    "lighting-camera-fidelity": 98,
+  };
+  const results: MockLampBackgroundRawResult[] =
+    LAMP_BACKGROUND_VISUAL_EVAL_DEFS.map((definition) => {
+      const score =
+        (iteration === 1 ? initialScores : finalScores)[definition.id] ?? 95;
+      const violations: MockLampBackgroundRawResult["violations"] = [];
+      if (iteration === 1) {
+        if (definition.id === "cleanup-plan-adherence") {
+          violations.push({
+            aspect: "approved-removal-incomplete",
+            severity: "major",
+            description:
+              "The simulated Initial leaves part of the approved visual-clutter target visible.",
+            correctionAction: "complete-approved-removal",
+            planItemIds: removalIds,
+          });
+        } else if (definition.id === "background-cleanup-quality") {
+          violations.push({
+            aspect: "cleanup-improvement-too-subtle",
+            severity: "major",
+            description:
+              "The simulated Initial does not yet create a sufficiently clear presentation-ready cleanup.",
+            correctionAction: "complete-approved-removal",
+            planItemIds: removalIds,
+          });
+        } else if (definition.id === "background-temporal-stability") {
+          violations.push({
+            aspect: "removal-edge-instability",
+            severity: "major",
+            description:
+              "The simulated Initial shows intermittent edge chatter around an approved removal footprint.",
+            correctionAction: "stabilize-approved-removal",
+            planItemIds: removalIds,
+          });
+        } else if (definition.id === "inpainting-artifacts") {
+          violations.push({
+            aspect: "reconstruction-texture-smear",
+            severity: "minor",
+            description:
+              "The simulated Initial has a small smeared texture inside an approved removal footprint.",
+            correctionAction: "repair-inpainting",
+            planItemIds: removalIds,
+          });
+        }
+      }
+      return {
+        evalId: definition.id,
+        score,
+        confidence: iteration === 1 ? 0.88 : 0.93,
+        violations,
+        reasoning:
+          iteration === 1
+            ? `Simulated Initial whole-video evidence for ${definition.id}; no evaluation provider was called.`
+            : `Simulated Final whole-video evidence for ${definition.id}; no evaluation provider was called.`,
+      };
+    });
+  return buildLampBackgroundEvaluationArtifact({
+    raw: { results },
+    cleanupPlan,
+    iteration,
+    audioVerified: true,
+    previousResults: previous?.evalResults,
+    costUsd: 0,
+  });
+}
+
+/**
+ * Zero-cost Lamp Background rehearsal. It uses the production plan,
+ * evaluator-artifact, and deterministic prompt compiler contracts, while the
+ * generated mock assets retain neutral source pixels so a cleanup rehearsal
+ * can never masquerade as a relight.
+ */
+async function runLampBackgroundMockWorkflow(input: {
+  runId: string;
+  original: VideoAsset;
+  cleanupPlan: LampBackgroundCleanupPlan;
+  instant: boolean;
+  pace: (minMs?: number, maxMs?: number) => Promise<void>;
+}): Promise<void> {
+  const { runId, original, cleanupPlan, instant, pace } = input;
+  const plan = parseLampBackgroundCleanupPlan(cleanupPlan);
+  if (plan.approval.status !== "approved") {
+    throw new Error(
+      "Lamp Background mock execution requires an approved cleanup plan."
+    );
+  }
+  if (plan.runId !== runId) {
+    throw new Error(
+      "Lamp Background mock execution requires a cleanup plan bound to this run."
+    );
+  }
+  if (!lampBackgroundPlanRequiresGeneration(plan)) {
+    const current = getRun(runId);
+    if (
+      current?.status !== "awaiting-review" ||
+      current.finalVideo?.kind !== "final" ||
+      current.finalVideo.url !== original.url
+    ) {
+      throw new Error(
+        "Approved exceptional no-op plans must be materialized as the exact source before the mock engine is invoked."
+      );
+    }
+    setNode(runId, "plan", "succeeded", "exceptional no-op approved");
+    setNode(runId, "initial", "skipped", "generation not authorized");
+    setNode(runId, "critique", "skipped", "generation not authorized");
+    setNode(runId, "final", "skipped", "exact source delivered");
+    setNode(runId, "review", "running", "awaiting your human grade");
+    log(
+      runId,
+      "info",
+      "Lamp Background exceptional no-op preserved: the exact source remains the final and no generation was dispatched.",
+      "review"
+    );
+    return;
+  }
+
+  const providers = getProviders("mock", { instant });
+  const planningEstimate = estimateLampBackgroundPlan();
+  const cleanupEstimate = estimateLampBackgroundTwoPass(
+    original.durationSec
+  );
+  const estimate = {
+    totalUsd: planningEstimate.totalUsd + cleanupEstimate.totalUsd,
+    items: [...planningEstimate.items, ...cleanupEstimate.items],
+  };
+  const encode = (iteration: number) =>
+    encodeScenarioIteration(original.id, iteration);
+
+  mutateRun(runId, (run) => {
+    run.live = false;
+    run.backgroundCleanupPlan = plan;
+    run.iterations = [];
+    run.cost = {
+      estimatedUsd: estimate.totalUsd,
+      actualUsd: 0,
+      items: estimate.items.map((item) => ({
+        label: item.label,
+        usd: item.usd,
+        estimated: true,
+      })),
+    };
+    delete run.bestIterationIndex;
+    delete run.finalVideo;
+    delete run.fallback;
+  });
+
+  setNode(runId, "plan", "running");
+  await pace(80, 180);
+  setNode(
+    runId,
+    "plan",
+    "succeeded",
+    `${plan.remove.length} remove · ${plan.preserve.length} preserve · ${plan.uncertain.length} uncertain`
+  );
+  log(
+    runId,
+    "info",
+    "Human-approved cleanup plan locked. Uncertain and unlisted content remain preserve-by-default.",
+    "plan"
+  );
+
+  setNode(runId, "initial", "running", "generation 1 of 2");
+  const initialPrompt = initialLampBackgroundMegaPrompt(plan);
+  const initialPresentationPrompt =
+    lampBackgroundPromptForRun(initialPrompt);
+  mutateRun(runId, (run) => {
+    run.iterations.push({
+      index: 1,
+      megaPrompt: initialPresentationPrompt,
+      beforeFrames: [],
+      afterFrames: [],
+      evalResults: [],
+      status: "running",
+    });
+  });
+  const initialGenerated = await providers.videoGen.generate({
+    originalVideo: original,
+    megaPrompt: initialPresentationPrompt,
+    seed: 133742,
+    iteration: encode(1),
+  });
+  const initialVideo: VideoAsset = {
+    ...initialGenerated.video,
+    url: original.url,
+    label: "Lamp Background Initial — simulated cleanup",
+    simulatedFilter: "none",
+  };
+  patchIteration(runId, 1, (iteration) => {
+    iteration.generatedVideo = initialVideo;
+  });
+  setNode(runId, "initial", "succeeded", "simulated Initial saved");
+
+  setNode(runId, "critique", "running", "whole-video plan check");
+  await pace(180, 340);
+  const initialArtifact = mockLampBackgroundEvaluation(plan, 1);
+  const initialResults = lampBackgroundArtifactResultsForRun(
+    initialArtifact,
+    plan
+  );
+  const initialComposite =
+    lampBackgroundCompositeForResults(initialResults);
+  if (!initialComposite || initialComposite.passed) {
+    throw new Error(
+      "Lamp Background mock Initial must retain its intentional cleanup-gate failure."
+    );
+  }
+  patchIteration(runId, 1, (iteration) => {
+    iteration.evalResults = initialResults;
+    iteration.composite = initialComposite;
+    iteration.status = "failed";
+  });
+  const corrections = initialArtifact.evalResults.flatMap((result) =>
+    result.violations.filter((violation) => violation.correction)
+  ).length;
+  setNode(
+    runId,
+    "critique",
+    "succeeded",
+    `${corrections} plan-bound corrections compiled`
+  );
+  log(
+    runId,
+    "warn",
+    "The simulated Initial failed cleanup gates. Only structured corrections tied to approved removal targets will enter Final.",
+    "critique"
+  );
+
+  setNode(runId, "final", "running", "generation 2 of 2");
+  const finalPrompt = compileLampBackgroundFinalPrompt(
+    initialPrompt.rendered,
+    plan,
+    initialArtifact
+  );
+  if (finalPrompt.corrections.length === 0) {
+    throw new Error(
+      "Lamp Background mock Final requires at least one approved plan-bound correction."
+    );
+  }
+  const finalPresentationPrompt = lampBackgroundPromptForRun(finalPrompt);
+  mutateRun(runId, (run) => {
+    run.iterations.push({
+      index: 2,
+      megaPrompt: finalPresentationPrompt,
+      beforeFrames: [],
+      afterFrames: [],
+      evalResults: [],
+      status: "running",
+    });
+  });
+  const finalGenerated = await providers.videoGen.generate({
+    originalVideo: original,
+    megaPrompt: finalPresentationPrompt,
+    seed: 133742,
+    iteration: encode(2),
+  });
+  const finalGeneratedVideo: VideoAsset = {
+    ...finalGenerated.video,
+    url: original.url,
+    label: "Lamp Background Final — simulated cleanup",
+    simulatedFilter: "none",
+  };
+  const finalArtifact = mockLampBackgroundEvaluation(
+    plan,
+    2,
+    initialArtifact
+  );
+  const finalResults = lampBackgroundArtifactResultsForRun(
+    finalArtifact,
+    plan
+  );
+  const finalComposite = lampBackgroundCompositeForResults(finalResults);
+  if (!finalComposite?.passed) {
+    throw new Error(
+      "Lamp Background mock Final must pass every cleanup and preservation gate."
+    );
+  }
+  patchIteration(runId, 2, (iteration) => {
+    iteration.generatedVideo = finalGeneratedVideo;
+    iteration.evalResults = finalResults;
+    iteration.composite = finalComposite;
+    iteration.status = "ungraded";
+  });
+  setNode(
+    runId,
+    "final",
+    "succeeded",
+    finalComposite?.passed ? "simulated Final passed" : "simulated Final saved"
+  );
+
+  const finalVideo: VideoAsset = {
+    ...finalGeneratedVideo,
+    id: uid("video"),
+    kind: "final",
+    hasAudio: original.hasAudio,
+    label: original.hasAudio
+      ? "Lamp Background Final — source audio restored"
+      : "Lamp Background Final — source silence preserved",
+  };
+  setNode(runId, "review", "running", "awaiting your blind human grade");
+  mutateRun(runId, (run) => {
+    run.finalVideo = finalVideo;
+    run.status = "awaiting-review";
+  });
+  log(
+    runId,
+    "info",
+    "Lamp Background demo complete: Initial failed, approved plan-bound corrections drove Final, and the saved Final evaluation is ready for blind-grade reveal. Actual provider spend: $0.00.",
+    "review"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The engine
 // ---------------------------------------------------------------------------
@@ -553,8 +928,7 @@ export async function runWorkflow(
   const run0 = getRun(runId);
   if (!run0) return;
   const original = run0.originalVideo;
-  const workflowMode =
-    run0.workflowMode ?? (run0.workflowId === "lamp-v1" ? "lamp" : "flora");
+  const workflowMode = runWorkflowMode(run0);
   const config = workflowForMode(workflowMode).config;
   // The instant demo run is mock by definition (synthetic clip, zero-latency
   // replay); everything else follows the store's hydrated mode.
@@ -564,6 +938,32 @@ export async function runWorkflow(
     throw new Error(
       "Live browser execution is disabled. Durable server Workflows own all provider dispatch."
     );
+  }
+  if (workflowMode === "background") {
+    try {
+      if (!run0.backgroundCleanupPlan) {
+        throw new Error(
+          "Lamp Background mock execution cannot start without a cleanup plan."
+        );
+      }
+      await runLampBackgroundMockWorkflow({
+        runId,
+        original,
+        cleanupPlan: run0.backgroundCleanupPlan,
+        instant,
+        pace,
+      });
+    } catch (error) {
+      log(runId, "error", `Lamp Background demo error: ${errText(error)}`);
+      mutateRun(runId, (run) => {
+        run.status = "failed";
+        for (const state of Object.values(run.nodeStates)) {
+          if (state.status === "running") state.status = "failed";
+          if (state.status === "queued") state.status = "idle";
+        }
+      });
+    }
+    return;
   }
   if (workflowMode === "lamp") {
     try {

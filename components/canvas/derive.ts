@@ -1,7 +1,17 @@
-/** Pure Lamp run-state derivations shared by the Method canvas and progress strip. */
+/** Pure run-state derivations shared by the Method canvas and progress strip. */
 
-import type { NodeRunStatus, Run, RunConfig } from "@/lib/types";
-import { EVAL_STACK_IDS } from "@/components/canvas/layout";
+import type {
+  NodeRunStatus,
+  Run,
+  RunConfig,
+  WorkflowMode,
+} from "@/lib/types";
+import { EVAL_STACK_IDS } from "./layout.ts";
+import { evalDefsForRun } from "../../lib/lamp-evaluation.ts";
+import {
+  DEFAULT_WORKFLOW_MODE,
+  runWorkflowMode,
+} from "../../lib/workflow-mode.ts";
 
 export type StageState = "idle" | "running" | "pass" | "fail" | "skipped";
 
@@ -93,12 +103,113 @@ const GENERATE_IDS = ["compile", "videogen", "remux", "eval-audio"];
 const EVALUATE_IDS = [...EVAL_STACK_IDS, "ledger"];
 const GRADE_IDS = ["review"];
 
+function gradeDetail(run: Run | undefined): string | undefined {
+  if (run?.humanGrade) return "human grade saved";
+  if (run?.status === "awaiting-review") return "ready for your grade";
+  if (run?.review) {
+    return run.review.decision === "approved"
+      ? "approved"
+      : "changes requested";
+  }
+  return undefined;
+}
+
+function deriveBackgroundStageChips(run: Run | undefined): StageChip[] {
+  const planState =
+    run?.backgroundCleanupPlan?.approval.status === "draft"
+      ? "running"
+      : groupState(run, ["plan"]);
+  const initial = groupState(run, ["initial"]);
+  const critique = groupState(run, ["critique"]);
+  const final = groupState(run, ["final"]);
+  const review =
+    run?.humanGrade || run?.review
+      ? "pass"
+      : run?.status === "awaiting-review"
+        ? "running"
+        : groupState(run, ["review"]);
+  const initialIteration = run?.iterations.find(
+    (iteration) => iteration.index === 1
+  );
+  const visualIds = new Set(
+    run
+      ? evalDefsForRun(run)
+          .filter((definition) => definition.method !== "deterministic")
+          .map((definition) => definition.id)
+      : []
+  );
+  const critiqueCount =
+    initialIteration?.evalResults.filter((result) =>
+      visualIds.has(result.evalId)
+    ).length ?? 0;
+  const noOp =
+    run?.backgroundCleanupPlan?.approval.status === "approved" &&
+    run.backgroundCleanupPlan.decision === "exceptional-no-op";
+
+  return [
+    {
+      id: "plan",
+      label: "Cleanup plan",
+      state: planState,
+      symbol: SYMBOL[planState],
+      detail:
+        run?.backgroundCleanupPlan?.approval.status === "approved"
+          ? noOp
+            ? "no-op approved"
+            : `${run.backgroundCleanupPlan.remove.length} remove`
+          : run?.backgroundCleanupPlan
+            ? "awaiting approval"
+            : undefined,
+    },
+    {
+      id: "initial",
+      label: "Initial",
+      state: initial,
+      symbol: SYMBOL[initial],
+      detail: initial === "skipped" ? "not generated" : undefined,
+    },
+    {
+      id: "critique",
+      label: "Critique",
+      state: critique,
+      symbol: SYMBOL[critique],
+      detail:
+        critique === "skipped"
+          ? "not run"
+          : visualIds.size > 0 && critiqueCount > 0
+            ? `${critiqueCount}/${visualIds.size} visual`
+            : undefined,
+    },
+    {
+      id: "final",
+      label: "Final",
+      state: final,
+      symbol: SYMBOL[final],
+      detail:
+        final === "skipped" && noOp ? "exact source" : undefined,
+    },
+    {
+      id: "review",
+      label: "Human grade",
+      state: review,
+      symbol: SYMBOL[review],
+      detail: gradeDetail(run),
+    },
+  ];
+}
+
 export function deriveStageChips(
   run: Run | undefined,
-  _config: RunConfig
+  _config: RunConfig,
+  workflowMode: WorkflowMode = run
+    ? runWorkflowMode(run)
+    : DEFAULT_WORKFLOW_MODE
 ): StageChip[] {
   // Kept in the public signature for historical callers; Lamp has no score gate.
   void _config;
+  if (workflowMode === "background") {
+    return deriveBackgroundStageChips(run);
+  }
   const latest = run?.iterations[run.iterations.length - 1];
   const latestVisualCount =
     latest?.evalResults.filter((result) => result.evalId !== "audio-integrity").length ?? 0;
@@ -107,12 +218,6 @@ export function deriveStageChips(
   const generate = groupState(run, GENERATE_IDS);
   const evaluate = groupState(run, EVALUATE_IDS);
   const grade = groupState(run, GRADE_IDS);
-
-  let gradeDetail: string | undefined;
-  if (run?.status === "awaiting-review") gradeDetail = "ready for your grade";
-  else if (run?.review) {
-    gradeDetail = run.review.decision === "approved" ? "approved" : "changes requested";
-  }
 
   return [
     {
@@ -140,7 +245,7 @@ export function deriveStageChips(
       label: "Human grade",
       state: grade,
       symbol: SYMBOL[grade],
-      detail: gradeDetail,
+      detail: gradeDetail(run),
     },
   ];
 }

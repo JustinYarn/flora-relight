@@ -15,6 +15,11 @@ import type {
   VideoAsset,
 } from "@/lib/types";
 import { isLampRun } from "@/lib/lamp-evaluation";
+import { isLampBackgroundRun } from "@/lib/lamp-background-read";
+
+function isFixedTwoPassRun(run: Run): boolean {
+  return isLampRun(run) || isLampBackgroundRun(run);
+}
 
 /** Plain-English status meta shared by the Library rows and filter chips. */
 export const STATUS_META: Record<RunStatus, { color: string; label: string }> = {
@@ -32,7 +37,7 @@ export const STATUS_META: Record<RunStatus, { color: string; label: string }> = 
  */
 export function shippedIteration(run: Run): Iteration | undefined {
   const last = run.iterations[run.iterations.length - 1];
-  if (isLampRun(run)) {
+  if (isFixedTwoPassRun(run)) {
     return run.iterations.find((iteration) => iteration.index === 2) ?? last;
   }
   const bi = run.bestIterationIndex;
@@ -54,7 +59,7 @@ export function shippedComposite(
   run: Run
 ): { score: number; passed: boolean } | undefined {
   const it = shippedIteration(run);
-  if (run.workflowId === "lamp-v1") return it?.composite;
+  if (isFixedTwoPassRun(run)) return it?.composite;
   if (it?.composite) return it.composite;
   for (let i = run.iterations.length - 1; i >= 0; i -= 1) {
     const c = run.iterations[i]?.composite;

@@ -15,6 +15,16 @@ import {
   LAMP_EVAL_DEFS,
   isLampRun,
 } from "@/lib/lamp-evaluation";
+import { LAMP_BACKGROUND_UI_EVAL_DEFS } from "@/lib/lamp-background-read";
+import {
+  lampBackgroundDisplayPrompt,
+  sampleApprovedLampBackgroundPlan,
+} from "@/lib/lamp-background-display";
+import {
+  LAMP_BACKGROUND_CLEANUP_PLAN_PROMPT,
+  type LampBackgroundCleanupPlan,
+} from "@/lib/lamp-background";
+import { renderLampBackgroundHolisticEvaluatorPrompt } from "@/lib/lamp-background-evaluation";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { MANIFEST_PROMPT } from "@/lib/prompts/manifest";
 import { formatTime } from "@/lib/util";
@@ -41,7 +51,13 @@ function severityColor(severity: ViolationSeverity): string {
 }
 
 function evalName(id: string): string {
-  return EVAL_DEFS.find((definition) => definition.id === id)?.name ?? id;
+  return (
+    LAMP_BACKGROUND_UI_EVAL_DEFS.find((definition) => definition.id === id)
+      ?.name ??
+    LAMP_EVAL_DEFS.find((definition) => definition.id === id)?.name ??
+    EVAL_DEFS.find((definition) => definition.id === id)?.name ??
+    id
+  );
 }
 
 function DeltaChip({ delta }: { delta: number }) {
@@ -273,8 +289,14 @@ function runPromptSource(iteration: number): string {
   return `run.iterations · ${iteration === 1 ? "Initial" : iteration === 2 ? "Final" : `v${iteration}`} · megaPrompt.rendered`;
 }
 
-function codeCheckSpecificationNote(evalId: string): string {
+function codeCheckSpecificationNote(
+  evalId: string,
+  workflowMode: WorkflowMode
+): string {
   if (evalId === "audio-integrity") {
+    if (workflowMode === "background") {
+      return "No model prompt. Lamp Background verifies source-audio restoration and complete timeline agreement deterministically after generation; Audio Integrity is not included in the nine-row visual evaluator call.";
+    }
     return "No model prompt. Lamp verifies audio presence, complete source/generated/remuxed timeline agreement, and the restored source-audio fingerprint. Any mismatch fails closed before visual evaluation.";
   }
   if (evalId === "temporal-alignment") {
@@ -285,7 +307,8 @@ function codeCheckSpecificationNote(evalId: string): string {
 
 function promptViewFor(
   run: Run | undefined,
-  iteration: Iteration | undefined
+  iteration: Iteration | undefined,
+  selectedWorkflowMode: WorkflowMode
 ): {
   prompt: MegaPrompt;
   attempt: number;
@@ -294,7 +317,14 @@ function promptViewFor(
   source: string;
 } {
   const workflowMode =
-    run?.workflowMode ?? (run?.workflowId === "lamp-v1" ? "lamp" : "flora");
+    run?.workflowMode ??
+    (run?.workflowId === "lamp-v1" ? "lamp" : selectedWorkflowMode);
+  const backgroundView =
+    workflowMode === "background"
+      ? lampBackgroundDisplayPrompt(run, iteration)
+      : undefined;
+  const definitionPrompt =
+    backgroundView?.prompt ?? initialMegaPrompt(workflowMode);
   const attempt = iteration?.index ?? Math.max(1, run?.serverExecution?.iteration ?? 1);
   const operation = run?.providerOperations?.find(
     (item) =>
@@ -310,7 +340,10 @@ function promptViewFor(
   if (authoritativeLivePrompt) {
     const prompt = iteration
       ? { ...iteration.megaPrompt, corrections: [...iteration.megaPrompt.corrections] }
-      : initialMegaPrompt(workflowMode);
+      : {
+          ...definitionPrompt,
+          corrections: [...definitionPrompt.corrections],
+        };
     prompt.version = attempt;
     prompt.rendered = authoritativeLivePrompt;
     const operationCompleted =
@@ -336,7 +369,10 @@ function promptViewFor(
       source: runPromptSource(iteration.index),
     };
   }
-  const prompt = initialMegaPrompt(workflowMode);
+  const prompt = {
+    ...definitionPrompt,
+    corrections: [...definitionPrompt.corrections],
+  };
   const execution = run?.serverExecution;
   if (execution?.renderedPrompt) {
     prompt.version = Math.max(1, execution.iteration);
@@ -352,21 +388,30 @@ function promptViewFor(
   return {
     prompt,
     attempt: 1,
-    runBound: false,
+    runBound: backgroundView?.runBound ?? false,
     consumed: false,
-    source: "lib/prompts/mega-prompt.ts",
+    source:
+      backgroundView?.source ??
+      "lib/prompts/mega-prompt.ts",
   };
 }
 
 function generationBriefNote(
   mode: Mode,
   runBound: boolean,
-  consumed: boolean
+  consumed: boolean,
+  workflowMode: WorkflowMode
 ): string {
   if (!runBound) {
+    if (workflowMode === "background") {
+      return "Definition-only cleanup brief compiled from the clearly labeled sample approved plan. It is not attached to a real video.";
+    }
     return "This is the current baseline render before a run adds any eval-driven fixes. It is an example, not a historical request.";
   }
   if (!consumed) {
+    if (workflowMode === "background") {
+      return "These exact cleanup-prompt bytes are bound to the selected run or its approved plan. Provider consumption is not confirmed yet.";
+    }
     return "These exact bytes are bound to the selected video. Provider consumption is not confirmed yet, so this is not labeled as a prompt the model already consumed.";
   }
   return mode === "live"
@@ -388,12 +433,17 @@ function EvalSection({
   workflowMode: WorkflowMode;
 }) {
   const lamp = run ? isLampRun(run) : workflowMode === "lamp";
+  const background =
+    run?.workflowMode === "background" || (!run && workflowMode === "background");
   // The node's evalId comes from the store-selected workflow graph while
   // `lamp` follows the selected run — the two can disagree (Flora canvas,
   // newest run is Lamp). Resolve from the Lamp registry only when the id
   // exists there; otherwise fall back to the full library instead of
   // crashing the Engine page on Flora-only nodes.
-  const definition = lamp
+  const definition = background
+    ? (LAMP_BACKGROUND_UI_EVAL_DEFS.find((item) => item.id === evalId) ??
+      getEvalDef(evalId))
+    : lamp
     ? (LAMP_EVAL_DEFS.find((item) => item.id === evalId) ?? getEvalDef(evalId))
     : getEvalDef(evalId);
   const attempts =
@@ -408,7 +458,7 @@ function EvalSection({
   const latestRunIteration = run?.iterations[run.iterations.length - 1];
   const focusIteration = focusPair?.iteration ?? latestRunIteration;
   const focusResult = focusPair?.result;
-  const promptView = promptViewFor(run, focusIteration);
+  const promptView = promptViewFor(run, focusIteration, workflowMode);
   const brief = promptView.prompt;
   const nextIteration =
     focusResult && run
@@ -653,7 +703,12 @@ function EvalSection({
         note={
           isAudio
             ? "Shown only as delivery context. Audio Integrity reads the remuxed and ingest audio digests; it does not receive or interpret this generation prompt."
-            : generationBriefNote(mode, promptView.runBound, promptView.consumed)
+            : generationBriefNote(
+                mode,
+                promptView.runBound,
+                promptView.consumed,
+                workflowMode
+              )
         }
         source={promptView.source}
         testId="generation-prompt-disclosure"
@@ -673,15 +728,19 @@ function EvalSection({
         }
         note={
           isRubric
-            ? lamp
+            ? background
+              ? "This is today's code-owned Lamp Background rubric. All nine visual rubrics are composed into one approved-plan-bound Gemini request over the complete source and candidate videos. Historical rubric text is not archived per run."
+              : lamp
               ? "This is today's code-owned Lamp rubric. Lamp sends all eight visual rubrics in one Gemini request over the complete source and candidate videos. Historical rubric text is not archived per run."
               : "This is today's code-owned Flora rubric. Historical rubric text is not archived per run."
-            : codeCheckSpecificationNote(evalId)
+            : codeCheckSpecificationNote(evalId, workflowMode)
         }
         source={
-          lamp && evalId === "skin-texture-age"
-            ? "lib/lamp-evaluation.ts"
-            : "lib/prompts/eval-defs.ts"
+          background
+            ? "lib/lamp-background-evaluation.ts"
+            : lamp && evalId === "skin-texture-age"
+              ? "lib/lamp-evaluation.ts"
+              : "lib/prompts/eval-defs.ts"
         }
         testId="rubric-prompt-disclosure"
       />
@@ -886,17 +945,296 @@ function ManifestSection({ run, mode }: { run?: Run; mode: Mode }) {
   );
 }
 
+function backgroundPlanContext(run?: Run): {
+  visiblePlan: LampBackgroundCleanupPlan;
+  promptPlan: LampBackgroundCleanupPlan;
+  visiblePlanIsSample: boolean;
+  promptIsSample: boolean;
+} {
+  const backgroundRun = run?.workflowMode === "background" ? run : undefined;
+  const promptView = lampBackgroundDisplayPrompt(backgroundRun);
+  return {
+    visiblePlan:
+      backgroundRun?.backgroundCleanupPlan ??
+      sampleApprovedLampBackgroundPlan(),
+    promptPlan: promptView.promptPlan,
+    visiblePlanIsSample: backgroundRun?.backgroundCleanupPlan === undefined,
+    promptIsSample: promptView.sample,
+  };
+}
+
+function BackgroundPlanSection({ run }: { run?: Run }) {
+  const context = backgroundPlanContext(run);
+  const plan = context.visiblePlan;
+  return (
+    <>
+      <section>
+        <SectionTitle>Planning contract</SectionTitle>
+        <PromptTrace
+          items={[
+            {
+              label: "Input",
+              value: "The complete source timeline",
+              color: "var(--faint)",
+            },
+            {
+              label: "Planning prompt",
+              value: "Classify remove, preserve, uncertain, or a rare exceptional no-op",
+              color: "var(--running)",
+            },
+            {
+              label: "Output",
+              value: "A validated source-specific draft plan",
+              color: "var(--borderline)",
+            },
+            {
+              label: "Human gate",
+              value: "Generation remains blocked until this exact plan is approved",
+              color: "var(--accent)",
+            },
+          ]}
+        />
+      </section>
+
+      <section>
+        <SectionTitle
+          right={
+            <Badge
+              color={
+                context.visiblePlanIsSample
+                  ? "var(--muted)"
+                  : plan.approval.status === "approved"
+                    ? "var(--pass)"
+                    : "var(--borderline)"
+              }
+            >
+              {context.visiblePlanIsSample
+                ? "definition sample"
+                : plan.approval.status}
+            </Badge>
+          }
+        >
+          Plan in view
+        </SectionTitle>
+        <div className="grid grid-cols-2 gap-2">
+          <Fact label="Decision" value={plan.decision} />
+          <Fact
+            label="Scope"
+            value={`${plan.sourceScope.cameraMotion} · ${plan.sourceScope.visiblePeople}`}
+          />
+          <Fact label="Remove" value={plan.remove.length} />
+          <Fact
+            label="Protected"
+            value={plan.preserve.length + plan.uncertain.length}
+          />
+        </div>
+        <p className="mt-2 text-pretty text-xs leading-relaxed text-muted">
+          {plan.sceneSummary}
+        </p>
+        {plan.approval.status === "draft" ? (
+          <p className="mt-2 rounded-lg bg-raised px-3 py-2.5 text-pretty text-2xs leading-relaxed text-borderline shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+            This is the selected run&apos;s real draft. It is visible for review but
+            is not yet legal generation input.
+          </p>
+        ) : null}
+      </section>
+
+      <PromptDisclosure
+        eyebrow="CURRENT PLANNING PROMPT"
+        title="Whole-video cleanup-plan analyzer"
+        text={LAMP_BACKGROUND_CLEANUP_PLAN_PROMPT}
+        note="This model call may propose classifications only. Validation and explicit human approval remain separate gates."
+        source="lib/lamp-background.ts · LAMP_BACKGROUND_CLEANUP_PLAN_PROMPT"
+        testId="background-plan-prompt-disclosure"
+      />
+
+      <PromptDisclosure
+        eyebrow={
+          context.visiblePlanIsSample
+            ? "DEFINITION SAMPLE"
+            : plan.approval.status === "approved"
+              ? "RUN-APPROVED PLAN"
+              : "RUN DRAFT PLAN"
+        }
+        title="Remove / preserve / uncertain contract"
+        text={JSON.stringify(plan, null, 2)}
+        note={
+          context.visiblePlanIsSample
+            ? "Clearly synthetic approved plan used only to make definition-only prompt views concrete."
+            : plan.approval.status === "approved"
+              ? "This exact source-specific plan is the edit authorization bound into generation and evaluation."
+              : "This source-specific proposal is not bound into generation until the user approves it."
+        }
+        source={
+          context.visiblePlanIsSample
+            ? "lib/lamp-background-display.ts · sampleApprovedLampBackgroundPlan"
+            : "run.backgroundCleanupPlan"
+        }
+        testId="background-plan-json-disclosure"
+      />
+    </>
+  );
+}
+
+function BackgroundCritiqueSection({
+  run,
+  onSelectNode,
+}: {
+  run?: Run;
+  onSelectNode: (nodeId: string) => void;
+}) {
+  const context = backgroundPlanContext(run);
+  const promptPlan = context.promptPlan;
+  const exceptionalNoOp =
+    !context.promptIsSample &&
+    promptPlan.decision === "exceptional-no-op";
+  return (
+    <>
+      <section>
+        <SectionTitle>Whole-video evaluation handoff</SectionTitle>
+        <PromptTrace
+          items={[
+            {
+              label: "Inputs",
+              value: "Complete source + complete candidate at the same timeline",
+              color: "var(--faint)",
+            },
+            {
+              label: "Authorization",
+              value: context.promptIsSample
+                ? "Clearly labeled sample approved cleanup plan"
+                : "Selected run's approved cleanup plan",
+              color: "var(--accent)",
+            },
+            {
+              label: "One model call",
+              value: exceptionalNoOp
+                ? "Skipped · the exact source was delivered without a generated candidate"
+                : "Nine independent visual checks with closed correction actions",
+              color: "var(--running)",
+            },
+            {
+              label: "Code append",
+              value: exceptionalNoOp
+                ? "No generated delivery needed a new evaluation"
+                : "Deterministic Audio Integrity becomes the tenth result",
+              color: "var(--pass)",
+            },
+          ]}
+        />
+      </section>
+
+      <PromptDisclosure
+        eyebrow={
+          exceptionalNoOp
+            ? "DEFINITION · NOT RUN FOR SELECTED NO-OP"
+            : context.promptIsSample
+            ? "DEFINITION-ONLY EVALUATOR"
+            : "APPROVED-PLAN-BOUND EVALUATOR"
+        }
+        title="Holistic Lamp Background evaluation prompt"
+        text={renderLampBackgroundHolisticEvaluatorPrompt(promptPlan)}
+        note={
+          exceptionalNoOp
+            ? "The evaluator definition is shown for inspection, but the selected exceptional no-op produced no candidate and did not run this AI evaluation."
+            : context.promptIsSample
+            ? "This exact evaluator shape uses the definition sample because no approved run plan is available."
+            : "This evaluator prompt is rendered against the selected run's approved cleanup plan."
+        }
+        source="lib/lamp-background-evaluation.ts · renderLampBackgroundHolisticEvaluatorPrompt"
+        testId="background-evaluator-prompt-disclosure"
+      />
+
+      <section>
+        <SectionTitle
+          right={
+            <Badge>
+              {LAMP_BACKGROUND_UI_EVAL_DEFS.length} active definitions
+            </Badge>
+          }
+        >
+          Checks composed here
+        </SectionTitle>
+        <div className="space-y-2">
+          {LAMP_BACKGROUND_UI_EVAL_DEFS.map((definition, index) => (
+            <details
+              key={definition.id}
+              className="group rounded-lg bg-raised shadow-[0_0_0_1px_rgba(255,255,255,0.06)]"
+            >
+              <summary className="flex min-h-12 cursor-pointer list-none items-center gap-2 px-3 py-2 [&::-webkit-details-marker]:hidden">
+                <span className="w-5 text-right font-[family-name:var(--font-geist-mono)] text-2xs tabular-nums text-faint">
+                  {index + 1}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-xs font-medium text-ink">
+                    {definition.name}
+                  </span>
+                  <span className="block font-[family-name:var(--font-geist-mono)] text-[10px] text-faint">
+                    {definition.id}
+                  </span>
+                </span>
+                <Badge
+                  color={
+                    definition.method === "deterministic"
+                      ? "var(--muted)"
+                      : "var(--running)"
+                  }
+                >
+                  {definition.method === "deterministic"
+                    ? "code"
+                    : "visual rubric"}
+                </Badge>
+                <span
+                  className="text-base text-faint transition-transform group-open:rotate-90"
+                  aria-hidden="true"
+                >
+                  ›
+                </span>
+              </summary>
+              <div className="border-t border-edge p-3">
+                <p className="text-pretty text-xs leading-relaxed text-muted">
+                  {definition.description}
+                </p>
+                <p className="mt-2 text-2xs tabular-nums text-faint">
+                  pass ≥ {definition.passThreshold} · borderline ≥{" "}
+                  {definition.borderlineThreshold} · weight{" "}
+                  {definition.weight.toFixed(2)}
+                </p>
+                <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap rounded-md bg-canvas p-2.5 font-[family-name:var(--font-geist-mono)] text-2xs leading-relaxed text-muted">
+                  {definition.promptTemplate ||
+                    definition.deterministicNote ||
+                    "No definition text is available."}
+                </pre>
+              </div>
+            </details>
+          ))}
+        </div>
+      </section>
+
+      <button
+        type="button"
+        onClick={() => onSelectNode("final")}
+        className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
+      >
+        Inspect the Final prompt created from structured findings →
+      </button>
+    </>
+  );
+}
+
 function MegaPromptSection({
   run,
   mode,
+  workflowMode,
   onSelectNode,
 }: {
   run?: Run;
   mode: Mode;
+  workflowMode: WorkflowMode;
   onSelectNode: (nodeId: string) => void;
 }) {
   const iteration = run?.iterations[run.iterations.length - 1];
-  const promptView = promptViewFor(run, iteration);
+  const promptView = promptViewFor(run, iteration, workflowMode);
   const megaPrompt = promptView.prompt;
   const activeCorrections = megaPrompt.corrections.filter(
     (correction) => !correction.resolved
@@ -963,7 +1301,12 @@ function MegaPromptSection({
             : "Compiled brief before any eval fixes"
         }
         text={megaPrompt.rendered}
-        note={generationBriefNote(mode, promptView.runBound, promptView.consumed)}
+        note={generationBriefNote(
+          mode,
+          promptView.runBound,
+          promptView.consumed,
+          workflowMode
+        )}
         source={promptView.source}
         testId="mega-prompt-disclosure"
       />
@@ -983,17 +1326,44 @@ function GenerateSection({
   node,
   run,
   mode,
+  workflowMode,
   onSelectNode,
 }: {
   node: PipelineNode;
   run?: Run;
   mode: Mode;
+  workflowMode: WorkflowMode;
   onSelectNode: (nodeId: string) => void;
 }) {
-  const iteration = run?.iterations[run.iterations.length - 1];
-  const promptView = promptViewFor(run, iteration);
+  const background = workflowMode === "background";
+  const requestedBackgroundAttempt =
+    node.id === "initial" ? 1 : node.id === "final" ? 2 : undefined;
+  const iteration =
+    background && requestedBackgroundAttempt
+      ? run?.iterations.find(
+          (candidate) => candidate.index === requestedBackgroundAttempt
+        )
+      : run?.iterations[run.iterations.length - 1];
+  const promptView = promptViewFor(run, iteration, workflowMode);
   const megaPrompt = promptView.prompt;
-  const videoLabel = promptView.attempt === 1 ? "Initial" : "Final";
+  const exceptionalNoOp =
+    background &&
+    run?.backgroundCleanupPlan?.approval.status === "approved" &&
+    run.backgroundCleanupPlan.decision === "exceptional-no-op";
+  const videoLabel =
+    exceptionalNoOp
+      ? "Exceptional no-op"
+      : background && requestedBackgroundAttempt
+      ? requestedBackgroundAttempt === 1
+        ? "Initial"
+        : "Final"
+      : promptView.attempt === 1
+        ? "Initial"
+        : "Final";
+  const requestedPromptMissing =
+    background &&
+    node.id === "final" &&
+    iteration === undefined;
 
   return (
     <>
@@ -1035,20 +1405,26 @@ function GenerateSection({
             },
             {
               label: "Instructions",
-              value: `Mega prompt v${megaPrompt.version}`,
+              value: `${background ? "Approved-plan cleanup prompt" : "Mega prompt"} v${megaPrompt.version}`,
               color: "var(--accent)",
             },
             {
               label: "Correction context",
               value:
-                promptView.attempt === 1
+                exceptionalNoOp
+                  ? "None · the approved plan bypasses generation"
+                  : videoLabel === "Initial"
                   ? "None · this is the Initial generation"
-                  : "Every actionable finding from the Initial critique",
+                  : requestedPromptMissing
+                    ? "Waiting · the Initial critique has not compiled Final yet"
+                    : "Every actionable finding from the Initial critique",
               color: "var(--running)",
             },
             {
               label: "Output",
-              value: `${videoLabel} relit video`,
+              value: exceptionalNoOp
+                ? "Exact source delivery · generation skipped"
+                : `${videoLabel} ${background ? "background-cleanup" : "relit"} video`,
               color: "var(--pass)",
             },
           ]}
@@ -1057,22 +1433,54 @@ function GenerateSection({
       <PromptDisclosure
         eyebrow={promptView.runBound ? "RUN-BOUND GENERATION PROMPT" : "CURRENT BASELINE"}
         title={
-          promptView.runBound
+          exceptionalNoOp
+            ? "Approved exact-source delivery instruction"
+            : requestedPromptMissing
+            ? "Latest available cleanup brief · Final not compiled yet"
+            : promptView.runBound
             ? `${promptView.consumed ? "Prompt consumed" : "Prompt bound"} for ${videoLabel}`
             : "Mega prompt for Initial"
         }
         text={megaPrompt.rendered}
-        note={generationBriefNote(mode, promptView.runBound, promptView.consumed)}
+        note={generationBriefNote(
+          mode,
+          promptView.runBound,
+          promptView.consumed,
+          workflowMode
+        )}
         source={promptView.source}
         testId="video-generation-prompt-disclosure"
       />
-      <button
-        type="button"
-        onClick={() => onSelectNode("compile")}
-        className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
-      >
-        Open the mega-prompt compiler →
-      </button>
+      {exceptionalNoOp ? (
+        <p className="text-pretty text-2xs leading-relaxed text-borderline">
+          The selected plan is the rare strict no-op. This node was bypassed:
+          no candidate video or AI evaluation was created.
+        </p>
+      ) : null}
+      {requestedPromptMissing ? (
+        <p className="text-pretty text-2xs leading-relaxed text-borderline">
+          The selected run has no saved Final prompt yet. The disclosure above
+          shows the latest available approved-plan-bound cleanup brief as
+          context and does not claim Final was compiled or consumed.
+        </p>
+      ) : null}
+      {background ? (
+        <button
+          type="button"
+          onClick={() => onSelectNode("plan")}
+          className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
+        >
+          Inspect the approved cleanup plan →
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => onSelectNode("compile")}
+          className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
+        >
+          Open the mega-prompt compiler →
+        </button>
+      )}
     </>
   );
 }
@@ -1357,9 +1765,42 @@ export function NodeInspector({
   onSelectNode: (nodeId: string) => void;
   onClose: () => void;
 }) {
-  const state = run?.nodeStates[node.id];
-  const promptRole = promptRoleForNode(node);
-  const runMode: Mode = run ? (run.live ? "live" : "mock") : mode;
+  const inspectorRun =
+    workflowMode === "background" && run?.workflowMode !== "background"
+      ? undefined
+      : run;
+  const state = inspectorRun?.nodeStates[node.id];
+  const backgroundPromptRole =
+    workflowMode !== "background"
+      ? null
+      : node.id === "plan"
+        ? {
+            label: "planning prompt",
+            color: "var(--running)",
+            description:
+              "Proposes the source-specific remove / preserve / uncertain plan; it cannot approve itself.",
+          }
+        : node.id === "initial" || node.id === "final"
+          ? {
+              label: "cleanup mega prompt",
+              color: "var(--accent)",
+              description:
+                "Consumes an approved-plan-bound cleanup brief with lighting and camera locked.",
+            }
+          : node.id === "critique"
+            ? {
+                label: "plan-bound rubrics",
+                color: "var(--running)",
+                description:
+                  "Composes nine visual checks into one whole-video evaluator; audio is deterministic.",
+              }
+            : null;
+  const promptRole = backgroundPromptRole ?? promptRoleForNode(node);
+  const runMode: Mode = inspectorRun
+    ? inspectorRun.live
+      ? "live"
+      : "mock"
+    : mode;
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -1444,31 +1885,52 @@ export function NodeInspector({
             key={`${run?.id ?? "baseline"}:${node.evalId}`}
             evalId={node.evalId}
             nodeId={node.id}
-            run={run}
+            run={inspectorRun}
             mode={runMode}
             workflowMode={workflowMode}
           />
         ) : null}
-        {node.id === "manifest" ? <ManifestSection run={run} mode={runMode} /> : null}
+        {node.id === "plan" && workflowMode === "background" ? (
+          <BackgroundPlanSection run={inspectorRun} />
+        ) : null}
+        {node.id === "critique" && workflowMode === "background" ? (
+          <BackgroundCritiqueSection
+            run={inspectorRun}
+            onSelectNode={onSelectNode}
+          />
+        ) : null}
+        {node.id === "manifest" ? (
+          <ManifestSection run={inspectorRun} mode={runMode} />
+        ) : null}
         {node.id === "compile" ? (
-          <MegaPromptSection run={run} mode={runMode} onSelectNode={onSelectNode} />
+          <MegaPromptSection
+            run={inspectorRun}
+            mode={runMode}
+            workflowMode={workflowMode}
+            onSelectNode={onSelectNode}
+          />
         ) : null}
         {node.kind === "generate" ? (
           <GenerateSection
             node={node}
-            run={run}
+            run={inspectorRun}
             mode={runMode}
+            workflowMode={workflowMode}
             onSelectNode={onSelectNode}
           />
         ) : null}
         {node.kind === "aggregate" ? (
-          <AggregateSection run={run} onSelectNode={onSelectNode} />
+          <AggregateSection run={inspectorRun} onSelectNode={onSelectNode} />
         ) : null}
         {node.kind === "gate" && node.id === "gate" ? (
-          <GateSection run={run} config={config} workflowMode={workflowMode} />
+          <GateSection
+            run={inspectorRun}
+            config={config}
+            workflowMode={workflowMode}
+          />
         ) : null}
         {node.kind === "gate" && node.id === "anchor-gate" ? (
-          <AnchorGateSection run={run} mode={runMode} />
+          <AnchorGateSection run={inspectorRun} mode={runMode} />
         ) : null}
       </div>
     </aside>

@@ -24,7 +24,7 @@ import { isValidRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
 import { PRICE_TABLE } from "@/lib/cost";
 import { canonicalLiveAnchorPrompt } from "@/lib/prompts/anchor";
-import { RELIGHT_WORKFLOW } from "@/lib/workflow-def";
+import { FLORA_WORKFLOW } from "@/lib/workflow-def";
 import { extractServerFrames } from "@/lib/server/frame-extraction";
 import {
   PaidOperationAuthorizationError,
@@ -108,7 +108,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return jsonError(503, "Gemini is not configured.");
   }
 
-  const anchorTimestampSec = RELIGHT_WORKFLOW.config.frameTimestamps[0] ?? 0.5;
+  const anchorTimestampSec = FLORA_WORKFLOW.config.frameTimestamps[0] ?? 0.5;
   let frameDataUrl: string;
   let frameSha256: string;
   try {

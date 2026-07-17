@@ -3,6 +3,10 @@ import {
   initialMegaPrompt,
   nextMegaPrompt,
 } from "./prompts/mega-prompt.ts";
+import {
+  isLampBackgroundRun,
+  LAMP_BACKGROUND_UI_EVAL_DEFS,
+} from "./lamp-background-read.ts";
 import type {
   Correction,
   EvalDefinition,
@@ -127,7 +131,31 @@ export function isLampRun(run: RunEvalScope): boolean {
 }
 
 export function evalDefsForRun(run: RunEvalScope): EvalDefinition[] {
+  if (isLampBackgroundRun(run)) return LAMP_BACKGROUND_UI_EVAL_DEFS;
   return isLampRun(run) ? LAMP_EVAL_DEFS : EVAL_DEFS;
+}
+
+/** Resolve one display definition without falling back to Flora for a scoped run. */
+export function evalDefForRun(
+  run: RunEvalScope,
+  evalId: string
+): EvalDefinition | undefined {
+  return evalDefsForRun(run).find((definition) => definition.id === evalId);
+}
+
+/**
+ * Registry-wide lookup for surfaces that have a pipeline node but no Run.
+ * Run-aware consumers should prefer evalDefForRun so shared ids retain their
+ * method-specific wording and thresholds.
+ */
+export function evalDefForId(evalId: string): EvalDefinition | undefined {
+  return (
+    LAMP_BACKGROUND_UI_EVAL_DEFS.find(
+      (definition) => definition.id === evalId
+    ) ??
+    LAMP_EVAL_DEFS.find((definition) => definition.id === evalId) ??
+    EVAL_DEFS.find((definition) => definition.id === evalId)
+  );
 }
 
 export const LAMP_EVALUATOR_VERSION = "lamp-holistic-v2";

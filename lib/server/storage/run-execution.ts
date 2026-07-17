@@ -14,6 +14,7 @@ import {
   isLampLostGenerationAcknowledgeTransition,
   LAMP_USER_ACTION_REQUIRED_PREFIX,
 } from "@/lib/server/run-execution-resume";
+import { isTwoPassExecutionId } from "@/lib/workflow-mode";
 import { createHash } from "node:crypto";
 
 const EXECUTION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
@@ -148,7 +149,31 @@ export function assertRunExecution(execution: unknown): RunExecution {
     "workflowRunId",
     MAX_OPTIONAL_ID_LENGTH
   );
+  assertOptionalText(
+    candidate.planOperationId,
+    "planOperationId",
+    MAX_OPTIONAL_ID_LENGTH
+  );
+  if (
+    candidate.approvedPlanHash !== undefined &&
+    (typeof candidate.approvedPlanHash !== "string" ||
+      !SHA256_RE.test(candidate.approvedPlanHash))
+  ) {
+    throw new Error(
+      "Run execution approvedPlanHash must be a lowercase sha256 digest"
+    );
+  }
   assertOptionalText(candidate.error, "error", MAX_ERROR_LENGTH);
+
+  const background = candidate.executionId.startsWith("lamp-background:");
+  if (
+    background !==
+    Boolean(candidate.planOperationId && candidate.approvedPlanHash)
+  ) {
+    throw new Error(
+      "Lamp Background execution identity requires an approved planner operation and plan hash"
+    );
+  }
 
   if (candidate.status === "queued" && candidate.phase !== "queued") {
     throw new Error("A queued execution must be in the queued phase");
@@ -167,7 +192,7 @@ export function assertRunExecution(execution: unknown): RunExecution {
   }
   if (
     candidate.status === "user_action_required" &&
-    (!candidate.executionId.startsWith("lamp:") ||
+    (!isTwoPassExecutionId(candidate.executionId) ||
       candidate.phase === "queued" ||
       candidate.phase === "complete" ||
       !candidate.workflowRunId ||
@@ -220,6 +245,8 @@ export function assertRunExecutionTransition(
     candidate.executionId !== current.executionId ||
     candidate.inputHash !== current.inputHash ||
     candidate.renderedPrompt !== current.renderedPrompt ||
+    candidate.planOperationId !== current.planOperationId ||
+    candidate.approvedPlanHash !== current.approvedPlanHash ||
     candidate.source !== current.source ||
     candidate.batchId !== current.batchId ||
     candidate.startedAt !== current.startedAt

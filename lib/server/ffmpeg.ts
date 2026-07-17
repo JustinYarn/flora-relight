@@ -661,6 +661,27 @@ export async function remuxAudio(
  * is cloned only when the repaired output is short; `-t` trims when it is
  * long. Re-encoding is required because stream-copy cannot create frames.
  */
+/**
+ * Whole frames closest to the target duration. Cutting with `-t` keeps any
+ * frame that STARTS before the cut, so a 24fps conform to 9.92s came out
+ * 239 frames (9.958s) — 60ms past the source audio and just over the ±50ms
+ * container allowance (live 2026-07-17: run_bg02_098's billed repair was
+ * rejected by its own verifier). A frame-count cut lands within half a frame
+ * of the target at every source rate.
+ */
+export function conformedFrameCount(
+  durationSec: number,
+  fps: number
+): number {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    throw new Error("Video conform requires a positive finite duration.");
+  }
+  if (!Number.isFinite(fps) || fps <= 0) {
+    throw new Error("Video conform requires a positive finite frame rate.");
+  }
+  return Math.max(1, Math.round(durationSec * fps));
+}
+
 export async function conformVideoDuration(
   videoPath: string,
   outPath: string,
@@ -669,12 +690,14 @@ export async function conformVideoDuration(
   if (!Number.isFinite(durationSec) || durationSec <= 0) {
     throw new Error("Video conform requires a positive finite duration.");
   }
+  const source = await probe(videoPath);
+  const frames = conformedFrameCount(durationSec, source.fps);
   const tools = await getTools();
   await runOrThrow(tools.ffmpeg, [
     "-y",
     "-i", videoPath,
     "-vf", "tpad=stop_mode=clone:stop_duration=1",
-    "-t", String(durationSec),
+    "-frames:v", String(frames),
     "-map", "0:v:0",
     "-c:v", "libx264",
     "-preset", "veryfast",

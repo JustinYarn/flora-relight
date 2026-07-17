@@ -10,7 +10,7 @@
 
 import Link from "next/link";
 import { Badge, Button, Card, ScoreMeter } from "@/components/ui";
-import { getEvalDef } from "@/lib/prompts/eval-defs";
+import { evalDefForRun } from "@/lib/lamp-evaluation";
 import { formatUsd } from "@/lib/cost";
 import { LOW_CONFIDENCE } from "@/lib/util";
 import { shippedVideo } from "@/components/library/derive";
@@ -176,7 +176,7 @@ export function BatchRunCard({
           {gateFailures.map((evalId) => (
             <Badge key={evalId} color="var(--fail)">
               <span title={`must-pass check failed (${evalId})`}>
-                {getEvalDef(evalId).name}
+                {evalDefForRun(run, evalId)?.name ?? evalId}
               </span>
             </Badge>
           ))}

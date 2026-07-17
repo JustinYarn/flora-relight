@@ -10,6 +10,16 @@ import { useAppStore } from "@/lib/store";
 import type { EvalDefinition, EvalMethod, WorkflowMode } from "@/lib/types";
 import { workflowForMode } from "@/lib/workflow-def";
 import { LAMP_EVAL_DEFS } from "@/lib/lamp-evaluation";
+import { LAMP_BACKGROUND_UI_EVAL_DEFS } from "@/lib/lamp-background-read";
+import {
+  lampBackgroundDisplayPrompt,
+  sampleApprovedLampBackgroundPlan,
+} from "@/lib/lamp-background-display";
+import {
+  LAMP_BACKGROUND_CLEANUP_PLAN_PROMPT,
+  type LampBackgroundCleanupPlan,
+} from "@/lib/lamp-background";
+import { renderLampBackgroundHolisticEvaluatorPrompt } from "@/lib/lamp-background-evaluation";
 
 type CheckFilter = "all" | "rubric" | "code";
 
@@ -25,6 +35,12 @@ const FILTERS: Array<{ id: CheckFilter; label: string }> = [
   { id: "code", label: "Code checks" },
 ];
 
+function definitionsForMode(workflowMode: WorkflowMode): EvalDefinition[] {
+  if (workflowMode === "lamp") return LAMP_EVAL_DEFS;
+  if (workflowMode === "background") return LAMP_BACKGROUND_UI_EVAL_DEFS;
+  return EVAL_DEFS;
+}
+
 function Pre({ children }: { children: string }) {
   return (
     <pre
@@ -39,6 +55,9 @@ function Pre({ children }: { children: string }) {
 
 function codeCheckCaveat(evalId: string, workflowMode: WorkflowMode): string {
   if (evalId === "audio-integrity") {
+    if (workflowMode === "background") {
+      return "Lamp Background restores and verifies source audio on each generated cut. Audio is deterministic and never part of the nine-row visual model request.";
+    }
     return workflowMode === "lamp"
       ? "Lamp verifies the restored original audio after each generation. This broader specification remains reference material; the selected run's node status is the operational truth."
       : "Flora verifies the restored original audio on the selected delivery. The selected run's node status is the operational truth.";
@@ -139,6 +158,84 @@ function DefinitionLine({ label, children }: { label: string; children: ReactNod
   );
 }
 
+function CleanupPlanDefinition({
+  plan,
+  sample,
+}: {
+  plan: LampBackgroundCleanupPlan;
+  sample: boolean;
+}) {
+  return (
+    <div className="rounded-lg bg-raised p-4">
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-ink">{plan.sceneSummary}</p>
+          <p className="mt-1 font-[family-name:var(--font-geist-mono)] text-2xs text-faint">
+            {plan.id}
+          </p>
+        </div>
+        <Badge
+          color={
+            sample
+              ? "var(--muted)"
+              : plan.approval.status === "approved"
+                ? "var(--pass)"
+                : "var(--borderline)"
+          }
+        >
+          {sample
+            ? "sample approved plan"
+            : plan.approval.status === "approved"
+              ? "run-approved plan"
+              : "run draft · not generation-authorized"}
+        </Badge>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        {[
+          {
+            title: "Remove",
+            items: plan.remove,
+            note: "Only these items are authorized to disappear.",
+          },
+          {
+            title: "Preserve",
+            items: plan.preserve,
+            note: "These elements must stay source-faithful.",
+          },
+          {
+            title: "Uncertain",
+            items: plan.uncertain,
+            note: "Every uncertain item defaults to preserve.",
+          },
+        ].map((group) => (
+          <section key={group.title} className="rounded-lg bg-canvas p-3">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-semibold text-ink">{group.title}</h3>
+              <span className="text-2xs tabular-nums text-faint">
+                {group.items.length}
+              </span>
+            </div>
+            <p className="mt-1 text-pretty text-2xs leading-relaxed text-faint">
+              {group.note}
+            </p>
+            <ul className="mt-2 space-y-2">
+              {group.items.map((item) => (
+                <li key={item.id} className="text-pretty text-xs leading-relaxed text-muted">
+                  <span className="font-medium text-ink">{item.label}</span>
+                  <span className="block text-2xs text-faint">{item.location}</span>
+                </li>
+              ))}
+              {group.items.length === 0 ? (
+                <li className="text-2xs text-faint">None.</li>
+              ) : null}
+            </ul>
+          </section>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function checkKind(def: EvalDefinition): {
   label: string;
   color: string;
@@ -233,13 +330,18 @@ function CheckRow({
                   </span>
                 </DefinitionLine>
                 <DefinitionLine label="Category">{def.category}</DefinitionLine>
-                <DefinitionLine label="Method">{def.method}</DefinitionLine>
+                <DefinitionLine label="Method">
+                  {workflowMode === "background" &&
+                  def.method !== "deterministic"
+                    ? "holistic Gemini · one shared request"
+                    : def.method}
+                </DefinitionLine>
                 <DefinitionLine label="Weight">
                   <span className="tabular-nums">
                     {def.weight.toFixed(2)} (
                     {Math.round(
                       (def.weight /
-                        (workflowMode === "lamp" ? LAMP_EVAL_DEFS : EVAL_DEFS).reduce(
+                        definitionsForMode(workflowMode).reduce(
                           (sum, d) => sum + d.weight,
                           0
                         )) *
@@ -283,7 +385,9 @@ function CheckRow({
                     Current canonical rubric
                   </SectionTitle>
                   <p className="mb-3 text-pretty text-xs leading-relaxed text-faint">
-                    {workflowMode === "lamp"
+                    {workflowMode === "background"
+                      ? "This is the canonical Lamp Background criterion library. Nine visual rubrics are composed into one approved-plan-bound whole-video Gemini request; Audio Integrity remains deterministic."
+                      : workflowMode === "lamp"
                       ? "This is the canonical criterion library. Lamp removes the older frame-grid input/output boilerplate and composes the applicable criteria into one full-video Gemini request. It is not a snapshot of a past run."
                       : "This is the canonical criterion library used by Flora's full-loop evaluation path. It is current source text, not a snapshot of a past run."}
                   </p>
@@ -316,14 +420,35 @@ function CheckRow({
 
 export default function PromptsPage() {
   const workflowMode = useAppStore((state) => state.workflowMode);
+  const runs = useAppStore((state) => state.runs);
+  const [selectedBackgroundRunId, setSelectedBackgroundRunId] = useState<
+    string | null
+  >(null);
+  const backgroundRuns = useMemo(
+    () => runs.filter((run) => run.workflowMode === "background"),
+    [runs]
+  );
+  const selectedBackgroundRun = useMemo(
+    () =>
+      backgroundRuns.find((run) => run.id === selectedBackgroundRunId) ??
+      backgroundRuns[0],
+    [backgroundRuns, selectedBackgroundRunId]
+  );
   const modeMap = useMemo(() => {
     const workflow = workflowForMode(workflowMode);
-    const definitions = workflowMode === "lamp" ? LAMP_EVAL_DEFS : EVAL_DEFS;
-    const evalNodeIds = new Map(
-      workflow.nodes.flatMap((node) =>
-        node.evalId ? [[node.evalId, node.id] as const] : []
-      )
-    );
+    const definitions = definitionsForMode(workflowMode);
+    const evalNodeIds =
+      workflowMode === "background"
+        ? new Map(
+            definitions.map(
+              (definition) => [definition.id, "critique"] as const
+            )
+          )
+        : new Map(
+            workflow.nodes.flatMap((node) =>
+              node.evalId ? [[node.evalId, node.id] as const] : []
+            )
+          );
     const evalOrder = new Map(
       workflow.nodes.flatMap((node, index) =>
         node.evalId ? [[node.evalId, index] as const] : []
@@ -336,16 +461,31 @@ export default function PromptsPage() {
     );
     return { workflow, evalNodeIds, orderedEvalDefs };
   }, [workflowMode]);
-  const mega = useMemo(
-    () => initialMegaPrompt(workflowMode),
-    [workflowMode]
+  const backgroundPromptView = useMemo(
+    () => lampBackgroundDisplayPrompt(selectedBackgroundRun),
+    [selectedBackgroundRun]
   );
+  const mega = useMemo(() => {
+    if (workflowMode === "background") return backgroundPromptView.prompt;
+    return initialMegaPrompt(workflowMode);
+  }, [backgroundPromptView.prompt, workflowMode]);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<CheckFilter>("all");
   const [openId, setOpenId] = useState<string | null>(null);
 
   const base = mega.base;
   const isLamp = workflowMode === "lamp";
+  const isBackground = workflowMode === "background";
+  const visibleBackgroundPlan =
+    selectedBackgroundRun?.backgroundCleanupPlan ??
+    sampleApprovedLampBackgroundPlan();
+  const visibleBackgroundPlanIsSample =
+    selectedBackgroundRun?.backgroundCleanupPlan === undefined;
+  const generationBackgroundPlanIsSample = backgroundPromptView.sample;
+  const selectedBackgroundNoOp =
+    isBackground &&
+    !backgroundPromptView.sample &&
+    backgroundPromptView.promptPlan.decision === "exceptional-no-op";
   const rubricCount = modeMap.orderedEvalDefs.filter(
     (definition) => definition.promptTemplate
   ).length;
@@ -376,19 +516,49 @@ export default function PromptsPage() {
   return (
     <main className="mx-auto max-w-6xl px-5 pb-16 pt-8">
       <header className="mb-8">
-        <div className="flex flex-wrap items-center gap-2">
-          <h1 className="text-balance text-lg font-semibold text-ink">
-            Prompt &amp; check map
-          </h1>
-          <Badge color="var(--accent)">current definition</Badge>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            <h1 className="text-balance text-lg font-semibold text-ink">
+              Prompt &amp; check map
+            </h1>
+            <Badge color="var(--accent)">
+              {isBackground && backgroundPromptView.runBound
+                ? "run-bound prompt"
+                : "current definition"}
+            </Badge>
+          </div>
+          {isBackground && backgroundRuns.length > 0 ? (
+            <label className="flex items-center gap-2 text-2xs text-faint">
+              Background run
+              <select
+                value={selectedBackgroundRun?.id ?? ""}
+                onChange={(event) =>
+                  setSelectedBackgroundRunId(event.target.value || null)
+                }
+                className="min-h-10 rounded-lg border border-edge bg-raised px-2.5 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-accent"
+              >
+                {backgroundRuns.map((run) => (
+                  <option key={run.id} value={run.id}>
+                    {run.originalVideo.label} · {run.status}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
         </div>
         <p className="mt-2 max-w-3xl text-pretty text-sm leading-relaxed text-muted">
-          {isLamp
+          {isBackground
+            ? "Inspect Lamp Background's planning instruction, the exact approved-plan-bound cleanup brief when a run has one, and every cleanup-specific evaluation definition."
+            : isLamp
             ? "See the mega prompt and evaluation criteria behind Lamp's fixed Initial → critique → Final method. Long source text stays folded away until you need it."
             : "See the mega prompt and evaluation criteria behind Flora's full iterative relight method. Long source text stays folded away until you need it."}
         </p>
         <p className="mt-2 max-w-3xl text-pretty text-2xs leading-relaxed text-faint">
-          {isLamp
+          {isBackground
+            ? backgroundPromptView.sample
+              ? "No generation-authorized background run is selected, so the cleanup brief uses a clearly labeled sample approved plan. Nine visual checks run together; Audio Integrity is deterministic."
+              : "The cleanup brief below prefers the selected run's exact saved iteration prompt and approved plan. Nine visual checks run together; Audio Integrity is deterministic."
+            : isLamp
             ? "Each generated video gets one whole-video evaluation covering eight visual rubrics plus deterministic audio."
             : "Flora's 11-row method combines nine visual rubrics with deterministic timing and audio checks."}
         </p>
@@ -403,11 +573,57 @@ export default function PromptsPage() {
           }
         >
           <span id="workflow-map-title">
-            How instructions move through {isLamp ? "Lamp" : "Flora"}
+            How instructions move through{" "}
+            {isBackground ? "Lamp Background" : isLamp ? "Lamp" : "Flora"}
           </span>
         </SectionTitle>
         <div className="overflow-x-auto pb-2">
-          {isLamp ? (
+          {isBackground ? (
+            <div className="flex min-w-max items-center gap-2">
+              <FlowNode
+                index={1}
+                title="Plan the cleanup"
+                detail="Inspect the full source and classify remove, preserve, and uncertain."
+                nodeId="plan"
+              />
+              <span className="text-faint" aria-hidden="true">
+                →
+              </span>
+              <FlowNode
+                index={2}
+                title="Approve the plan"
+                detail="A human freezes the exact edit authorization before generation."
+                nodeId="plan"
+              />
+              <span className="text-faint" aria-hidden="true">
+                →
+              </span>
+              <FlowNode
+                index={3}
+                title="Generate Initial"
+                detail="Clean only approved targets from the immutable source."
+                nodeId="initial"
+              />
+              <span className="text-faint" aria-hidden="true">
+                →
+              </span>
+              <FlowNode
+                index={4}
+                title="Critique the cleanup"
+                detail="Run nine plan-bound visual checks and deterministic audio."
+                nodeId="critique"
+              />
+              <span className="text-accent" aria-hidden="true">
+                ↺
+              </span>
+              <FlowNode
+                index={5}
+                title="Generate Final"
+                detail="Regenerate once from source with structured corrections."
+                nodeId="final"
+              />
+            </div>
+          ) : isLamp ? (
             <div className="flex min-w-max items-center gap-2">
               <FlowNode
                 index={1}
@@ -501,7 +717,9 @@ export default function PromptsPage() {
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-2xs text-faint">
           <span>
-            {isLamp
+            {isBackground
+              ? "Lamp Background has no relighting stage, scene-manifest extractor, or open-ended retry loop. The approved cleanup plan is the edit boundary."
+              : isLamp
               ? "Lamp evaluates the complete source and candidate directly; it does not create a scene manifest or Look Anchor."
               : "Flora extracts a scene inventory, approves a Look Anchor, and retains its full 11-check evaluation loop."}
           </span>
@@ -513,47 +731,98 @@ export default function PromptsPage() {
           <span id="prompt-sources-title">Prompt sources</span>
         </SectionTitle>
         <div className="grid gap-3">
-          <SourceDisclosure
-            title={isLamp ? "Scene inventory reference" : "Scene inventory extractor"}
-            description={
-              isLamp
-                ? "Legacy full-loop extraction instructions retained for reference; Lamp does not run this stage."
-                : "Current extraction instructions Flora runs before its Look Anchor and video loop."
-            }
-            badge={isLamp ? "not used by Lamp" : "used by Flora"}
-            badgeColor={isLamp ? "var(--faint)" : "var(--running)"}
-          >
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-              <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
-                {isLamp
-                  ? "Lamp compares the complete source and candidate videos directly. This older inventory definition remains readable for historical runs but is not sent to generation or evaluation in Lamp."
-                  : "Flora sends this prompt once to create the scene inventory that protects source content through its anchor and iterative video loop."}
-              </p>
-              {isLamp ? (
-                <span className="inline-flex min-h-10 items-center text-2xs text-faint">
-                  Legacy reference only
-                </span>
-              ) : (
-                <EngineLink nodeId="manifest" />
-              )}
-            </div>
-            <Pre>{MANIFEST_PROMPT}</Pre>
-          </SourceDisclosure>
+          {isBackground ? (
+            <SourceDisclosure
+              title="Cleanup-plan analyzer"
+              description="Current whole-video planning instruction that proposes remove, preserve, uncertain, or the rare exceptional no-op."
+              badge="planning prompt"
+              badgeColor="var(--running)"
+            >
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
+                  This prompt can propose a draft only. It cannot authorize
+                  generation; the user must approve the exact source-specific
+                  plan first.
+                </p>
+                <EngineLink nodeId="plan" />
+              </div>
+              <div className="mb-4">
+                <CleanupPlanDefinition
+                  plan={visibleBackgroundPlan}
+                  sample={visibleBackgroundPlanIsSample}
+                />
+              </div>
+              <Pre>{LAMP_BACKGROUND_CLEANUP_PLAN_PROMPT}</Pre>
+            </SourceDisclosure>
+          ) : (
+            <SourceDisclosure
+              title={isLamp ? "Scene inventory reference" : "Scene inventory extractor"}
+              description={
+                isLamp
+                  ? "Legacy full-loop extraction instructions retained for reference; Lamp does not run this stage."
+                  : "Current extraction instructions Flora runs before its Look Anchor and video loop."
+              }
+              badge={isLamp ? "not used by Lamp" : "used by Flora"}
+              badgeColor={isLamp ? "var(--faint)" : "var(--running)"}
+            >
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
+                  {isLamp
+                    ? "Lamp compares the complete source and candidate videos directly. This older inventory definition remains readable for historical runs but is not sent to generation or evaluation in Lamp."
+                    : "Flora sends this prompt once to create the scene inventory that protects source content through its anchor and iterative video loop."}
+                </p>
+                {isLamp ? (
+                  <span className="inline-flex min-h-10 items-center text-2xs text-faint">
+                    Legacy reference only
+                  </span>
+                ) : (
+                  <EngineLink nodeId="manifest" />
+                )}
+              </div>
+              <Pre>{MANIFEST_PROMPT}</Pre>
+            </SourceDisclosure>
+          )}
 
           <SourceDisclosure
-            title="Generation brief compiler"
-            description="Current base task, invariant locks, lighting specification, active fixes, and never-do constraints."
+            title={
+              isBackground
+                ? selectedBackgroundNoOp
+                  ? "Approved exceptional no-op delivery"
+                  : "Approved-plan-bound cleanup brief"
+                : "Generation brief compiler"
+            }
+            description={
+              isBackground
+                ? selectedBackgroundNoOp
+                  ? "The selected run delivers the exact source unchanged; no cleanup generation or Final AI evaluation is authorized."
+                  : "The exact cleanup authorization, preservation locks, reconstruction standard, structured corrections, and never-do constraints."
+                : "Current base task, invariant locks, lighting specification, active fixes, and never-do constraints."
+            }
             badge="compiler"
             badgeColor="var(--accent)"
           >
             <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
               <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
-                The compiler assembles structured source blocks into a generation
-                brief. The example below is the current first-version render with
-                an empty fix list, not a historical run snapshot.
+                {isBackground
+                  ? selectedBackgroundNoOp
+                    ? "This is the selected run's saved exceptional no-op instruction. It records that the exact source is the delivery and does not claim a generation occurred."
+                    : backgroundPromptView.sample
+                    ? "This definition-only example is compiled from the clearly labeled sample approved cleanup plan. It is not attached to a real video."
+                    : "These are the selected run's exact saved cleanup-prompt bytes when an iteration exists; otherwise they are compiled from its approved plan."
+                  : "The compiler assembles structured source blocks into a generation brief. The example below is the current first-version render with an empty fix list, not a historical run snapshot."}
               </p>
-              <EngineLink nodeId="compile" />
+              <EngineLink nodeId={isBackground ? "initial" : "compile"} />
             </div>
+
+            {isBackground ? (
+              <div className="mb-5">
+                <SectionTitle>Plan bound into this prompt</SectionTitle>
+                <CleanupPlanDefinition
+                  plan={backgroundPromptView.promptPlan}
+                  sample={generationBackgroundPlanIsSample}
+                />
+              </div>
+            ) : null}
 
             <div className="grid gap-5 lg:grid-cols-2">
               <div className="min-w-0">
@@ -606,13 +875,66 @@ export default function PromptsPage() {
               </div>
 
               <div className="min-w-0">
-                <SectionTitle right={<Badge>v{mega.version} · no fixes</Badge>}>
-                  Current compiled example
+                <SectionTitle
+                  right={
+                    <Badge>
+                      v{mega.version}
+                      {isBackground
+                        ? backgroundPromptView.runBound
+                          ? " · run bound"
+                          : " · sample"
+                        : " · no fixes"}
+                    </Badge>
+                  }
+                >
+                  {isBackground
+                    ? selectedBackgroundNoOp
+                      ? "Exact-source delivery instruction"
+                      : "Cleanup prompt sent to generation"
+                    : "Current compiled example"}
                 </SectionTitle>
                 <Pre>{mega.rendered}</Pre>
+                {isBackground ? (
+                  <p className="mt-2 font-[family-name:var(--font-geist-mono)] text-2xs text-faint">
+                    source · {backgroundPromptView.source}
+                  </p>
+                ) : null}
               </div>
             </div>
           </SourceDisclosure>
+
+          {isBackground ? (
+            <SourceDisclosure
+              title="Whole-video cleanup evaluator"
+              description={
+                selectedBackgroundNoOp
+                  ? "Definition retained for inspection. The selected exceptional no-op run did not generate a candidate or run a Final AI evaluation."
+                  : "One approved-plan-bound request composes all nine visual rubrics; deterministic Audio Integrity is appended separately."
+              }
+              badge={
+                selectedBackgroundNoOp
+                  ? "not run for selected no-op"
+                  : "holistic evaluator"
+              }
+              badgeColor={
+                selectedBackgroundNoOp ? "var(--faint)" : "var(--running)"
+              }
+            >
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
+                  The evaluator receives the complete source, the complete
+                  candidate, and the exact approved plan used below. It may emit
+                  only structured correction actions tied to that plan.
+                </p>
+                <EngineLink nodeId="critique" />
+              </div>
+              <Pre>
+                {renderLampBackgroundHolisticEvaluatorPrompt(
+                  backgroundPromptView.promptPlan
+                )}
+              </Pre>
+            </SourceDisclosure>
+          ) : null}
         </div>
       </section>
 
@@ -685,7 +1007,9 @@ export default function PromptsPage() {
             Showing {filteredDefs.length} of {modeMap.orderedEvalDefs.length} checks
             {query || filter !== "all"
               ? ""
-              : isLamp
+              : isBackground
+                ? " · Lamp Background returns 9 visual results together and appends deterministic audio"
+                : isLamp
                 ? " · Lamp returns 8 visual results together and appends deterministic audio"
                 : " · Flora retains 9 visual rubrics and 2 deterministic checks"}
           </p>

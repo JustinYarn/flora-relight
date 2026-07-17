@@ -21,8 +21,20 @@ import { enqueueRunExecution } from "@/lib/server/run-execution-coordinator";
 import { reconcileDeadWorkflowExecution } from "@/lib/server/dead-workflow-recovery";
 import {
   hasReusableFirstCutApproval,
+  hasReusableLampBackgroundApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
+import {
+  hashLampBackgroundCleanupPlan,
+  lampBackgroundPlanRequiresGeneration,
+  parseLampBackgroundCleanupPlan,
+} from "@/lib/lamp-background";
+import { lampBackgroundPlanOperationId } from "@/lib/lamp-background-operations";
+import { initialLampBackgroundMegaPrompt } from "@/lib/prompts/lamp-background";
+import {
+  runWorkflowMode,
+  workflowModeFromExecutionId,
+} from "@/lib/workflow-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -69,7 +81,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     (current.source !== "single" ||
       current.batchId !== undefined ||
       (current.executionId !== `first-cut:${body.runId}` &&
-        current.executionId !== `lamp:${body.runId}`))
+        current.executionId !== `lamp:${body.runId}` &&
+        current.executionId !== `lamp-background:${body.runId}`))
   ) {
     return NextResponse.json(
       { error: "This run belongs to a different durable execution." },
@@ -99,15 +112,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  if (
-    (!current || current.status === "queued") &&
-    !(
-      current?.executionId.startsWith("lamp:") ||
-      (!current && run.spendApproval?.scope === "lamp_two_pass")
+  const workflowMode = current
+    ? workflowModeFromExecutionId(current.executionId)
+    : runWorkflowMode(run);
+  const reusableApproval =
+    workflowMode === "background"
+      ? hasReusableLampBackgroundApproval(run)
+      : workflowMode === "lamp"
         ? hasReusableLampApproval(run)
-        : hasReusableFirstCutApproval(run, "single")
-    )
-  ) {
+        : hasReusableFirstCutApproval(run, "single");
+  if ((!current || current.status === "queued") && !reusableApproval) {
     return NextResponse.json(
       {
         error:
@@ -148,14 +162,66 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const executionId =
       current?.executionId ??
-      (run.spendApproval?.scope === "lamp_two_pass"
-        ? `lamp:${body.runId}`
-        : `first-cut:${body.runId}`);
+      (workflowMode === "background"
+        ? `lamp-background:${body.runId}`
+        : workflowMode === "lamp"
+          ? `lamp:${body.runId}`
+          : `first-cut:${body.runId}`);
+    let renderedPrompt = current?.renderedPrompt;
+    let planOperationId = current?.planOperationId;
+    let approvedPlanHash = current?.approvedPlanHash;
+    if (workflowMode === "background" && !current) {
+      let cleanupPlan: ReturnType<
+        typeof parseLampBackgroundCleanupPlan
+      >;
+      try {
+        cleanupPlan = parseLampBackgroundCleanupPlan(
+          run.backgroundCleanupPlan
+        );
+      } catch {
+        return NextResponse.json(
+          {
+            error:
+              "Lamp Background recovery requires a valid approved cleanup plan for this source.",
+          },
+          {
+            status: 409,
+            headers: {
+              "Cache-Control": "private, no-store, max-age=0",
+            },
+          }
+        );
+      }
+      if (
+        cleanupPlan.approval.status !== "approved" ||
+        cleanupPlan.runId !== run.id ||
+        !lampBackgroundPlanRequiresGeneration(cleanupPlan)
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "Lamp Background recovery requires the exact approved cleanup plan for this source.",
+          },
+          {
+            status: 409,
+            headers: {
+              "Cache-Control": "private, no-store, max-age=0",
+            },
+          }
+        );
+      }
+      renderedPrompt = initialLampBackgroundMegaPrompt(cleanupPlan).rendered;
+      planOperationId = lampBackgroundPlanOperationId();
+      approvedPlanHash =
+        await hashLampBackgroundCleanupPlan(cleanupPlan);
+    }
     const adopted = await enqueueRunExecution({
       runId: body.runId,
       executionId,
       source: "single",
-      ...(current ? { renderedPrompt: current.renderedPrompt } : {}),
+      ...(renderedPrompt ? { renderedPrompt } : {}),
+      ...(planOperationId ? { planOperationId } : {}),
+      ...(approvedPlanHash ? { approvedPlanHash } : {}),
     });
     return NextResponse.json(
       {

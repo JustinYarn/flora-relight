@@ -32,12 +32,45 @@ import { workflowForMode } from "@/lib/workflow-def";
 import {
   createSpendApproval,
   hasReusableFirstCutApproval,
+  hasReusableLampBackgroundPlanApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
-import { estimateFirstCut, estimateLampRun, estimateRun } from "@/lib/cost";
+import {
+  estimateFirstCut,
+  estimateLampBackgroundPlan,
+  estimateLampBackgroundTwoPass,
+  estimateLampRun,
+  estimateRun,
+} from "@/lib/cost";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { parseHumanGrade } from "@/lib/human-grade";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
+import {
+  createMockLampBackgroundCleanupPlan,
+  hashLampBackgroundCleanupPlan,
+  lampBackgroundPlanRequiresGeneration,
+  parseLampBackgroundCleanupPlan,
+  type LampBackgroundCleanupPlan,
+} from "@/lib/lamp-background";
+import {
+  isLampBackgroundEvaluationArtifact,
+  isLampBackgroundRun,
+  lampBackgroundPromptForRun,
+  projectLampBackgroundEvaluationForRead,
+} from "@/lib/lamp-background-read";
+import { LAMP_BACKGROUND_EVAL_IDS } from "@/lib/lamp-background-evaluation";
+import {
+  lampBackgroundEvaluationOperationId,
+  lampBackgroundPlanOperationId,
+} from "@/lib/lamp-background-operations";
+import {
+  compileLampBackgroundFinalPrompt,
+  initialLampBackgroundMegaPrompt,
+} from "@/lib/prompts/lamp-background";
+import {
+  isLampBackgroundPlanArtifact,
+  runLampBackgroundPlanner,
+} from "@/lib/server/lamp-background-planner";
 import {
   compileLampFinalPrompt,
   isLampEvaluationArtifact,
@@ -56,6 +89,8 @@ import {
   floraRetiredForNewWork,
   runHasStartedWork,
   runWorkflowMode,
+  workflowModeFromExecutionId,
+  workflowModeLabel,
 } from "@/lib/workflow-mode";
 import { isArchivedLostGenerationId } from "@/lib/lost-interaction";
 import { summarizeBatchExecution } from "@/lib/server/batch-execution-view";
@@ -78,6 +113,112 @@ function persistedWorkflowMode(run: Run): WorkflowMode {
   return runWorkflowMode(run);
 }
 
+async function prepareLampBackgroundPlan(input: {
+  run: Run;
+  mock: boolean;
+}): Promise<
+  | { ok: true; run: Run; plan: LampBackgroundCleanupPlan }
+  | { ok: false; status: number; message: string; run: Run }
+> {
+  const storage = getStorage();
+  const failPlan = async (message: string): Promise<Run> => {
+    const failed: Run = {
+      ...input.run,
+      status: "failed",
+      nodeStates: {
+        ...input.run.nodeStates,
+        plan: {
+          nodeId: "plan",
+          status: "failed",
+          detail: message,
+        },
+      },
+      log: [
+        ...input.run.log,
+        {
+          at: Date.now(),
+          nodeId: "plan",
+          level: "error",
+          message,
+        },
+      ],
+    };
+    await storage.putRun(failed);
+    return failed;
+  };
+  if (input.run.backgroundCleanupPlan) {
+    try {
+      const plan = parseLampBackgroundCleanupPlan(
+        input.run.backgroundCleanupPlan
+      );
+      if (plan.runId !== input.run.id) {
+        throw new Error("The saved cleanup plan belongs to a different run.");
+      }
+      return { ok: true, run: input.run, plan };
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "The saved Lamp Background plan is invalid.";
+      return {
+        ok: false,
+        status: 409,
+        message,
+        run: await failPlan(message),
+      };
+    }
+  }
+  if (input.mock) {
+    const plan = createMockLampBackgroundCleanupPlan(
+      input.run.id,
+      Date.now()
+    );
+    const updated = { ...input.run, backgroundCleanupPlan: plan };
+    await storage.putRun(updated);
+    return { ok: true, run: updated, plan };
+  }
+  let artifact;
+  try {
+    artifact = await runLampBackgroundPlanner(input.run.id);
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Lamp Background planning could not be completed safely.";
+    return {
+      ok: false,
+      status: 502,
+      message,
+      run: await failPlan(message),
+    };
+  }
+  if (!isLampBackgroundPlanArtifact(artifact)) {
+    const message = "Lamp Background planning returned an invalid artifact.";
+    return {
+      ok: false,
+      status: 502,
+      message,
+      run: await failPlan(message),
+    };
+  }
+  if (artifact.status !== "ready") {
+    const message = artifact.reason;
+    return {
+      ok: false,
+      status: artifact.status === "unsupported" ? 422 : 502,
+      message,
+      run: await failPlan(message),
+    };
+  }
+  const updated = {
+    ...input.run,
+    backgroundCleanupPlan: artifact.plan,
+    live: true,
+  };
+  await storage.putRun(updated);
+  return { ok: true, run: updated, plan: artifact.plan };
+}
+
 async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
   const approval = run.spendApproval;
   if (!approval) throw new Error("Live spend approval was not persisted.");
@@ -85,15 +226,27 @@ async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
   if (
     existingExecution &&
     (existingExecution.source !== "single" ||
-      (workflowMode === "lamp") !==
-        existingExecution.executionId.startsWith("lamp:"))
+      workflowModeFromExecutionId(existingExecution.executionId) !==
+        workflowMode)
   ) {
     throw new Error(
       `A different durable workflow already owns this run; ${
-        workflowMode === "lamp" ? "Lamp" : "Flora"
+        workflowModeLabel(workflowMode)
       } requires a fresh run id.`
     );
   }
+  const backgroundPlan =
+    workflowMode === "background" ? run.backgroundCleanupPlan : undefined;
+  const approvedPlanHash =
+    backgroundPlan?.approval.status === "approved"
+      ? await hashLampBackgroundCleanupPlan(backgroundPlan)
+      : undefined;
+  const backgroundRenderedPrompt =
+    workflowMode === "background" &&
+    backgroundPlan?.approval.status === "approved" &&
+    lampBackgroundPlanRequiresGeneration(backgroundPlan)
+      ? initialLampBackgroundMegaPrompt(backgroundPlan).rendered
+      : undefined;
   return enqueueRunExecution({
     runId: run.id,
     // Execution identity is stable across a fresh user confirmation that only
@@ -101,8 +254,28 @@ async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
     // authority, but it must not strand an already-persisted queued execution.
     executionId:
       existingExecution?.executionId ??
-      (workflowMode === "lamp" ? `lamp:${run.id}` : `first-cut:${run.id}`),
+      (workflowMode === "lamp"
+        ? `lamp:${run.id}`
+        : workflowMode === "background"
+          ? `lamp-background:${run.id}`
+          : `first-cut:${run.id}`),
     source: "single",
+    ...(existingExecution?.renderedPrompt || backgroundRenderedPrompt
+      ? {
+          renderedPrompt:
+            existingExecution?.renderedPrompt ??
+            backgroundRenderedPrompt!,
+        }
+      : {}),
+    ...(workflowMode === "background"
+      ? {
+          planOperationId:
+            existingExecution?.planOperationId ??
+            lampBackgroundPlanOperationId(),
+          approvedPlanHash:
+            existingExecution?.approvedPlanHash ?? approvedPlanHash,
+        }
+      : {}),
   });
 }
 
@@ -245,13 +418,29 @@ function mergeServerGeneratedVideos(
         };
         candidate.iterations.push(iteration);
       } else {
-        const recoveredPrompt = initialMegaPrompt(
-          persistedWorkflowMode(candidate)
-        );
-        recoveredPrompt.version = operation.iteration;
-        if (operation.renderedPrompt) {
-          recoveredPrompt.rendered = operation.renderedPrompt;
-        }
+        const recoveredPrompt =
+          persistedWorkflowMode(candidate) === "background" &&
+          candidate.backgroundCleanupPlan
+            ? (() => {
+                const prompt = initialLampBackgroundMegaPrompt(
+                  candidate.backgroundCleanupPlan
+                );
+                prompt.version = operation.iteration === 2 ? 2 : 1;
+                if (operation.renderedPrompt) {
+                  prompt.rendered = operation.renderedPrompt;
+                }
+                return lampBackgroundPromptForRun(prompt);
+              })()
+            : (() => {
+                const prompt = initialMegaPrompt(
+                  persistedWorkflowMode(candidate)
+                );
+                prompt.version = operation.iteration;
+                if (operation.renderedPrompt) {
+                  prompt.rendered = operation.renderedPrompt;
+                }
+                return prompt;
+              })();
         iteration = {
           index: operation.iteration,
           megaPrompt: recoveredPrompt,
@@ -311,6 +500,13 @@ interface LampEvaluationProjection {
   final: PaidOperation | null;
 }
 
+interface LampBackgroundEvaluationProjection {
+  plan: PaidOperation | null;
+  planHash: string | null;
+  first: PaidOperation | null;
+  final: PaidOperation | null;
+}
+
 async function readLampEvaluationProjection(
   storage: ReturnType<typeof getStorage>,
   runId: string
@@ -320,6 +516,24 @@ async function readLampEvaluationProjection(
     storage.getPaidOperation(runId, lampEvaluationOperationId(2)),
   ]);
   return { first, final };
+}
+
+async function readLampBackgroundEvaluationProjection(
+  storage: ReturnType<typeof getStorage>,
+  runId: string
+): Promise<LampBackgroundEvaluationProjection> {
+  const [plan, first, final] = await Promise.all([
+    storage.getPaidOperation(runId, lampBackgroundPlanOperationId()),
+    storage.getPaidOperation(runId, lampBackgroundEvaluationOperationId(1)),
+    storage.getPaidOperation(runId, lampBackgroundEvaluationOperationId(2)),
+  ]);
+  const planHash =
+    plan?.status === "completed" &&
+    isLampBackgroundPlanArtifact(plan.result) &&
+    plan.result.status === "ready"
+      ? await hashLampBackgroundCleanupPlan(plan.result.plan)
+      : null;
+  return { plan, planHash, first, final };
 }
 
 function lampArtifact(
@@ -332,8 +546,74 @@ function lampArtifact(
     : undefined;
 }
 
+function lampBackgroundArtifact(
+  operation: PaidOperation | null,
+  iteration: 1 | 2
+) {
+  return operation?.status === "completed" &&
+    isLampBackgroundEvaluationArtifact(operation.result, iteration)
+    ? operation.result
+    : undefined;
+}
+
 function isLampExecution(execution: RunExecution | null | undefined): boolean {
   return Boolean(execution?.executionId.startsWith("lamp:"));
+}
+
+function isLampBackgroundExecution(
+  execution: RunExecution | null | undefined
+): boolean {
+  return Boolean(execution?.executionId.startsWith("lamp-background:"));
+}
+
+function planContentForBinding(plan: LampBackgroundCleanupPlan): unknown {
+  return {
+    version: plan.version,
+    id: plan.id,
+    runId: plan.runId,
+    createdAt: plan.createdAt,
+    sourceScope: plan.sourceScope,
+    decision: plan.decision,
+    sceneSummary: plan.sceneSummary,
+    remove: plan.remove,
+    preserve: plan.preserve,
+    uncertain: plan.uncertain,
+    ...(plan.noOpJustification
+      ? { noOpJustification: plan.noOpJustification }
+      : {}),
+  };
+}
+
+function lampBackgroundPlanBindingValid(
+  run: Run,
+  execution: RunExecution,
+  evaluations: LampBackgroundEvaluationProjection
+): boolean {
+  try {
+    const approvedPlan = parseLampBackgroundCleanupPlan(
+      run.backgroundCleanupPlan
+    );
+    const planArtifact = evaluations.plan?.result;
+    if (
+      approvedPlan.approval.status !== "approved" ||
+      !lampBackgroundPlanRequiresGeneration(approvedPlan) ||
+      execution.planOperationId !== lampBackgroundPlanOperationId() ||
+      typeof execution.approvedPlanHash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(execution.approvedPlanHash) ||
+      execution.approvedPlanHash !== evaluations.planHash ||
+      evaluations.plan?.status !== "completed" ||
+      !isLampBackgroundPlanArtifact(planArtifact) ||
+      planArtifact.status !== "ready"
+    ) {
+      return false;
+    }
+    return (
+      JSON.stringify(planContentForBinding(approvedPlan)) ===
+      JSON.stringify(planContentForBinding(planArtifact.plan))
+    );
+  } catch {
+    return false;
+  }
 }
 
 function lampFinalPrompt(
@@ -343,6 +623,20 @@ function lampFinalPrompt(
   const first = lampArtifact(evaluations.first, 1);
   if (!first) return undefined;
   return compileLampFinalPrompt(execution.renderedPrompt, first);
+}
+
+function lampBackgroundFinalPrompt(
+  run: Run,
+  execution: RunExecution,
+  evaluations: LampBackgroundEvaluationProjection
+) {
+  const first = lampBackgroundArtifact(evaluations.first, 1);
+  if (!first || !run.backgroundCleanupPlan) return undefined;
+  return compileLampBackgroundFinalPrompt(
+    execution.renderedPrompt,
+    run.backgroundCleanupPlan,
+    first
+  );
 }
 
 function providerOperationMatchesLampExecution(
@@ -359,6 +653,31 @@ function providerOperationMatchesLampExecution(
   }
   if (operation.iteration === 2) {
     return operation.renderedPrompt === lampFinalPrompt(execution, evaluations)?.rendered;
+  }
+  return false;
+}
+
+function providerOperationMatchesLampBackgroundExecution(
+  operation: ProviderOperation,
+  run: Run,
+  execution: RunExecution,
+  evaluations: LampBackgroundEvaluationProjection
+): boolean {
+  if (
+    execution.inputHash !== runExecutionInputHash(execution.renderedPrompt) ||
+    !lampBackgroundPlanBindingValid(run, execution, evaluations)
+  ) {
+    return false;
+  }
+  if (operation.kind !== "video_generation") return true;
+  if (operation.iteration === 1) {
+    return providerOperationMatchesExecution(operation, execution);
+  }
+  if (operation.iteration === 2) {
+    return (
+      operation.renderedPrompt ===
+      lampBackgroundFinalPrompt(run, execution, evaluations)?.rendered
+    );
   }
   return false;
 }
@@ -384,6 +703,40 @@ function mergeLampEvaluationResults(
     const projection = projectLampEvaluationForRead({
       iteration: index,
       artifact,
+      humanGradeSaved: candidate.humanGrade !== undefined,
+      hideFinalEvaluation,
+    });
+    iteration.evalResults = projection.evalResults;
+    if (projection.composite) iteration.composite = projection.composite;
+    else delete iteration.composite;
+  }
+}
+
+function mergeLampBackgroundEvaluationResults(
+  candidate: Run,
+  execution: RunExecution,
+  evaluations: LampBackgroundEvaluationProjection,
+  hideFinalEvaluation = false
+): void {
+  if (!candidate.backgroundCleanupPlan) return;
+  const first = lampBackgroundArtifact(evaluations.first, 1);
+  const final = lampBackgroundArtifact(evaluations.final, 2);
+  const finalPrompt = first
+    ? lampBackgroundFinalPrompt(candidate, execution, evaluations)
+    : undefined;
+  for (const [index, artifact] of [
+    [1, first],
+    [2, final],
+  ] as const) {
+    const iteration = candidate.iterations.find((item) => item.index === index);
+    if (!iteration) continue;
+    if (index === 2 && finalPrompt) {
+      iteration.megaPrompt = lampBackgroundPromptForRun(finalPrompt);
+    }
+    const projection = projectLampBackgroundEvaluationForRead({
+      iteration: index,
+      artifact,
+      cleanupPlan: candidate.backgroundCleanupPlan,
       humanGradeSaved: candidate.humanGrade !== undefined,
       hideFinalEvaluation,
     });
@@ -420,6 +773,15 @@ function mergeCost(
  * snapshot cannot make a completed background artifact disappear from the UI.
  */
 function paidCostLabel(entry: PaidOperationCostEntry): string {
+  if (entry.id === lampBackgroundPlanOperationId()) {
+    return "Lamp Background cleanup plan (Gemini)";
+  }
+  if (entry.id === lampBackgroundEvaluationOperationId(1)) {
+    return "Lamp Background Initial whole-video critique (Gemini)";
+  }
+  if (entry.id === lampBackgroundEvaluationOperationId(2)) {
+    return "Lamp Background Final whole-video evaluation (Gemini)";
+  }
   if (entry.id === lampEvaluationOperationId(1)) {
     return "Lamp whole-video critique (Gemini)";
   }
@@ -427,7 +789,7 @@ function paidCostLabel(entry: PaidOperationCostEntry): string {
     return "Lamp final whole-video evaluation (Gemini)";
   }
   if (entry.kind === "lipsync") {
-    return "Lamp Final Lipsync-2-Pro repair (Replicate)";
+    return "Final Lipsync-2-Pro repair (Replicate)";
   }
   if (entry.kind === "manifest") return "Scene manifest extraction (Gemini)";
   if (entry.kind === "anchor") {
@@ -445,6 +807,12 @@ function materializeServerResults(
   paidCosts: PaidOperationCostEntry[] = [],
   execution?: RunExecution | null,
   lampEvaluations: LampEvaluationProjection = { first: null, final: null },
+  backgroundEvaluations: LampBackgroundEvaluationProjection = {
+    plan: null,
+    planHash: null,
+    first: null,
+    final: null,
+  },
   hideFinalEvaluation = false
 ): Run {
   const materialized: Run = {
@@ -458,6 +826,7 @@ function materializeServerResults(
   };
   clearProviderTrustMarkers(materialized);
   const lamp = isLampExecution(execution);
+  const background = isLampBackgroundExecution(execution);
   const firstCutOperation = firstCutProviderOperation(materialized);
   const secondCutOperation = materialized.providerOperations?.find(
     (operation) =>
@@ -476,7 +845,20 @@ function materializeServerResults(
             secondCutOperation,
             execution,
             lampEvaluations
-          )))
+          )) ||
+        (background &&
+          (!lampBackgroundPlanBindingValid(
+            materialized,
+            execution,
+            backgroundEvaluations
+          ) ||
+            (secondCutOperation &&
+              !providerOperationMatchesLampBackgroundExecution(
+                secondCutOperation,
+                materialized,
+                execution,
+                backgroundEvaluations
+              )))))
   );
   const durableExecution = executionBindingMismatch
     ? {
@@ -505,6 +887,13 @@ function materializeServerResults(
                 execution,
                 lampEvaluations
               )
+            : background
+              ? providerOperationMatchesLampBackgroundExecution(
+                  operation,
+                  materialized,
+                  execution,
+                  backgroundEvaluations
+                )
             : operation.iteration === 1 &&
               providerOperationMatchesExecution(operation, execution))
       )
@@ -541,10 +930,25 @@ function materializeServerResults(
     const estimatedItems = (materialized.cost?.items ?? []).filter(
       (item) => item.estimated
     );
+    const fallbackEstimate = isLampBackgroundRun(materialized)
+      ? materialized.backgroundCleanupPlan?.approval.status === "approved" &&
+        materialized.backgroundCleanupPlan.decision === "cleanup"
+        ? (() => {
+            const plan = estimateLampBackgroundPlan();
+            const cleanup = estimateLampBackgroundTwoPass(
+              materialized.originalVideo.durationSec
+            );
+            return {
+              totalUsd: plan.totalUsd + cleanup.totalUsd,
+              items: [...plan.items, ...cleanup.items],
+            };
+          })()
+        : estimateLampBackgroundPlan()
+      : estimateRun(materialized.originalVideo.durationSec);
     materialized.cost = {
       estimatedUsd:
         materialized.cost?.estimatedUsd ??
-        estimateRun(materialized.originalVideo.durationSec).totalUsd,
+        fallbackEstimate.totalUsd,
       actualUsd: actualItems.reduce((sum, item) => sum + item.usd, 0),
       items: [...estimatedItems, ...actualItems],
     };
@@ -552,10 +956,23 @@ function materializeServerResults(
   if (durableExecution) {
     const execution = durableExecution;
     const lamp = isLampExecution(execution);
+    const background = isLampBackgroundExecution(execution);
+    const twoPass = lamp || background;
     const budgetSkipped = execution.error?.startsWith("BATCH_BUDGET_SKIPPED") === true;
-    const estimate = lamp
-      ? estimateLampRun(materialized.originalVideo.durationSec)
-      : estimateFirstCut(materialized.originalVideo.durationSec);
+    const estimate = background
+      ? (() => {
+          const plan = estimateLampBackgroundPlan();
+          const cleanup = estimateLampBackgroundTwoPass(
+            materialized.originalVideo.durationSec
+          );
+          return {
+            totalUsd: plan.totalUsd + cleanup.totalUsd,
+            items: [...plan.items, ...cleanup.items],
+          };
+        })()
+      : lamp
+        ? estimateLampRun(materialized.originalVideo.durationSec)
+        : estimateFirstCut(materialized.originalVideo.durationSec);
     const confirmedItems = (materialized.cost?.items ?? []).filter(
       (item) => !item.estimated
     );
@@ -574,10 +991,10 @@ function materializeServerResults(
       ],
     };
     const legacyReviewed =
-      !lamp &&
+      !twoPass &&
       (materialized.status === "approved" ||
         materialized.status === "needs-changes");
-    if (lamp && materialized.humanGrade) {
+    if (twoPass && materialized.humanGrade) {
       materialized.status = materialized.humanGrade.shipIt
         ? "approved"
         : "needs-changes";
@@ -595,7 +1012,16 @@ function materializeServerResults(
     if (execution.iteration >= 1) {
       let iteration = materialized.iterations.find((item) => item.index === 1);
       if (!iteration) {
-        const megaPrompt = initialMegaPrompt(lamp ? "lamp" : "flora");
+        const megaPrompt =
+          background && materialized.backgroundCleanupPlan
+            ? (() => {
+                const prompt = initialLampBackgroundMegaPrompt(
+                  materialized.backgroundCleanupPlan
+                );
+                prompt.rendered = execution.renderedPrompt;
+                return lampBackgroundPromptForRun(prompt);
+              })()
+            : initialMegaPrompt(lamp ? "lamp" : "flora");
         // RunExecution revision 1 binds the exact prompt bytes before any
         // Workflow contender can start. The provider journal is a secondary
         // replay record, not the source of truth for an as-yet queued run.
@@ -624,13 +1050,25 @@ function materializeServerResults(
       }
     }
 
-    const finalPrompt = lamp ? lampFinalPrompt(execution, lampEvaluations) : undefined;
-    if (lamp && execution.iteration >= 2 && finalPrompt) {
+    const lampFinal = lamp
+      ? lampFinalPrompt(execution, lampEvaluations)
+      : undefined;
+    const backgroundFinal = background
+      ? lampBackgroundFinalPrompt(
+          materialized,
+          execution,
+          backgroundEvaluations
+        )
+      : undefined;
+    const finalPromptForRun = backgroundFinal
+      ? lampBackgroundPromptForRun(backgroundFinal)
+      : lampFinal;
+    if (twoPass && execution.iteration >= 2 && finalPromptForRun) {
       let iteration = materialized.iterations.find((item) => item.index === 2);
       if (!iteration) {
         iteration = {
           index: 2,
-          megaPrompt: finalPrompt,
+          megaPrompt: finalPromptForRun,
           beforeFrames: [],
           afterFrames: [],
           evalResults: [],
@@ -639,13 +1077,15 @@ function materializeServerResults(
         materialized.iterations.push(iteration);
         materialized.iterations.sort((a, b) => a.index - b.index);
       } else {
-        iteration.megaPrompt = finalPrompt;
+        iteration.megaPrompt = finalPromptForRun;
       }
       if (
         execution.status === "awaiting_review" &&
         secondCutOperation?.status === "completed" &&
         secondCutOperation.result &&
-        lampArtifact(lampEvaluations.final, 2)
+        (lamp
+          ? lampArtifact(lampEvaluations.final, 2)
+          : lampBackgroundArtifact(backgroundEvaluations.final, 2))
       ) {
         iteration.status = "ungraded";
       } else if (
@@ -664,6 +1104,128 @@ function materializeServerResults(
         lampEvaluations,
         hideFinalEvaluation && durableExecution?.status === "awaiting_review"
       );
+    }
+    if (background) {
+      mergeLampBackgroundEvaluationResults(
+        materialized,
+        execution,
+        backgroundEvaluations,
+        hideFinalEvaluation && durableExecution.status === "awaiting_review"
+      );
+
+      const firstEvaluation = lampBackgroundArtifact(
+        backgroundEvaluations.first,
+        1
+      );
+      const finalEvaluation = lampBackgroundArtifact(
+        backgroundEvaluations.final,
+        2
+      );
+      const terminal =
+        execution.status === "failed" ||
+        execution.status === "reconcile_required";
+      const paused = execution.status === "user_action_required";
+      materialized.nodeStates.plan = {
+        nodeId: "plan",
+        status: "succeeded",
+        detail: "human-approved remove / preserve / uncertain contract",
+      };
+      // Completed evidence outranks the terminal flag: a sealed run must not
+      // repaint stages that finished and billed (their journals prove it).
+      materialized.nodeStates.initial = {
+        nodeId: "initial",
+        status: firstEvaluation
+          ? "succeeded"
+          : terminal
+            ? "failed"
+            : execution.iteration >= 1 &&
+                (execution.phase === "video_generation" ||
+                  execution.phase === "finalizing")
+              ? "running"
+              : paused
+                ? "queued"
+                : "queued",
+        detail: firstEvaluation
+          ? "Initial generated, source audio finalized, and ready for correction"
+          : paused
+            ? "paused before the next authorized paid operation"
+            : "source-faithful cleanup from the approved plan",
+      };
+      materialized.nodeStates.critique = {
+        nodeId: "critique",
+        status: firstEvaluation
+          ? "succeeded"
+          : terminal
+            ? "failed"
+            : execution.phase === "evaluating" && execution.iteration === 1
+              ? "running"
+              : "queued",
+        detail: firstEvaluation
+          ? "whole Initial checked against the exact approved plan"
+          : "awaiting the first whole-video evaluation",
+      };
+      materialized.nodeStates.final = {
+        nodeId: "final",
+        status: finalEvaluation
+          ? "succeeded"
+          : terminal
+            ? "failed"
+            : execution.iteration >= 2 &&
+                (execution.phase === "video_generation" ||
+                  execution.phase === "finalizing" ||
+                  execution.phase === "evaluating")
+              ? "running"
+              : "queued",
+        detail: finalEvaluation
+          ? "Final generated and evaluated from the saved correction brief"
+          : paused
+            ? "paused; renew the exact cleanup approval to resume"
+            : "one correction pass from the immutable source",
+      };
+      materialized.nodeStates.review = {
+        nodeId: "review",
+        status: materialized.humanGrade
+          ? "succeeded"
+          : execution.status === "awaiting_review"
+            ? "queued"
+            : "idle",
+        detail: materialized.humanGrade
+          ? materialized.humanGrade.shipIt
+            ? "human grade saved — ship"
+            : "human grade saved — do not ship"
+          : "blind human grade required; approved plan remains visible",
+      };
+
+      delete materialized.bestIterationIndex;
+      delete materialized.finalVideo;
+      delete materialized.fallback;
+      const logKey = `server execution ${execution.executionId}`;
+      if (!materialized.log.some((entry) => entry.message.includes(logKey))) {
+        const safeExecutionError = execution.error
+          ?.replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 240);
+        const message =
+          execution.status === "awaiting_review"
+            ? `${logKey}: Lamp Background completed Initial, whole-video critique, Final, and the saved Final evaluation — awaiting blind human grading`
+            : execution.status === "user_action_required"
+              ? `${logKey}: paused before the next paid operation; renew the same exact cleanup approval to resume without rebilling completed journals`
+              : terminal
+                ? `${logKey}: durable Lamp Background execution stopped before a gradeable artifact was confirmed${safeExecutionError ? ` — ${safeExecutionError}` : ""}`
+                : `${logKey}: durable server Workflow owns Lamp Background's approved two-pass cleanup; this browser may close safely`;
+        materialized.log.push({
+          at: execution.updatedAt,
+          nodeId:
+            execution.status === "awaiting_review" ? "review" : "final",
+          level: terminal
+            ? "error"
+            : execution.status === "user_action_required"
+              ? "warn"
+              : "info",
+          message,
+        });
+      }
+      return materialized;
     }
 
     const skipped = lamp
@@ -907,6 +1469,20 @@ function materializeServerResults(
     }
   } else {
     delete materialized.serverExecution;
+    if (isLampBackgroundRun(materialized) && materialized.humanGrade) {
+      materialized.status = materialized.humanGrade.shipIt
+        ? "approved"
+        : "needs-changes";
+      if (materialized.nodeStates.review) {
+        materialized.nodeStates.review = {
+          ...materialized.nodeStates.review,
+          status: "succeeded",
+          detail: materialized.humanGrade.shipIt
+            ? "human grade saved — ship"
+            : "human grade saved — do not ship",
+        };
+      }
+    }
   }
   return materialized;
 }
@@ -946,11 +1522,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     if (!isValidRunId(requestedId)) {
       return NextResponse.json({ error: "Invalid run id." }, { status: 400 });
     }
-    const [storedRun, paidCosts, execution, lampEvaluations] = await Promise.all([
+    const [
+      storedRun,
+      paidCosts,
+      execution,
+      lampEvaluations,
+      backgroundEvaluations,
+    ] = await Promise.all([
       storage.getRun(requestedId),
       storage.listPaidOperationCosts(requestedId),
       storage.getRunExecution(requestedId),
       readLampEvaluationProjection(storage, requestedId),
+      readLampBackgroundEvaluationProjection(storage, requestedId),
     ]);
     const run = storedRun
       ? materializeServerResults(
@@ -958,6 +1541,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           paidCosts,
           execution,
           lampEvaluations,
+          backgroundEvaluations,
           hideFinalEvaluation
         )
       : null;
@@ -993,10 +1577,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const batchExecutions = storedBatchExecutions?.map(summarizeBatchExecution);
   const runs = await Promise.all(
     page.runs.map(async (run) => {
-      const [paidCosts, execution, lampEvaluations] = await Promise.all([
+      const [
+        paidCosts,
+        execution,
+        lampEvaluations,
+        backgroundEvaluations,
+      ] = await Promise.all([
         storage.listPaidOperationCosts(run.id),
         storage.getRunExecution(run.id),
         readLampEvaluationProjection(storage, run.id),
+        readLampBackgroundEvaluationProjection(storage, run.id),
       ]);
       return compactRun(
         materializeServerResults(
@@ -1004,6 +1594,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           paidCosts,
           execution,
           lampEvaluations,
+          backgroundEvaluations,
           hideFinalEvaluation
         )
       );
@@ -1050,13 +1641,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let body: {
     video?: unknown;
     approveLiveSpend?: unknown;
+    approvePlanSpend?: unknown;
     workflowMode?: unknown;
+    mock?: unknown;
   };
   try {
     body = (await req.json()) as {
       video?: unknown;
       approveLiveSpend?: unknown;
+      approvePlanSpend?: unknown;
       workflowMode?: unknown;
+      mock?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "Body must be JSON." }, { status: 400 });
@@ -1086,21 +1681,68 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
   if (
-    body.workflowMode !== undefined &&
-    body.workflowMode !== "flora" &&
-    body.workflowMode !== "lamp"
+    body.approvePlanSpend !== undefined &&
+    typeof body.approvePlanSpend !== "boolean"
   ) {
     return NextResponse.json(
-      { error: 'workflowMode must be either "flora" or "lamp".' },
+      { error: "approvePlanSpend must be a boolean." },
+      { status: 400 }
+    );
+  }
+  if (body.mock !== undefined && typeof body.mock !== "boolean") {
+    return NextResponse.json(
+      { error: "mock must be a boolean." },
+      { status: 400 }
+    );
+  }
+  if (
+    body.workflowMode !== undefined &&
+    body.workflowMode !== "flora" &&
+    body.workflowMode !== "lamp" &&
+    body.workflowMode !== "background"
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          'workflowMode must be "flora", "lamp", or "background".',
+      },
       { status: 400 }
     );
   }
   const workflowMode: WorkflowMode =
-    body.workflowMode === "flora" ? "flora" : "lamp";
-  if (body.approveLiveSpend === true && !hasGeminiKey()) {
+    body.workflowMode === "flora"
+      ? "flora"
+      : body.workflowMode === "lamp"
+        ? "lamp"
+        : "background";
+  if (
+    body.approveLiveSpend === true &&
+    workflowMode === "background"
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "Approve the source-specific Lamp Background cleanup plan before authorizing the two-pass generation.",
+      },
+      { status: 409 }
+    );
+  }
+  if (
+    (body.approveLiveSpend === true || body.approvePlanSpend === true) &&
+    !hasGeminiKey()
+  ) {
     return NextResponse.json(
       { error: "Gemini video generation is not configured." },
       { status: 503 }
+    );
+  }
+  if (body.approvePlanSpend === true && workflowMode !== "background") {
+    return NextResponse.json(
+      {
+        error:
+          "Cleanup-plan spend applies only to Lamp Background runs.",
+      },
+      { status: 400 }
     );
   }
   if (body.approveLiveSpend === true && workflowMode === "lamp") {
@@ -1118,6 +1760,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const storage = getStorage();
   const existing = await storage.getRun(video.runId);
+  if (
+    workflowMode === "background" &&
+    body.mock !== true &&
+    body.approvePlanSpend !== true &&
+    !existing?.backgroundCleanupPlan
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "Approve the one-call cleanup-plan analysis before starting a live Lamp Background run.",
+      },
+      { status: 400 }
+    );
+  }
   // Flora admission requires a run that already carries real Flora work; a
   // fresh run id or a never-started Flora draft is new work and is refused
   // before the ingest read downloads and probes any media.
@@ -1173,18 +1829,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (existingMode !== workflowMode && !canAdoptWorkflowMode) {
       return NextResponse.json(
         {
-          error: `This saved clip already belongs to ${
-            existingMode === "lamp" ? "Lamp" : "Flora"
-          }. Upload it again as a fresh ${
-            workflowMode === "lamp" ? "Lamp" : "Flora"
-          } run so approvals and artifacts cannot be mixed.`,
+          error: `This saved clip already belongs to ${workflowModeLabel(
+            existingMode
+          )}. Upload it again as a fresh ${workflowModeLabel(
+            workflowMode
+          )} run so approvals and artifacts cannot be mixed.`,
         },
         { status: 409 }
       );
     }
     if (
       existingExecution &&
-      (workflowMode === "lamp") !== isLampExecution(existingExecution)
+      workflowModeFromExecutionId(existingExecution.executionId) !==
+        workflowMode
     ) {
       return NextResponse.json(
         {
@@ -1197,7 +1854,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const existingApproval =
       (workflowMode === "lamp"
         ? hasReusableLampApproval(existing)
-        : hasReusableFirstCutApproval(existing, "single")) &&
+        : workflowMode === "background"
+          ? hasReusableLampBackgroundPlanApproval(existing)
+          : hasReusableFirstCutApproval(existing, "single")) &&
       existing.originalVideo.runId === canonicalVideo.runId &&
       existing.originalVideo.url === canonicalVideo.url &&
       Math.abs(existing.originalVideo.durationSec - canonicalVideo.durationSec) <=
@@ -1205,13 +1864,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     let updated = await storage.putCanonicalRunSource(
       video.runId,
       canonicalVideo,
-      body.approveLiveSpend === true && !existingApproval
+      (body.approveLiveSpend === true ||
+        body.approvePlanSpend === true) &&
+      !existingApproval
         ? createSpendApproval(
             canonicalVideo,
             "single",
             undefined,
             Date.now(),
-            workflowMode === "lamp" ? "lamp_two_pass" : "first_cut"
+            workflowMode === "lamp"
+              ? "lamp_two_pass"
+              : workflowMode === "background"
+                ? "background_plan"
+                : "first_cut"
           )
         : undefined
     );
@@ -1231,6 +1896,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       };
       await storage.putRun(updated);
     }
+    if (workflowMode === "background") {
+      const prepared = await prepareLampBackgroundPlan({
+        run: updated,
+        mock: body.mock === true,
+      });
+      if (!prepared.ok) {
+        return NextResponse.json(
+          { error: prepared.message, run: prepared.run },
+          { status: prepared.status }
+        );
+      }
+      return NextResponse.json({
+        ok: true,
+        created: false,
+        run: prepared.run,
+        planReviewRequired:
+          prepared.plan.approval.status !== "approved",
+        serverOwned: body.mock !== true,
+      });
+    }
     if (body.approveLiveSpend === true) {
       try {
         const launch = await enqueueSingleRun(updated, workflowMode);
@@ -1244,7 +1929,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
                 launch.execution.status === "reconcile_required"
                   ? "This run has an unresolved provider outcome. It will not be billed again automatically; reconcile the existing attempt first."
                   : `This durable ${
-                      workflowMode === "lamp" ? "Lamp" : "Flora"
+                      workflowModeLabel(workflowMode)
                     } run already stopped and cannot be presented as newly started. Create a fresh run after reviewing its saved error.`,
               run: { ...updated, serverExecution: launch.execution },
               execution: launch.execution,
@@ -1267,7 +1952,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json(
           {
             error: `The run was saved, but its durable ${
-              workflowMode === "lamp" ? "Lamp" : "Flora"
+              workflowModeLabel(workflowMode)
             } execution could not be enqueued. Retry this confirmation; paid operations will not be repeated.`,
           },
           { status: 502 }
@@ -1277,16 +1962,46 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true, created: false, run: updated });
   }
   const run = buildRun(canonicalVideo, Date.now(), workflowMode);
-  if (body.approveLiveSpend === true) {
+  if (
+    body.approveLiveSpend === true ||
+    body.approvePlanSpend === true
+  ) {
     run.spendApproval = createSpendApproval(
       canonicalVideo,
       "single",
       undefined,
       Date.now(),
-      workflowMode === "lamp" ? "lamp_two_pass" : "first_cut"
+      workflowMode === "lamp"
+        ? "lamp_two_pass"
+        : workflowMode === "background"
+          ? "background_plan"
+          : "first_cut"
     );
   }
   await storage.putRun(run);
+  if (workflowMode === "background") {
+    const prepared = await prepareLampBackgroundPlan({
+      run,
+      mock: body.mock === true,
+    });
+    if (!prepared.ok) {
+      return NextResponse.json(
+        { error: prepared.message, run: prepared.run },
+        { status: prepared.status }
+      );
+    }
+    return NextResponse.json(
+      {
+        ok: true,
+        created: true,
+        run: prepared.run,
+        planReviewRequired:
+          prepared.plan.approval.status !== "approved",
+        serverOwned: body.mock !== true,
+      },
+      { status: 201 }
+    );
+  }
   if (body.approveLiveSpend === true) {
     try {
       const launch = await enqueueSingleRun(run, workflowMode);
@@ -1300,7 +2015,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               launch.execution.status === "reconcile_required"
                 ? "This run has an unresolved provider outcome. It will not be billed again automatically; reconcile the existing attempt first."
                 : `This durable ${
-                    workflowMode === "lamp" ? "Lamp" : "Flora"
+                    workflowModeLabel(workflowMode)
                   } run already stopped and cannot be presented as newly started. Create a fresh run after reviewing its saved error.`,
             run: { ...run, serverExecution: launch.execution },
             execution: launch.execution,
@@ -1326,7 +2041,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json(
         {
           error: `The run was saved, but its durable ${
-            workflowMode === "lamp" ? "Lamp" : "Flora"
+            workflowModeLabel(workflowMode)
           } execution could not be enqueued. Retry this confirmation; paid operations will not be repeated.`,
         },
         { status: 502 }
@@ -1392,6 +2107,32 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   // erase them; dedicated atomic methods are their only write path.
   persisted.humanGrade = current.humanGrade;
   persisted.spendApproval = current.spendApproval;
+  let acceptsMockPlanApproval = false;
+  try {
+    acceptsMockPlanApproval = Boolean(
+      current.backgroundCleanupPlan &&
+        candidate.backgroundCleanupPlan &&
+        current.spendApproval === undefined &&
+        current.backgroundCleanupPlan.approval.status === "draft" &&
+        candidate.backgroundCleanupPlan.approval.status === "approved" &&
+        (await hashLampBackgroundCleanupPlan(
+          current.backgroundCleanupPlan
+        )) ===
+          (await hashLampBackgroundCleanupPlan(
+            candidate.backgroundCleanupPlan
+          ))
+    );
+  } catch {
+    acceptsMockPlanApproval = false;
+  }
+  if (acceptsMockPlanApproval) {
+    // Provider-free mock plans still require a deliberate human approval.
+    persisted.backgroundCleanupPlan =
+      candidate.backgroundCleanupPlan;
+  } else {
+    persisted.backgroundCleanupPlan =
+      current.backgroundCleanupPlan;
+  }
   persisted.cost = mergeCost(candidate.cost, current.cost);
   await storage.putRun(persisted);
   return NextResponse.json({ ok: true, id: candidate.id });
@@ -1428,11 +2169,13 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
 
   const storage = getStorage();
-  const [current, execution, lampEvaluations] = await Promise.all([
-    storage.getRun(id),
-    storage.getRunExecution(id),
-    readLampEvaluationProjection(storage, id),
-  ]);
+  const [current, execution, lampEvaluations, backgroundEvaluations] =
+    await Promise.all([
+      storage.getRun(id),
+      storage.getRunExecution(id),
+      readLampEvaluationProjection(storage, id),
+      readLampBackgroundEvaluationProjection(storage, id),
+    ]);
   if (!current) {
     return NextResponse.json({ error: "Run not found." }, { status: 404 });
   }
@@ -1440,15 +2183,25 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     current,
     [],
     execution,
-    lampEvaluations
+    lampEvaluations,
+    backgroundEvaluations
   );
   const authoritativeExecution = materialized.serverExecution;
-  const lamp = authoritativeExecution
-    ? isLampExecution(authoritativeExecution)
-    : persistedWorkflowMode(materialized) === "lamp";
+  const background = authoritativeExecution
+    ? isLampBackgroundExecution(authoritativeExecution)
+    : isLampBackgroundRun(materialized);
+  const lamp = !background &&
+    (authoritativeExecution
+      ? isLampExecution(authoritativeExecution)
+      : persistedWorkflowMode(materialized) === "lamp");
+  const twoPass = lamp || background;
   const grade = parseHumanGrade({
     value: body.humanGrade,
-    requiredEvalIds: lamp ? LAMP_EVAL_IDS : ALL_EVAL_IDS,
+    requiredEvalIds: background
+      ? LAMP_BACKGROUND_EVAL_IDS
+      : lamp
+        ? LAMP_EVAL_IDS
+        : ALL_EVAL_IDS,
     ...(lamp ? { acceptedLegacyEvalIds: ALL_EVAL_IDS } : {}),
   });
   if (!grade) {
@@ -1456,7 +2209,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
   const lastIteration = materialized.iterations.at(-1);
   const selectedIndex = materialized.bestIterationIndex;
-  const shipped = lamp
+  const shipped = twoPass
     ? materialized.iterations.find((iteration) => iteration.index === 2)
     : selectedIndex === undefined
       ? lastIteration
@@ -1470,8 +2223,20 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       operation.result?.videoUrl === shipped?.generatedVideo?.url
   );
   const executionOwnsArtifact = authoritativeExecution
-    ? lamp
+    ? background
       ? authoritativeExecution.status === "awaiting_review" &&
+        shipped?.index === 2 &&
+        shippedOperation !== undefined &&
+        shippedOperation.result?.audioVerified === true &&
+        providerOperationMatchesLampBackgroundExecution(
+          shippedOperation,
+          materialized,
+          authoritativeExecution,
+          backgroundEvaluations
+        ) &&
+        lampBackgroundArtifact(backgroundEvaluations.final, 2) !== undefined
+      : lamp
+        ? authoritativeExecution.status === "awaiting_review" &&
         shipped?.index === 2 &&
         shippedOperation !== undefined &&
         shippedOperation.result?.audioVerified === true &&
@@ -1481,15 +2246,24 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           lampEvaluations
         ) &&
         lampArtifact(lampEvaluations.final, 2) !== undefined
-      : authoritativeExecution.status === "awaiting_review" &&
-        shipped?.index === 1 &&
-        shippedOperation !== undefined &&
-        providerOperationMatchesExecution(
-          shippedOperation,
-          authoritativeExecution
-        )
+        : authoritativeExecution.status === "awaiting_review" &&
+          shipped?.index === 1 &&
+          shippedOperation !== undefined &&
+          providerOperationMatchesExecution(
+            shippedOperation,
+            authoritativeExecution
+          )
     : true;
+  const approvedBackgroundNoOp =
+    !authoritativeExecution &&
+    background &&
+    materialized.backgroundCleanupPlan?.approval.status === "approved" &&
+    materialized.backgroundCleanupPlan.runId === materialized.id &&
+    materialized.backgroundCleanupPlan.decision === "exceptional-no-op" &&
+    materialized.status === "awaiting-review" &&
+    shipped?.generatedVideo?.url === materialized.originalVideo.url;
   const canonicalArtifact =
+    approvedBackgroundNoOp ||
     (!authoritativeExecution &&
       materialized.live !== true &&
       shipped?.generatedVideo?.simulatedFilter !== undefined) ||
@@ -1499,7 +2273,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       executionOwnsArtifact);
   if (!canonicalArtifact) {
     return NextResponse.json(
-      { error: "A completed server-verified relit video is required before grading." },
+      { error: "A completed server-verified output video is required before grading." },
       { status: 409 }
     );
   }
@@ -1508,16 +2282,23 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Run not found." }, { status: 404 });
   }
   if (!result.ok) {
-    const [paidCosts, freshExecution, freshLampEvaluations] = await Promise.all([
+    const [
+      paidCosts,
+      freshExecution,
+      freshLampEvaluations,
+      freshBackgroundEvaluations,
+    ] = await Promise.all([
       storage.listPaidOperationCosts(id),
       storage.getRunExecution(id),
       readLampEvaluationProjection(storage, id),
+      readLampBackgroundEvaluationProjection(storage, id),
     ]);
     const conflictRun = materializeServerResults(
       result.current!,
       paidCosts,
       freshExecution,
-      freshLampEvaluations
+      freshLampEvaluations,
+      freshBackgroundEvaluations
     );
     return NextResponse.json(
       {
@@ -1530,16 +2311,23 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       }
     );
   }
-  const [paidCosts, freshExecution, freshLampEvaluations] = await Promise.all([
+  const [
+    paidCosts,
+    freshExecution,
+    freshLampEvaluations,
+    freshBackgroundEvaluations,
+  ] = await Promise.all([
     storage.listPaidOperationCosts(id),
     storage.getRunExecution(id),
     readLampEvaluationProjection(storage, id),
+    readLampBackgroundEvaluationProjection(storage, id),
   ]);
   const savedRun = materializeServerResults(
     result.run,
     paidCosts,
     freshExecution,
-    freshLampEvaluations
+    freshLampEvaluations,
+    freshBackgroundEvaluations
   );
   return NextResponse.json(
     { ok: true, run: compactRun(savedRun) },

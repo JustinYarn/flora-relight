@@ -11,13 +11,14 @@
  * browser ledger. Never render a number from this module without an
  * est/actual label.
  *
- * Estimators are driven by the ACTUAL registry/config (EVAL_DEFS,
- * RELIGHT_WORKFLOW.config) — never hardcoded counts — so adding an eval or a
- * judge automatically moves every estimate in the app.
+ * Legacy Flora estimators are driven by Flora's immutable registry/config
+ * (EVAL_DEFS, FLORA_WORKFLOW.config), never by the app's mutable default
+ * workflow. Adding a new default product must not silently reprice historical
+ * Flora approvals, batches, or saved estimates.
  */
 
 import { EVAL_DEFS } from "./prompts/eval-defs.ts";
-import { RELIGHT_WORKFLOW } from "./workflow-def.ts";
+import { FLORA_WORKFLOW } from "./flora-workflow-def.ts";
 import type {
   GeminiProUsageSnapshot,
   JudgeId,
@@ -39,12 +40,21 @@ export const LAMP_GENERATION_COUNT = 2;
 export const LAMP_EVALUATION_COUNT = 2;
 /** Gemini 3.1 Pro's documented output ceiling, including its thinking room. */
 export const LAMP_EVALUATOR_MAX_OUTPUT_TOKENS = 65_536;
+/** Planning is a distinct paid step, then cleanup uses the same fixed two-pass shape. */
+export const LAMP_BACKGROUND_PLAN_COUNT = 1;
+export const LAMP_BACKGROUND_GENERATION_COUNT = 2;
+export const LAMP_BACKGROUND_EVALUATION_COUNT = 2;
+export const LAMP_BACKGROUND_GEMINI_MAX_OUTPUT_TOKENS = 65_536;
 
 // These figures drive the estimate shown before a call. Settled spend always
 // comes from the provider usage snapshots below.
 const ESTIMATED_OMNI_INPUT_TOKENS = 16_000;
 const ESTIMATED_LAMP_EVALUATOR_INPUT_TOKENS = 16_000;
 const ESTIMATED_LAMP_EVALUATOR_OUTPUT_AND_THINKING_TOKENS = 8_192;
+const ESTIMATED_LAMP_BACKGROUND_PLAN_INPUT_TOKENS = 16_000;
+const ESTIMATED_LAMP_BACKGROUND_PLAN_OUTPUT_AND_THINKING_TOKENS = 8_192;
+const ESTIMATED_LAMP_BACKGROUND_EVALUATOR_INPUT_TOKENS = 16_000;
+const ESTIMATED_LAMP_BACKGROUND_EVALUATOR_OUTPUT_AND_THINKING_TOKENS = 8_192;
 
 // Batch admission reserves more than the UI estimate so normal usage variance
 // does not strand a completed call in reconciliation. These are intentionally
@@ -54,6 +64,12 @@ export const OMNI_TEXT_AND_THINKING_RESERVATION_TOKENS = 65_536;
 export const LAMP_EVALUATOR_INPUT_RESERVATION_TOKENS = 32_000;
 export const LAMP_EVALUATOR_OUTPUT_AND_THINKING_RESERVATION_TOKENS =
   LAMP_EVALUATOR_MAX_OUTPUT_TOKENS;
+export const LAMP_BACKGROUND_PLAN_INPUT_RESERVATION_TOKENS = 32_000;
+export const LAMP_BACKGROUND_PLAN_OUTPUT_AND_THINKING_RESERVATION_TOKENS =
+  LAMP_BACKGROUND_GEMINI_MAX_OUTPUT_TOKENS;
+export const LAMP_BACKGROUND_EVALUATOR_INPUT_RESERVATION_TOKENS = 32_000;
+export const LAMP_BACKGROUND_EVALUATOR_OUTPUT_AND_THINKING_RESERVATION_TOKENS =
+  LAMP_BACKGROUND_GEMINI_MAX_OUTPUT_TOKENS;
 
 // ---------------------------------------------------------------------------
 // Cost item (lives here, not in lib/types.ts, to keep the core contract stable)
@@ -309,6 +325,35 @@ export function lampRunReservationUsd(durationSec: number): number {
   );
 }
 
+/** Conservative reservation for exactly one Gemini Pro cleanup-plan call. */
+export function lampBackgroundPlanReservationUsd(): number {
+  return geminiProCostFromUsage({
+    promptTokenCount: LAMP_BACKGROUND_PLAN_INPUT_RESERVATION_TOKENS,
+    candidatesTokenCount:
+      LAMP_BACKGROUND_PLAN_OUTPUT_AND_THINKING_RESERVATION_TOKENS,
+  });
+}
+
+/**
+ * Conservative reservation for cleanup execution after plan approval.
+ * The already-completed planner call is deliberately excluded.
+ */
+export function lampBackgroundTwoPassReservationUsd(
+  durationSec: number
+): number {
+  const evaluatorReservationUsd = geminiProCostFromUsage({
+    promptTokenCount: LAMP_BACKGROUND_EVALUATOR_INPUT_RESERVATION_TOKENS,
+    candidatesTokenCount:
+      LAMP_BACKGROUND_EVALUATOR_OUTPUT_AND_THINKING_RESERVATION_TOKENS,
+  });
+  return (
+    omniGenerationReservationUsd(durationSec) *
+      LAMP_BACKGROUND_GENERATION_COUNT +
+    evaluatorReservationUsd * LAMP_BACKGROUND_EVALUATION_COUNT +
+    durationSec * PRICE_TABLE.lipsync2ProPerOutputSecond.usd
+  );
+}
+
 /** Price a completed Lipsync-2-Pro repair from its actual output duration. */
 export function lipsync2ProCostFromDuration(durationSec: number): number {
   if (!Number.isFinite(durationSec) || durationSec <= 0) {
@@ -387,7 +432,7 @@ export function estimateIteration(durationSec: number): CostEstimate {
       unitLabel: "output seconds",
       usd: durationSec * PRICE_TABLE.omniFlashPerOutputSecond.usd,
     },
-    ...RELIGHT_WORKFLOW.config.judges.map(
+    ...FLORA_WORKFLOW.config.judges.map(
       (judge): CostItem => ({
         label: `${judged} judged evals — ${judge}`,
         provider: judge,
@@ -503,6 +548,113 @@ export function estimateLampRun(durationSec: number): CostEstimate {
       label: "Original-audio remux and verification (both cuts)",
       provider: "local",
       units: LAMP_GENERATION_COUNT,
+      unitLabel: "cuts",
+      usd: 0,
+    },
+  ]);
+}
+
+/** One Gemini Pro video-native proposal before any background generation. */
+export function estimateLampBackgroundPlan(): CostEstimate {
+  const inputUsd = geminiProCostFromUsage({
+    promptTokenCount: ESTIMATED_LAMP_BACKGROUND_PLAN_INPUT_TOKENS,
+    candidatesTokenCount: 0,
+  });
+  const outputUsd = geminiProCostFromUsage({
+    promptTokenCount: 0,
+    candidatesTokenCount:
+      ESTIMATED_LAMP_BACKGROUND_PLAN_OUTPUT_AND_THINKING_TOKENS,
+  });
+  return total([
+    {
+      label: "Cleanup-plan source and instruction input (estimated)",
+      provider: PRICE_TABLE.geminiProInputPerMillionTokens.provider,
+      units: ESTIMATED_LAMP_BACKGROUND_PLAN_INPUT_TOKENS,
+      unitLabel: "input tokens",
+      usd: inputUsd,
+    },
+    {
+      label: "Cleanup-plan structured output (estimated)",
+      provider: PRICE_TABLE.geminiProOutputPerMillionTokens.provider,
+      units:
+        ESTIMATED_LAMP_BACKGROUND_PLAN_OUTPUT_AND_THINKING_TOKENS,
+      unitLabel: "output/thinking tokens",
+      usd: outputUsd,
+    },
+  ]);
+}
+
+/**
+ * Lamp Background execution after plan approval: Initial, one holistic
+ * critique, Final, one holistic evaluation, and at most one Final lipsync
+ * repair. Planning is priced and approved separately.
+ */
+export function estimateLampBackgroundTwoPass(
+  durationSec: number
+): CostEstimate {
+  const evaluatorInputEstimate = geminiProCostFromUsage({
+    promptTokenCount: ESTIMATED_LAMP_BACKGROUND_EVALUATOR_INPUT_TOKENS,
+    candidatesTokenCount: 0,
+  });
+  const evaluatorOutputEstimate = geminiProCostFromUsage({
+    promptTokenCount: 0,
+    candidatesTokenCount:
+      ESTIMATED_LAMP_BACKGROUND_EVALUATOR_OUTPUT_AND_THINKING_TOKENS,
+  });
+  return total([
+    {
+      label: `Two background-cleanup video generations (${durationSec.toFixed(1)}s each)`,
+      provider: PRICE_TABLE.omniFlashPerOutputSecond.provider,
+      units: durationSec * LAMP_BACKGROUND_GENERATION_COUNT,
+      unitLabel: PRICE_TABLE.omniFlashPerOutputSecond.unitLabel,
+      usd:
+        durationSec *
+        LAMP_BACKGROUND_GENERATION_COUNT *
+        PRICE_TABLE.omniFlashPerOutputSecond.usd,
+    },
+    {
+      label: "Two cleanup generation inputs (estimated)",
+      provider: PRICE_TABLE.omniFlashInputPerMillionTokens.provider,
+      units:
+        ESTIMATED_OMNI_INPUT_TOKENS * LAMP_BACKGROUND_GENERATION_COUNT,
+      unitLabel: "input tokens",
+      usd:
+        (ESTIMATED_OMNI_INPUT_TOKENS *
+          LAMP_BACKGROUND_GENERATION_COUNT *
+          PRICE_TABLE.omniFlashInputPerMillionTokens.usd) /
+        TOKENS_PER_MILLION,
+    },
+    {
+      label: "Two cleanup evaluation inputs (estimated)",
+      provider: PRICE_TABLE.geminiProInputPerMillionTokens.provider,
+      units:
+        ESTIMATED_LAMP_BACKGROUND_EVALUATOR_INPUT_TOKENS *
+        LAMP_BACKGROUND_EVALUATION_COUNT,
+      unitLabel: "input tokens",
+      usd:
+        evaluatorInputEstimate * LAMP_BACKGROUND_EVALUATION_COUNT,
+    },
+    {
+      label: "Two cleanup evaluation outputs (estimated)",
+      provider: PRICE_TABLE.geminiProOutputPerMillionTokens.provider,
+      units:
+        ESTIMATED_LAMP_BACKGROUND_EVALUATOR_OUTPUT_AND_THINKING_TOKENS *
+        LAMP_BACKGROUND_EVALUATION_COUNT,
+      unitLabel: "output/thinking tokens",
+      usd:
+        evaluatorOutputEstimate * LAMP_BACKGROUND_EVALUATION_COUNT,
+    },
+    {
+      label: "One possible Final Lipsync-2-Pro repair",
+      provider: PRICE_TABLE.lipsync2ProPerOutputSecond.provider,
+      units: durationSec,
+      unitLabel: PRICE_TABLE.lipsync2ProPerOutputSecond.unitLabel,
+      usd: durationSec * PRICE_TABLE.lipsync2ProPerOutputSecond.usd,
+    },
+    {
+      label: "Original-audio remux and verification (both cleanup cuts)",
+      provider: "local",
+      units: LAMP_BACKGROUND_GENERATION_COUNT,
       unitLabel: "cuts",
       usd: 0,
     },
