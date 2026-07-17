@@ -558,7 +558,7 @@ export function GradeView(
         <h1 className="text-balance text-base font-semibold text-ink">Grade</h1>
         <p className="text-pretty text-2xs text-faint">
           {mode === "grade"
-            ? "grade every active rubric row by eye — Lamp Background uses nine visual rows plus source audio, and any saved Final AI evaluation starts hidden until you reveal it"
+            ? "grade every active rubric row by eye — each Lamp mode shows its own visual rows plus source audio, and any saved Final AI evaluation starts hidden until you reveal it"
             : hasAutomatedResults
               ? "compare each final video first, then use the aggregate view to calibrate the method"
               : "your saved human grades — no final AI results are available to compare"}
