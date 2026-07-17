@@ -15,6 +15,7 @@ import {
   LAMP_USER_ACTION_REQUIRED_PREFIX,
 } from "@/lib/server/run-execution-resume";
 import { isTwoPassExecutionId } from "@/lib/workflow-mode";
+import { isRelightIntensity } from "../../relight-intensity.ts";
 import { createHash } from "node:crypto";
 
 const EXECUTION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
@@ -113,6 +114,14 @@ export function assertRunExecution(execution: unknown): RunExecution {
     .digest("hex");
   if (renderedPromptHash !== candidate.inputHash) {
     throw new Error("Run execution renderedPrompt does not match inputHash");
+  }
+  if (
+    candidate.relightIntensity !== undefined &&
+    !isRelightIntensity(candidate.relightIntensity)
+  ) {
+    throw new Error(
+      "Run execution relightIntensity must be a five-point step from 0 through 100"
+    );
   }
   if (candidate.source !== "single" && candidate.source !== "batch") {
     throw new Error("Invalid run execution source");
@@ -265,6 +274,7 @@ export function assertRunExecutionTransition(
     candidate.renderedPrompt !== current.renderedPrompt ||
     candidate.planOperationId !== current.planOperationId ||
     candidate.approvedPlanHash !== current.approvedPlanHash ||
+    candidate.relightIntensity !== current.relightIntensity ||
     candidate.source !== current.source ||
     candidate.batchId !== current.batchId ||
     candidate.startedAt !== current.startedAt

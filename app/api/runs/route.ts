@@ -165,6 +165,10 @@ import {
   LegacyPublicMediaDeletionError,
 } from "@/lib/server/storage/blob-driver";
 import { ActiveRunDeletionError } from "@/lib/server/storage/run-deletion";
+import {
+  isRelightIntensity,
+  normalizeRelightIntensity,
+} from "@/lib/relight-intensity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -594,6 +598,9 @@ async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
             existingExecution?.approvedPlanHash ?? irisPlanHash,
         }
       : {}),
+    ...(workflowMode === "lamp"
+      ? { relightIntensity: normalizeRelightIntensity(run.relightIntensity) }
+      : {}),
   });
 }
 
@@ -736,29 +743,46 @@ function mergeServerGeneratedVideos(
         };
         candidate.iterations.push(iteration);
       } else {
-        const recoveredPrompt =
-          persistedWorkflowMode(candidate) === "background" &&
-          candidate.backgroundCleanupPlan
-            ? (() => {
-                const prompt = initialLampBackgroundMegaPrompt(
-                  candidate.backgroundCleanupPlan
-                );
-                prompt.version = operation.iteration === 2 ? 2 : 1;
-                if (operation.renderedPrompt) {
-                  prompt.rendered = operation.renderedPrompt;
-                }
-                return lampBackgroundPromptForRun(prompt);
-              })()
-            : (() => {
-                const prompt = initialMegaPrompt(
-                  persistedWorkflowMode(candidate)
-                );
-                prompt.version = operation.iteration;
-                if (operation.renderedPrompt) {
-                  prompt.rendered = operation.renderedPrompt;
-                }
-                return prompt;
-              })();
+        const recoveredMode = persistedWorkflowMode(candidate);
+        const recoveredPrompt = (() => {
+          const recoveredPlanVersion: 1 | 2 =
+            operation.iteration === 2 ? 2 : 1;
+          if (recoveredMode === "background" && candidate.backgroundCleanupPlan) {
+            const prompt = initialLampBackgroundMegaPrompt(
+              candidate.backgroundCleanupPlan
+            );
+            prompt.version = recoveredPlanVersion;
+            if (operation.renderedPrompt) {
+              prompt.rendered = operation.renderedPrompt;
+            }
+            return lampBackgroundPromptForRun(prompt);
+          }
+          if (recoveredMode === "beautify" && candidate.beautifyPlan) {
+            const prompt = initialLampBeautifyMegaPrompt(candidate.beautifyPlan);
+            prompt.version = recoveredPlanVersion;
+            if (operation.renderedPrompt) {
+              prompt.rendered = operation.renderedPrompt;
+            }
+            return lampBeautifyPromptForRun(prompt);
+          }
+          if (recoveredMode === "iris" && candidate.irisPlan) {
+            const prompt = initialLampIrisMegaPrompt(candidate.irisPlan);
+            prompt.version = recoveredPlanVersion;
+            if (operation.renderedPrompt) {
+              prompt.rendered = operation.renderedPrompt;
+            }
+            return lampIrisPromptForRun(prompt);
+          }
+          const prompt = initialMegaPrompt(
+            recoveredMode,
+            candidate.relightIntensity
+          );
+          prompt.version = operation.iteration;
+          if (operation.renderedPrompt) {
+            prompt.rendered = operation.renderedPrompt;
+          }
+          return prompt;
+        })();
         iteration = {
           index: operation.iteration,
           megaPrompt: recoveredPrompt,
@@ -1837,7 +1861,10 @@ function materializeServerResults(
                     prompt.rendered = execution.renderedPrompt;
                     return lampIrisPromptForRun(prompt);
                   })()
-                : initialMegaPrompt(lamp ? "lamp" : "flora");
+                : initialMegaPrompt(
+                    lamp ? "lamp" : "flora",
+                    materialized.relightIntensity
+                  );
         // RunExecution revision 1 binds the exact prompt bytes before any
         // Workflow contender can start. The provider journal is a secondary
         // replay record, not the source of truth for an as-yet queued run.
@@ -2763,6 +2790,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     approvePlanSpend?: unknown;
     workflowMode?: unknown;
     mock?: unknown;
+    relightIntensity?: unknown;
   };
   try {
     body = (await req.json()) as {
@@ -2771,6 +2799,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       approvePlanSpend?: unknown;
       workflowMode?: unknown;
       mock?: unknown;
+      relightIntensity?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "Body must be JSON." }, { status: 400 });
@@ -2833,13 +2862,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const workflowMode: WorkflowMode =
     body.workflowMode === "flora"
       ? "flora"
-      : body.workflowMode === "lamp"
-        ? "lamp"
-        : body.workflowMode === "background"
-          ? "background"
+      : body.workflowMode === "background"
+        ? "background"
+        : body.workflowMode === "beautify"
+          ? "beautify"
           : body.workflowMode === "iris"
             ? "iris"
-            : "beautify";
+            : "lamp";
+  if (
+    workflowMode === "lamp" &&
+    body.relightIntensity !== undefined &&
+    !isRelightIntensity(body.relightIntensity)
+  ) {
+    return NextResponse.json(
+      {
+        error: "relightIntensity must be a five-point step from 0 through 100.",
+      },
+      { status: 400 }
+    );
+  }
+  const relightIntensity =
+    workflowMode === "lamp"
+      ? normalizeRelightIntensity(body.relightIntensity)
+      : undefined;
   if (
     body.approveLiveSpend === true &&
     (workflowMode === "background" ||
@@ -2984,13 +3029,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (existing) {
     const existingExecution = await storage.getRunExecution(video.runId);
     const existingMode = persistedWorkflowMode(existing);
-    const canAdoptWorkflowMode =
+    const canRetargetPreparedRun =
       existingExecution === null &&
       existing.spendApproval === undefined &&
       (existing.providerOperations?.length ?? 0) === 0 &&
       existing.iterations.length === 0 &&
       existing.humanGrade === undefined;
-    if (existingMode !== workflowMode && !canAdoptWorkflowMode) {
+    if (existingMode !== workflowMode && !canRetargetPreparedRun) {
       return NextResponse.json(
         {
           error: `This saved clip already belongs to ${workflowModeLabel(
@@ -2998,6 +3043,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           )}. Upload it again as a fresh ${workflowModeLabel(
             workflowMode
           )} run so approvals and artifacts cannot be mixed.`,
+        },
+        { status: 409 }
+      );
+    }
+    if (
+      workflowMode === "lamp" &&
+      normalizeRelightIntensity(existing.relightIntensity) !==
+        relightIntensity &&
+      !canRetargetPreparedRun
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "This saved clip already has a different relight strength bound to it. Upload it again as a fresh run so approvals and generated artifacts cannot be mixed.",
         },
         { status: 409 }
       );
@@ -3058,12 +3117,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: 409 }
       );
     }
-    if (existingMode !== workflowMode) {
+    if (
+      existingMode !== workflowMode ||
+      (workflowMode === "lamp" &&
+        canRetargetPreparedRun &&
+        existing.relightIntensity !== relightIntensity)
+    ) {
       const workflow = workflowForMode(workflowMode);
       updated = {
         ...updated,
         workflowId: workflow.id,
         workflowMode,
+        ...(relightIntensity !== undefined ? { relightIntensity } : {}),
         nodeStates: freshNodeStates(workflowMode),
       };
       await storage.putRun(updated);
@@ -3173,11 +3238,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     return NextResponse.json({ ok: true, created: false, run: updated });
   }
-  const run = buildRun(canonicalVideo, Date.now(), workflowMode);
-  if (
-    body.approveLiveSpend === true ||
-    body.approvePlanSpend === true
-  ) {
+  const run = buildRun(
+    canonicalVideo,
+    Date.now(),
+    workflowMode,
+    relightIntensity
+  );
+  if (body.approveLiveSpend === true || body.approvePlanSpend === true) {
     run.spendApproval = createSpendApproval(
       canonicalVideo,
       "single",
@@ -3353,6 +3420,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   persisted.originalVideo = current.originalVideo;
   persisted.workflowId = current.workflowId;
   persisted.workflowMode = current.workflowMode;
+  persisted.relightIntensity = current.relightIntensity;
   persisted.providerOperations = current.providerOperations;
   clearProviderTrustMarkers(persisted);
   stripIncomingUnverifiedRealArtifacts(persisted);

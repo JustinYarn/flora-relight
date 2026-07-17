@@ -14,6 +14,7 @@ import {
   isLampBatchApprovalReplayTransition,
   LAMP_BATCH_USER_ACTION_REQUIRED_PREFIX,
 } from "../batch-execution-resume.ts";
+import { isRelightIntensity } from "../../relight-intensity.ts";
 
 const EXECUTION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
 const MAX_OPTIONAL_ID_LENGTH = 256;
@@ -155,6 +156,14 @@ export function assertBatchExecution(execution: unknown): BatchExecution {
     candidate.inputHash
   ) {
     throw new Error("Batch execution renderedPrompt does not match inputHash");
+  }
+  if (
+    candidate.relightIntensity !== undefined &&
+    !isRelightIntensity(candidate.relightIntensity)
+  ) {
+    throw new Error(
+      "Batch execution relightIntensity must be a five-point step from 0 through 100"
+    );
   }
   if (
     typeof candidate.status !== "string" ||
@@ -352,6 +361,7 @@ export function assertBatchExecutionTransition(
     candidate.batchId !== current.batchId ||
     candidate.executionId !== current.executionId ||
     candidate.workflowMode !== current.workflowMode ||
+    candidate.relightIntensity !== current.relightIntensity ||
     candidate.renderedPrompt !== current.renderedPrompt ||
     candidate.inputHash !== current.inputHash ||
     candidate.startedAt !== current.startedAt ||

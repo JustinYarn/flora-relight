@@ -11,6 +11,7 @@ import type { Batch } from "@/lib/types";
 import { isValidRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
 import { summarizeBatchExecution } from "@/lib/server/batch-execution-view";
+import { isRelightIntensity } from "@/lib/relight-intensity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -70,6 +71,18 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
         { status: 400 }
       );
     }
+    if (
+      b.relightIntensity !== undefined &&
+      !isRelightIntensity(b.relightIntensity)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Every relightIntensity must be a five-point step from 0 through 100.",
+        },
+        { status: 400 }
+      );
+    }
   }
 
   const storage = getStorage();
@@ -90,6 +103,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
         concurrency: current.concurrency,
         budgetUsd: current.budgetUsd,
         workflowMode: current.workflowMode,
+        relightIntensity: current.relightIntensity,
       };
     })
   );

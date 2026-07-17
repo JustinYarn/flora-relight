@@ -110,6 +110,7 @@ import {
 } from "@/lib/cost";
 import { initialMegaPrompt, nextMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { runWorkflowMode } from "@/lib/workflow-mode";
+import { normalizeRelightIntensity } from "@/lib/relight-intensity";
 import { extractFrames } from "@/lib/frames";
 import { clamp, LOW_CONFIDENCE, sleep, uid, verdictFor } from "@/lib/util";
 import type {
@@ -428,10 +429,11 @@ function mockLampEvalResult(
 async function runLampMockWorkflow(input: {
   runId: string;
   original: VideoAsset;
+  relightIntensity: number;
   instant: boolean;
   pace: (minMs?: number, maxMs?: number) => Promise<void>;
 }): Promise<void> {
-  const { runId, original, instant, pace } = input;
+  const { runId, original, relightIntensity, instant, pace } = input;
   const providers = getProviders("mock", { instant });
   const estimate = estimateLampRun(original.durationSec);
   const encode = (iteration: number) =>
@@ -482,7 +484,7 @@ async function runLampMockWorkflow(input: {
     setNode(runId, "compile", "running");
     const megaPrompt =
       iteration === 1 || !previousPrompt
-        ? initialMegaPrompt("lamp")
+        ? initialMegaPrompt("lamp", relightIntensity)
         : nextMegaPrompt(
             previousPrompt,
             previousResults.filter((result) => result.evalId !== "audio-integrity"),
@@ -1663,6 +1665,7 @@ export async function runWorkflow(
   if (!run0) return;
   const original = run0.originalVideo;
   const workflowMode = runWorkflowMode(run0);
+  const relightIntensity = normalizeRelightIntensity(run0.relightIntensity);
   const config = workflowForMode(workflowMode).config;
   // The instant demo run is mock by definition (synthetic clip, zero-latency
   // replay); everything else follows the store's hydrated mode.
@@ -1753,7 +1756,13 @@ export async function runWorkflow(
   }
   if (workflowMode === "lamp") {
     try {
-      await runLampMockWorkflow({ runId, original, instant, pace });
+      await runLampMockWorkflow({
+        runId,
+        original,
+        relightIntensity,
+        instant,
+        pace,
+      });
     } catch (error) {
       log(runId, "error", `Lamp demo error: ${errText(error)}`);
       mutateRun(runId, (run) => {

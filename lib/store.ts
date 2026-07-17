@@ -20,6 +20,10 @@ import type {
 } from "@/lib/types";
 import { uid } from "@/lib/util";
 import { estimateRun, formatUsd } from "@/lib/cost";
+import {
+  DEFAULT_RELIGHT_INTENSITY,
+  normalizeRelightIntensity,
+} from "@/lib/relight-intensity";
 import { workflowForMode } from "@/lib/workflow-def";
 import { runWorkflow } from "@/lib/engine";
 import { buildQueuedRun } from "@/lib/run-factory";
@@ -129,6 +133,8 @@ interface AppStore {
       approveLiveSpend?: boolean;
       approvePlanSpend?: boolean;
       workflowMode?: WorkflowMode;
+      relightIntensity?: number;
+      prepareOnly?: boolean;
     }
   ): Promise<string>;
   /**
@@ -165,13 +171,18 @@ interface AppStore {
   startBatch(
     videos: VideoAsset[],
     name?: string,
-    opts?: { budgetUsd?: number; workflowMode?: WorkflowMode }
+    opts?: {
+      budgetUsd?: number;
+      workflowMode?: WorkflowMode;
+      relightIntensity?: number;
+    }
   ): string;
   /** Persist a multi-file selection before the first upload starts. */
   createBatchDraft(
     items: Array<{ runId: string; label: string }>,
     name?: string,
-    workflowMode?: WorkflowMode
+    workflowMode?: WorkflowMode,
+    relightIntensity?: number
   ): string;
   /** Persist one upload transition so ready files survive refresh. */
   updateBatchUpload(
@@ -186,6 +197,7 @@ interface AppStore {
       budgetUsd?: number;
       approveLiveSpend?: boolean;
       workflowMode?: WorkflowMode;
+      relightIntensity?: number;
       /** Explicitly freeze/start only the ready members of an interrupted upload. */
       allowIncompleteUploads?: boolean;
     }
@@ -765,10 +777,20 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       approveLiveSpend?: boolean;
       approvePlanSpend?: boolean;
       workflowMode?: WorkflowMode;
+      relightIntensity?: number;
+      prepareOnly?: boolean;
     }
   ) => {
     const workflowMode = opts?.workflowMode ?? get().workflowMode;
     const mock = get().mode === "mock";
+    const savedRun = video.runId
+      ? get().runs.find((run) => run.id === video.runId)
+      : undefined;
+    const relightIntensity = normalizeRelightIntensity(
+      opts?.relightIntensity ??
+        savedRun?.relightIntensity ??
+        DEFAULT_RELIGHT_INTENSITY
+    );
     const response = await fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -778,6 +800,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         approvePlanSpend: opts?.approvePlanSpend,
         workflowMode,
         mock,
+        relightIntensity,
       }),
     });
     const payload = (await response.json().catch(() => null)) as
@@ -803,10 +826,16 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     set((state) => ({
       runs: [run, ...state.runs.filter((item) => item.id !== run.id)],
     }));
-    // Background preparation deliberately stops at a visible draft plan. The
-    // explicit approval action below owns either generation admission or the
-    // rare exact-source no-op settlement.
-    if (workflowMode === "background") {
+    // Plan preparation deliberately stops at a visible draft. The explicit
+    // approval actions below own either generation admission or the rare
+    // exact-source no-op settlement. Background retains its historical
+    // always-stop behavior, while the response flag safely covers Beautify
+    // and Iris drafts without changing approved-plan resume semantics.
+    if (
+      workflowMode === "background" ||
+      payload.planReviewRequired === true ||
+      opts?.prepareOnly === true
+    ) {
       return run.id;
     }
     // Live first-cut execution is owned by the durable server Workflow started
@@ -1143,7 +1172,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   createBatchDraft: (
     items,
     name = "Upload batch",
-    workflowMode = get().workflowMode
+    workflowMode = get().workflowMode,
+    relightIntensity = DEFAULT_RELIGHT_INTENSITY
   ) => {
     const now = Date.now();
     const batch: Batch = {
@@ -1155,6 +1185,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       concurrency: BATCH_CONCURRENCY,
       status: items.length === 0 ? "failed" : "uploading",
       workflowMode,
+      relightIntensity: normalizeRelightIntensity(relightIntensity),
       uploads: items.map((item) => ({
         ...item,
         status: "pending" as const,
@@ -1202,6 +1233,11 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         allowIncompleteUploads: opts?.allowIncompleteUploads,
         workflowMode:
           opts?.workflowMode ?? existing.workflowMode ?? "flora",
+        relightIntensity: normalizeRelightIntensity(
+          opts?.relightIntensity ??
+            existing.relightIntensity ??
+            DEFAULT_RELIGHT_INTENSITY
+        ),
       }),
     });
     const payload = (await response.json().catch(() => null)) as
@@ -1335,8 +1371,11 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     }
     const now = Date.now();
     const workflowMode = opts?.workflowMode ?? get().workflowMode;
+    const relightIntensity = normalizeRelightIntensity(
+      opts?.relightIntensity ?? DEFAULT_RELIGHT_INTENSITY
+    );
     const batchRuns = videos.map((video) =>
-      buildQueuedRun(video, now, workflowMode)
+      buildQueuedRun(video, now, workflowMode, relightIntensity)
     );
     const batch: Batch = {
       id: uid("batch"),
@@ -1348,6 +1387,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       status: batchRuns.length === 0 ? "done" : "running",
       budgetUsd: opts?.budgetUsd,
       workflowMode,
+      relightIntensity,
     };
     set((state) => ({
       runs: [...batchRuns, ...state.runs],

@@ -33,6 +33,7 @@ import { confirmedLampBatchActualMicros } from "@/lib/server/lamp-batch-accounti
 import { reconcileDeadWorkflowExecution } from "@/lib/server/dead-workflow-recovery";
 import { getStorage, type StorageDriver } from "@/lib/server/storage";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
+import { normalizeRelightIntensity } from "@/lib/relight-intensity";
 import type {
   BatchExecution,
   BatchExecutionMember,
@@ -247,7 +248,10 @@ function memberExecutionMatches(
       execution.executionId ===
         batchMemberExecutionId(batch.batchId, runId, mode) &&
       execution.source === "batch" &&
-      execution.batchId === batch.batchId
+      execution.batchId === batch.batchId &&
+      (mode !== "lamp" ||
+        normalizeRelightIntensity(execution.relightIntensity) ===
+          normalizeRelightIntensity(batch.relightIntensity))
   );
 }
 
@@ -627,6 +631,13 @@ async function ensureMemberEnqueued(
     source: "batch",
     batchId: input.batchId,
     renderedPrompt: execution.renderedPrompt,
+    ...(batchExecutionMode(execution) === "lamp"
+      ? {
+          relightIntensity: normalizeRelightIntensity(
+            execution.relightIntensity
+          ),
+        }
+      : {}),
   });
   if (!memberExecutionMatches(launch.execution, execution, runId)) {
     throw new Error(`A different child execution already owns run ${runId}.`);
@@ -745,6 +756,13 @@ async function failUnstartedRunExecution(
       iteration: 0,
       renderedPrompt,
       inputHash: runExecutionInputHash(renderedPrompt),
+      ...(batchExecutionMode(batch) === "lamp"
+        ? {
+            relightIntensity: normalizeRelightIntensity(
+              batch.relightIntensity
+            ),
+          }
+        : {}),
       revision: 1,
       startedAt: now,
       updatedAt: now,

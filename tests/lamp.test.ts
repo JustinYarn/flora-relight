@@ -706,6 +706,7 @@ test("Lamp batch mode and reservation plan are immutable after durable creation"
     batchId: "batch_immutable_lamp",
     executionId: "lamp-batch:batch_immutable_lamp",
     workflowMode: "lamp",
+    relightIntensity: 75,
     renderedPrompt,
     inputHash: createHash("sha256").update(renderedPrompt, "utf8").digest("hex"),
     status: "queued",
@@ -733,8 +734,25 @@ test("Lamp batch mode and reservation plan are immutable after durable creation"
         {
           ...execution,
           workflowMode: "flora",
+          relightIntensity: 100,
           status: "running",
           workflowRunId: "workflow_immutable_lamp",
+          revision: 2,
+          updatedAt: 2,
+        },
+        1
+      ),
+    /identity and dispatch limits are immutable/
+  );
+  assert.throws(
+    () =>
+      assertBatchExecutionTransition(
+        execution,
+        {
+          ...execution,
+          relightIntensity: 100,
+          status: "running",
+          workflowRunId: "workflow_intensity_flip",
           revision: 2,
           updatedAt: 2,
         },

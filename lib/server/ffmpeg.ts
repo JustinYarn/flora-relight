@@ -545,6 +545,130 @@ export async function extractJpegFrame(
 }
 
 // ---------------------------------------------------------------------------
+// relight luma measurement (deterministic, zero provider cost)
+// ---------------------------------------------------------------------------
+
+/** Center crop treated as the subject proxy in webcam framing. */
+const LUMA_CENTER_WIDTH_FRACTION = 0.5;
+const LUMA_CENTER_HEIGHT_FRACTION = 0.6;
+const LUMA_CENTER_AREA_FRACTION =
+  LUMA_CENTER_WIDTH_FRACTION * LUMA_CENTER_HEIGHT_FRACTION;
+/** signalstats YAVG floor before log2 — black frames must not explode stops. */
+const LUMA_FLOOR = 1;
+
+interface RegionLumaSamples {
+  full: number[];
+  center: number[];
+}
+
+function parseYavgSamples(stdout: string): number[] {
+  const samples: number[] = [];
+  for (const line of stdout.split("\n")) {
+    const match = line.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/);
+    if (match) samples.push(Number(match[1]));
+  }
+  return samples;
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) {
+    throw new Error("Luma measurement produced no samples.");
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+async function sampleRegionLuma(videoPath: string): Promise<RegionLumaSamples> {
+  const tools = await getTools();
+  const passes = await Promise.all([
+    runOrThrow(tools.ffmpeg, [
+      "-i", videoPath,
+      "-vf", "fps=1,signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-",
+      "-f", "null", "-",
+    ]),
+    runOrThrow(tools.ffmpeg, [
+      "-i", videoPath,
+      "-vf",
+      `fps=1,crop=iw*${LUMA_CENTER_WIDTH_FRACTION}:ih*${LUMA_CENTER_HEIGHT_FRACTION}:(iw-ow)/2:(ih-oh)/2,signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-`,
+      "-f", "null", "-",
+    ]),
+  ]);
+  const full = parseYavgSamples(passes[0].stdout);
+  const center = parseYavgSamples(passes[1].stdout);
+  if (full.length === 0 || center.length === 0) {
+    throw new Error("Luma measurement returned no signalstats samples.");
+  }
+  return { full, center };
+}
+
+function regionMedians(samples: RegionLumaSamples): {
+  full: number;
+  center: number;
+  border: number;
+} {
+  const paired = Math.min(samples.full.length, samples.center.length);
+  const borders: number[] = [];
+  for (let i = 0; i < paired; i += 1) {
+    // The border (background proxy) is the exact area-weighted complement of
+    // the center crop, so it needs no third decode pass.
+    borders.push(
+      (samples.full[i] - LUMA_CENTER_AREA_FRACTION * samples.center[i]) /
+        (1 - LUMA_CENTER_AREA_FRACTION)
+    );
+  }
+  return {
+    full: Math.max(LUMA_FLOOR, median(samples.full)),
+    center: Math.max(LUMA_FLOOR, median(samples.center)),
+    border: Math.max(LUMA_FLOOR, median(borders)),
+  };
+}
+
+export interface RelightLumaMeasurementResult {
+  globalStops: number;
+  centerStops: number;
+  borderStops: number;
+  sampleCount: number;
+}
+
+/**
+ * Measure a candidate relight against its source as region luma deltas in
+ * stops. Deterministic by construction: fixed 1fps sampling, fixed center
+ * crop, medians across samples — same two files always produce the same
+ * numbers, so durable replays and prompt recompiles stay byte-stable. Zero
+ * provider cost; callers treat failures as advisory (measurement is never
+ * allowed to block a billed run).
+ */
+export async function measureRelightLuma(
+  sourcePath: string,
+  candidatePath: string
+): Promise<RelightLumaMeasurementResult> {
+  const [source, candidate] = await Promise.all([
+    sampleRegionLuma(sourcePath),
+    sampleRegionLuma(candidatePath),
+  ]);
+  const sourceMedians = regionMedians(source);
+  const candidateMedians = regionMedians(candidate);
+  const stops = (cand: number, src: number) => {
+    const value = Math.log2(cand / src);
+    return Number(value.toFixed(3));
+  };
+  return {
+    globalStops: stops(candidateMedians.full, sourceMedians.full),
+    centerStops: stops(candidateMedians.center, sourceMedians.center),
+    borderStops: stops(candidateMedians.border, sourceMedians.border),
+    sampleCount: Math.min(
+      source.full.length,
+      source.center.length,
+      candidate.full.length,
+      candidate.center.length
+    ),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // trim / demux / remux
 // ---------------------------------------------------------------------------
 

@@ -2,6 +2,7 @@ import "server-only";
 
 import { start } from "workflow/api";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
+import { normalizeRelightIntensity } from "@/lib/relight-intensity";
 import {
   compileLampFinalPrompt,
   isLampEvaluationArtifact,
@@ -67,9 +68,11 @@ export interface EnqueueRunExecutionInput {
   batchId?: string;
   /** Batch coordinators bind one exact prompt for every member. */
   renderedPrompt?: string;
-  /** Lamp Background binds the exact approved planning journal and plan hash. */
+  /** Plan-first modes bind the exact approved planning journal and plan hash. */
   planOperationId?: string;
   approvedPlanHash?: string;
+  /** Auditable Lamp target represented by renderedPrompt. */
+  relightIntensity?: number;
 }
 
 export interface EnqueueRunExecutionResult {
@@ -372,6 +375,19 @@ export async function enqueueRunExecution(
   const run = await storage.getRun(input.runId);
   if (!run) throw new Error("Run not found.");
   const workflowMode = workflowModeFromExecutionId(input.executionId);
+  const lamp = workflowMode === "lamp";
+  const relightIntensity = lamp
+    ? normalizeRelightIntensity(
+        input.relightIntensity ?? run.relightIntensity
+      )
+    : undefined;
+  if (
+    lamp &&
+    input.relightIntensity !== undefined &&
+    relightIntensity !== normalizeRelightIntensity(run.relightIntensity)
+  ) {
+    throw new Error("The requested relight strength does not match this run.");
+  }
   let current = await storage.getRunExecution(input.runId);
   const boundRenderedPrompt =
     input.renderedPrompt ?? current?.renderedPrompt;
@@ -379,14 +395,18 @@ export async function enqueueRunExecution(
     input.planOperationId ?? current?.planOperationId;
   const boundApprovedPlanHash =
     input.approvedPlanHash ?? current?.approvedPlanHash;
+  const planMode =
+    workflowMode === "background" ||
+    workflowMode === "beautify" ||
+    workflowMode === "iris";
   if (
-    workflowMode === "background" &&
+    planMode &&
     (!boundRenderedPrompt ||
       !boundPlanOperationId ||
       !boundApprovedPlanHash)
   ) {
     throw new Error(
-      "Lamp Background execution requires the server-compiled prompt and exact approved-plan binding."
+      "Plan-based Lamp execution requires the server-compiled prompt and exact approved-plan binding."
     );
   }
   if (workflowMode === "background") {
@@ -395,6 +415,30 @@ export async function enqueueRunExecution(
       boundPlanOperationId!
     );
     await validateLampBackgroundPlanBinding({
+      run,
+      planOperation,
+      planOperationId: boundPlanOperationId,
+      approvedPlanHash: boundApprovedPlanHash,
+      renderedPrompt: boundRenderedPrompt!,
+    });
+  } else if (workflowMode === "beautify") {
+    const planOperation = await storage.getPaidOperation(
+      input.runId,
+      boundPlanOperationId!
+    );
+    await validateLampBeautifyPlanBinding({
+      run,
+      planOperation,
+      planOperationId: boundPlanOperationId,
+      approvedPlanHash: boundApprovedPlanHash,
+      renderedPrompt: boundRenderedPrompt!,
+    });
+  } else if (workflowMode === "iris") {
+    const planOperation = await storage.getPaidOperation(
+      input.runId,
+      boundPlanOperationId!
+    );
+    await validateLampIrisPlanBinding({
       run,
       planOperation,
       planOperationId: boundPlanOperationId,
@@ -421,7 +465,15 @@ export async function enqueueRunExecution(
       current.approvedPlanHash !== boundApprovedPlanHash
     ) {
       throw new Error(
-        "A different cleanup plan is already bound to this execution."
+        "A different approved plan is already bound to this execution."
+      );
+    }
+    if (
+      lamp &&
+      normalizeRelightIntensity(current.relightIntensity) !== relightIntensity
+    ) {
+      throw new Error(
+        "A different relight strength is already bound to this run."
       );
     }
     if (current.status === "user_action_required") {
@@ -430,6 +482,18 @@ export async function enqueueRunExecution(
           !hasReusableLampApproval(run, input.source, input.batchId)) ||
         (workflowMode === "background" &&
           !hasReusableLampBackgroundApproval(
+            run,
+            input.source,
+            input.batchId
+          )) ||
+        (workflowMode === "beautify" &&
+          !hasReusableLampBeautifyApproval(
+            run,
+            input.source,
+            input.batchId
+          )) ||
+        (workflowMode === "iris" &&
+          !hasReusableLampIrisApproval(
             run,
             input.source,
             input.batchId
@@ -528,7 +592,10 @@ export async function enqueueRunExecution(
   const now = Date.now();
   const canonicalPrompt =
     input.renderedPrompt ??
-    initialMegaPrompt(workflowMode === "lamp" ? "lamp" : "flora").rendered;
+    initialMegaPrompt(
+      lamp ? "lamp" : "flora",
+      relightIntensity
+    ).rendered;
   const created = current
     ? { created: false as const, execution: current }
     : await storage.createRunExecution({
@@ -547,6 +614,7 @@ export async function enqueueRunExecution(
         iteration: 0,
         renderedPrompt: canonicalPrompt,
         inputHash: runExecutionInputHash(canonicalPrompt),
+        ...(relightIntensity !== undefined ? { relightIntensity } : {}),
         revision: 1,
         startedAt: now,
         updatedAt: now,
