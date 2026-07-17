@@ -37,7 +37,9 @@ import {
   LEGACY_V7_BEAUTIFY_BASE_PROMPT,
   LEGACY_V8_BEAUTIFY_BASE_PROMPT,
   LEGACY_V9_BEAUTIFY_BASE_PROMPT,
+  LEGACY_V10_BEAUTIFY_BASE_PROMPT,
   renderLampBeautifyCorrection,
+  renderLampBeautifyInitialBrief,
   renderLampBeautifyMegaPrompt,
   renderLegacyLampBeautifyCorrectionV1,
   renderLegacyLampBeautifyCorrectionV2,
@@ -52,6 +54,7 @@ import {
   renderLegacyLampBeautifyPlanBlockV7,
   renderLegacyLampBeautifyPlanBlockV8,
   renderLegacyLampBeautifyPlanBlockV9,
+  renderLegacyLampBeautifyPlanBlockV10,
 } from "../lib/prompts/lamp-beautify.ts";
 import { BEAUTIFY_WORKFLOW } from "../lib/beautify-workflow-def.ts";
 import {
@@ -444,10 +447,21 @@ test("the final compiler preserves v1 bytes outside the header and corrections",
   );
   assert.equal(final.version, 2);
   assert.equal(final.corrections.length, 0);
-  const restored = final.rendered.replace(
-    "=== LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v2 ===",
-    "=== LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v1 ==="
-  );
+  // v1 carries the standing delivery brief in the corrections slot; v2
+  // replaces exactly that slot (here with the honest empty placeholder) and
+  // the header digit, and nothing else.
+  assert.match(initial.rendered, /STANDING DELIVERY BRIEF — first pass/);
+  assert.doesNotMatch(final.rendered, /STANDING DELIVERY BRIEF/);
+  assert.match(final.rendered, /\(none — first pass or no safe structured correction was available\)/);
+  const restored = final.rendered
+    .replace(
+      "=== LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v2 ===",
+      "=== LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v1 ==="
+    )
+    .replace(
+      "(none — first pass or no safe structured correction was available)",
+      renderLampBeautifyInitialBrief(plan)
+    );
   assert.equal(restored, initial.rendered);
 
   // A swapped plan cannot ride an existing persisted prompt.
@@ -687,7 +701,10 @@ test("the warmth rewrite: hair locked, expression-warmth is the headline", () =>
   assert.match(rendered, /Do not rejuvenate beyond a few well-rested years/);
   assert.match(rendered, /Do not touch the hair in any way/);
   assert.match(rendered, /Hair is fully locked/);
-  assert.match(rendered, /Peak-health skin/);
+  assert.match(rendered, /Skin lit by well-being/);
+  assert.match(rendered, /STANDING DELIVERY BRIEF — first pass/);
+  assert.match(rendered, /warmly crinkled, laughing eyes/);
+  assert.match(rendered, /delighted: an unmistakably joyful, expressive transformation/);
   assert.match(rendered, /Do not break lip-sync/);
   assert.match(rendered, /never a held grin through speech/i);
   // Elevation is constant with amplified response — the anti-snap-back
@@ -706,7 +723,7 @@ test("the warmth rewrite: hair locked, expression-warmth is the headline", () =>
   assert.match(rendered, /DELIVERY BAR:/);
   assert.match(rendered, /PRESERVATION BAR:/);
   assert.match(rendered, /Never apply a beauty-shot package/);
-  assert.match(rendered, /Expression moves muscles, never bones/);
+  assert.match(rendered, /expression moves muscles, never bones/i);
   assert.match(rendered, /a drifted shirt, changed hair, or blurred room is non-compliant/);
   assert.match(rendered, /never WHETHER the approved change happens/);
   assert.match(rendered, /mistake the result for the source at a glance/);
@@ -856,6 +873,10 @@ test("frozen generations are byte-pinned — an in-place edit fails here first",
     pin(LEGACY_V9_BEAUTIFY_BASE_PROMPT),
     "49b346dfe3347867d0041a56670f10d0229ecc58689a683809cc5b74bf35c597"
   );
+  assert.equal(
+    pin(LEGACY_V10_BEAUTIFY_BASE_PROMPT),
+    "0fee0d3f2c3787f9670aa12ea86568b3d059f6ee510754d08113c5008adbf1c2"
+  );
 
   // The sixth generation carries only the active catalog, so its block pin
   // uses an active-only fixture.
@@ -895,6 +916,10 @@ test("frozen generations are byte-pinned — an in-place edit fails here first",
   assert.equal(
     pin(renderLegacyLampBeautifyPlanBlockV9(pinPlanV6)),
     "fe2f08a9ea2fff9e2c0a41880f3236921c2c578e12beaac9db412106af5d28da"
+  );
+  assert.equal(
+    pin(renderLegacyLampBeautifyPlanBlockV10(pinPlanV6)),
+    "44e50969840f99a6b1314a6aa52cc45a5bb9cff60df734c774a2e065ecf1ee72"
   );
   const v2Vocabulary = (
     [

@@ -24,9 +24,9 @@ function formatReservationUsd(usd: number): string {
 }
 
 const INTENSITY_LABEL: Record<1 | 2 | 3, string> = {
-  1: "intensity 1 · subtle",
-  2: "intensity 2 · noticeable",
-  3: "intensity 3 · polished",
+  1: "intensity 1 · brightened",
+  2: "intensity 2 · delighted",
+  3: "intensity 3 · radiant",
 };
 
 function categoryTitle(id: string): string {
@@ -180,7 +180,8 @@ function ApprovalCopy({ plan }: { plan: LampBeautifyPlan }) {
       Approval freezes these classifications. Both generations may apply only
       the approved enhancements at their approved intensities, and must keep
       identity, permanent features, performance, wardrobe, other people, the
-      background, lighting, camera, framing, and source audio unchanged.
+      background, camera, framing, and source audio unchanged — lighting may
+      lift gently on the subject only.
     </p>
   );
 }
@@ -299,9 +300,9 @@ export function BeautifyPlanReview({
                 {(
                   [
                     [null, "As planned"],
-                    [1, "1 · Polished"],
-                    [2, "2 · Elevated"],
-                    [3, "3 · Glow-up"],
+                    [1, "1 · Brightened"],
+                    [2, "2 · Delighted"],
+                    [3, "3 · Radiant"],
                   ] as Array<[LampBeautifyIntensity | null, string]>
                 ).map(([value, label]) => {
                   const selected = intensityOverride === value;
@@ -329,10 +330,10 @@ export function BeautifyPlanReview({
               {intensityOverride === null
                 ? "Approving with the planner's proposed intensities."
                 : intensityOverride === 1
-                  ? "Every approved item at 1 — a clear, flattering lift, held uniformly for the whole video."
+                  ? "Every approved item at 1 — a visibly happier, warmer version, held uniformly for the whole video."
                   : intensityOverride === 2
-                    ? "Every approved item at 2 — a strong, unmistakable transformation on its own, held uniformly for the whole video."
-                    : "Every approved item at 3 — the full glow-up: the most lively, luminous, appealing natural version of this person."}
+                    ? "Every approved item at 2 — unmistakably joyful and expressive on its own, held uniformly for the whole video."
+                    : "Every approved item at 3 — radiant: this person at their happiest, most vital natural self."}
             </p>
           </div>
         ) : null}

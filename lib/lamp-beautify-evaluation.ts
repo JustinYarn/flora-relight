@@ -656,9 +656,9 @@ function evaluatorPlanProjection(plan: LampBeautifyPlan): unknown {
 }
 
 const INTENSITY_EXPECTATION: Record<1 | 2 | 3, string> = {
-  1: "polished — a clear, flattering lift, plainly present on its own and held uniformly for the whole duration; a change you must hunt for is undershoot",
-  2: "elevated — a strong, unmistakable transformation ON ITS OWN, the person plainly upgraded with no source needed for comparison, held uniformly for the whole duration; a lift that is only visible side-by-side undershot this band",
-  3: "glow-up — the most lively, luminous, appealing natural version of this person, held uniformly for the whole duration; caricature or physically implausible exaggeration is overshoot exactly as subtlety is undershoot",
+  1: "brightened — a visibly happier, warmer version of the person, readable at a glance and held uniformly for the whole duration; a change you must hunt for is undershoot",
+  2: "delighted — an unmistakably joyful, expressive transformation ON ITS OWN, the person visibly glad to be here with no source needed for comparison, held uniformly for the whole duration; a lift only visible side-by-side undershot this band",
+  3: "radiant — this person at their happiest, most vital natural self, joy in the eyes and warmth in every frame, held uniformly for the whole duration; caricature or physically implausible exaggeration is overshoot exactly as subtlety is undershoot",
 };
 
 export function renderLampBeautifyHolisticEvaluatorPrompt(input: {
