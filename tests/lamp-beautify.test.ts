@@ -34,6 +34,7 @@ import {
   LEGACY_V4_BEAUTIFY_BASE_PROMPT,
   LEGACY_V5_BEAUTIFY_BASE_PROMPT,
   LEGACY_V6_BEAUTIFY_BASE_PROMPT,
+  LEGACY_V7_BEAUTIFY_BASE_PROMPT,
   renderLampBeautifyCorrection,
   renderLampBeautifyMegaPrompt,
   renderLegacyLampBeautifyCorrectionV1,
@@ -44,6 +45,7 @@ import {
   renderLegacyLampBeautifyPlanBlockV3,
   renderLegacyLampBeautifyPlanBlockV5,
   renderLegacyLampBeautifyPlanBlockV6,
+  renderLegacyLampBeautifyPlanBlockV7,
 } from "../lib/prompts/lamp-beautify.ts";
 import { BEAUTIFY_WORKFLOW } from "../lib/beautify-workflow-def.ts";
 import {
@@ -828,6 +830,10 @@ test("frozen generations are byte-pinned — an in-place edit fails here first",
     pin(LEGACY_V6_BEAUTIFY_BASE_PROMPT),
     "b3604976a58f06801ce7f0a7f9453ace07cbd913be2c85c95badf7a9060be0e9"
   );
+  assert.equal(
+    pin(LEGACY_V7_BEAUTIFY_BASE_PROMPT),
+    "860ad5b6f4c783c3da91f6993b9a856b3db5f02f4991bef6d381146888a65d4d"
+  );
 
   // The sixth generation carries only the active catalog, so its block pin
   // uses an active-only fixture.
@@ -855,6 +861,10 @@ test("frozen generations are byte-pinned — an in-place edit fails here first",
   assert.equal(
     pin(renderLegacyLampBeautifyPlanBlockV6(pinPlanV6)),
     "e6647e44ecd6770f3d754e2b3747b7ce0e8189db46d9091c76b134cdb6dc7cb5"
+  );
+  assert.equal(
+    pin(renderLegacyLampBeautifyPlanBlockV7(pinPlanV6)),
+    "4f1e159fe88f0cc31bee395364b21605b0155644a85964e91bed187375b31be9"
   );
   const v2Vocabulary = (
     [
