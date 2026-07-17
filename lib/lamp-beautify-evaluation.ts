@@ -73,10 +73,10 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     method: "holistic-judge",
     hardGate: true,
     weight: 0.16,
-    passThreshold: 90,
-    borderlineThreshold: 75,
+    passThreshold: 80,
+    borderlineThreshold: 65,
     allowedCorrectionActions: ["restore-identity"],
-    rubric: `Compare facial geometry, bone structure, distinctive features, apparent age, and recognizability throughout the complete source and candidate. Approved enhancement grants no permission to change who the person is: any frame that reads as a different, younger-by-design, or structurally reshaped person fails. An approved expression-warmth entry may read gently warmer and more engaged than the source; that steady mood shift alone is not an identity violation, but exaggerated or theatrical emotion, caricature, a pasted grin, or geometry change is. Judge the worst moment, especially under head motion and expression changes.`,
+    rubric: `Compare facial geometry, bone structure, distinctive features, and recognizability throughout the complete source and candidate. This workflow BEAUTIFIES: a flattering, fresher rendering of the same features — including reading a few well-rested years younger — is the product, not a violation, and must not be down-scored. Fail only when the person reads as a DIFFERENT individual, a different life stage, or structurally reshaped (changed bone structure, face shape, eye size, nose, or jaw). Approved expressiveness may read strongly warmer and more animated than the source; caricature, theatrical emotion a real person would not produce, or a pasted grin still fails. Judge the worst moment, especially under head motion and expression changes.`,
   },
   {
     id: "enhancement-adherence",
@@ -105,10 +105,10 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     method: "holistic-judge",
     hardGate: true,
     weight: 0.13,
-    passThreshold: 80,
-    borderlineThreshold: 65,
+    passThreshold: 70,
+    borderlineThreshold: 55,
     allowedCorrectionActions: ["complete-approved-enhancement"],
-    rubric: `Judge whether the subject reads as the same person on their best, most enthusiastic day at normal playback size: noticeably brighter, warmer, and fresher than the source. Calibrate expectations to the plan's intensities: with any item approved at 2 or 3, a result that is hard to distinguish from the source is a hard failure of this workflow's one job, scored accordingly. Do not reward maximal retouching or a forced mood: the best result is convincingly transformed while remaining entirely plausible as real footage of a genuinely good day.`,
+    rubric: `Judge whether the subject reads as a genuinely beautified, more appealing version of the same person at normal playback size: livelier, healthier, fresher, and more magnetic than the source. Calibrate expectations to the plan's intensities: with any item approved at 2 or 3, a result that is hard to distinguish from the source is a hard failure of this workflow's one job, scored accordingly. Grade the transformation generously once it is plainly visible and natural — this check exists to catch invisible or implausible results, not to demand perfection of an already-strong glow-up.`,
   },
   {
     id: "natural-skin-texture",
@@ -119,24 +119,24 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     method: "holistic-judge",
     hardGate: true,
     weight: 0.1,
-    passThreshold: 88,
-    borderlineThreshold: 74,
+    passThreshold: 75,
+    borderlineThreshold: 60,
     allowedCorrectionActions: ["repair-skin-texture"],
-    rubric: `Inspect skin at speech, motion, and lighting extremes. Enhancement may reduce temporary blemishes and shine and may refine the visual appearance of pores at the approved intensity, but real texture, complexion micro-variation, natural specular response, and the source's own noise character must survive everywhere. Plastic, waxy, blurred, fully poreless, denoised-clean, or uniformly matte skin fails, as does invented texture or synthetic grain that does not exist in the source.`,
+    rubric: `Inspect skin at speech, motion, and lighting extremes. This workflow beautifies: skin may be visibly perfected — smoothed, evened, brightened, pores refined, fine lines softened at the approved intensity — and that flattering finish must not be down-scored while the skin still reads as real. Fail only when it tips into a synthetic surface: plastic, waxy, fully poreless, denoised-clean, or uniformly matte skin, a mask-like face, invented texture, or synthetic grain that does not exist in the source.`,
   },
   {
     id: "permanent-features-integrity",
     name: "Permanent features kept",
     category: "identity",
     description:
-      "Moles, scars, freckles, birthmarks, age-consistent wrinkles, and facial-hair pattern are untouched.",
+      "Moles, scars, freckles, birthmarks, and facial-hair pattern are untouched; deep character lines soften at most.",
     method: "holistic-judge",
     hardGate: true,
     weight: 0.08,
-    passThreshold: 90,
-    borderlineThreshold: 75,
+    passThreshold: 85,
+    borderlineThreshold: 70,
     allowedCorrectionActions: ["restore-identity"],
-    rubric: `Build an inventory of permanent identity features — moles, scars, freckles, birthmarks, wrinkles consistent with age, facial-hair pattern — from the source, and verify each survives in the candidate at every corresponding moment. Hair is fully locked in this workflow: any change to hairstyle, hairline, volume, color, or even stray flyaways fails. Fading, shrinking, or removing any permanent feature fails even when the overall result looks natural; these features are identity, not imperfections.`,
+    rubric: `Build an inventory of permanent identity marks — moles, scars, freckles, birthmarks, facial-hair pattern — from the source, and verify each survives in the candidate at every corresponding moment; fading, shrinking, or removing any of them fails even when the overall result looks natural. Hair is fully locked in this workflow: any change to hairstyle, hairline, volume, color, or even stray flyaways fails. Wrinkles are graded differently in this beautifying workflow: fine lines may soften visibly and deep character lines may soften as part of an approved enhancement — fail on wrinkles only when deep character lines VANISH entirely or the face loses its age-consistent structure.`,
   },
   {
     id: "motion-lipsync",
@@ -656,9 +656,9 @@ function evaluatorPlanProjection(plan: LampBeautifyPlan): unknown {
 }
 
 const INTENSITY_EXPECTATION: Record<1 | 2 | 3, string> = {
-  1: "present — a clear but gentle lift, plainly there in a side-by-side and held uniformly for the whole duration; a change you must hunt for is undershoot",
-  2: "expressive — strong and unmistakable ON ITS OWN, with no source needed for comparison, held uniformly for the whole duration; a lift that is only visible side-by-side undershot this band",
-  3: "vivid — the maximum natural version of this person, dramatic yet believable, held uniformly for the whole duration; caricature or physically implausible exaggeration is overshoot exactly as subtlety is undershoot",
+  1: "polished — a clear, flattering lift, plainly present on its own and held uniformly for the whole duration; a change you must hunt for is undershoot",
+  2: "elevated — a strong, unmistakable transformation ON ITS OWN, the person plainly upgraded with no source needed for comparison, held uniformly for the whole duration; a lift that is only visible side-by-side undershot this band",
+  3: "glow-up — the most lively, luminous, appealing natural version of this person, held uniformly for the whole duration; caricature or physically implausible exaggeration is overshoot exactly as subtlety is undershoot",
 };
 
 export function renderLampBeautifyHolisticEvaluatorPrompt(input: {

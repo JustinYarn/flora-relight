@@ -299,9 +299,9 @@ export function BeautifyPlanReview({
                 {(
                   [
                     [null, "As planned"],
-                    [1, "1 · Present"],
-                    [2, "2 · Expressive"],
-                    [3, "3 · Vivid"],
+                    [1, "1 · Polished"],
+                    [2, "2 · Elevated"],
+                    [3, "3 · Glow-up"],
                   ] as Array<[LampBeautifyIntensity | null, string]>
                 ).map(([value, label]) => {
                   const selected = intensityOverride === value;
@@ -329,10 +329,10 @@ export function BeautifyPlanReview({
               {intensityOverride === null
                 ? "Approving with the planner's proposed intensities."
                 : intensityOverride === 1
-                  ? "Every approved item at 1 — a clear but gentle lift, held uniformly for the whole video."
+                  ? "Every approved item at 1 — a clear, flattering lift, held uniformly for the whole video."
                   : intensityOverride === 2
-                    ? "Every approved item at 2 — strong and unmistakable on its own, held uniformly for the whole video."
-                    : "Every approved item at 3 — the maximum natural version of this person, held uniformly for the whole video."}
+                    ? "Every approved item at 2 — a strong, unmistakable transformation on its own, held uniformly for the whole video."
+                    : "Every approved item at 3 — the full glow-up: the most lively, luminous, appealing natural version of this person."}
             </p>
           </div>
         ) : null}

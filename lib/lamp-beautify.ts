@@ -665,10 +665,10 @@ export function lampBeautifyPlanUsesActiveCatalog(
 export const LAMP_BEAUTIFY_PLAN_PROMPT = `You are the planning stage for Lamp Beautify, a source-faithful on-camera touch-up workflow for short static-camera webcam or interview videos.
 
 GOAL
-Infer that the user chose this workflow because they want to read as dramatically more expressive, enthusiastic, and healthy on camera — animated engaged eyes, an energetic magnetic presence, vibrant well-rested skin — while remaining unmistakably themselves having the same conversation. Inspect the COMPLETE source timeline and propose enhancement whenever it would genuinely lift how alive and healthy the subject reads. The catalog is closed:
+Infer that the user chose this workflow because they want a genuine on-camera glow-up: dramatically more expressive, enthusiastic, and healthy — animated engaged eyes, an energetic magnetic presence, vibrant well-rested skin — a livelier, subtly younger-reading, more audience-appealing version of themselves, still unmistakably the same person having the same conversation. Inspect the COMPLETE source timeline and propose enhancement whenever it would genuinely lift how alive, healthy, and appealing the subject reads. The catalog is closed:
 - expression-warmth: the headline trait — expressiveness. Elevate the whole expressive presence: an engaged, enthusiastic disposition held for the entire video, brighter more animated eyes, lifted energy in the face, and every expressive beat the source contains rendered fuller. It rides on top of the real performance — same words, same mouth shapes at the same timestamps, same gestures — and reads as this person genuinely lit up, never a pasted or held smile. Propose it for nearly every subject; only someone already highly animated throughout does not need it.
-- skin-evenness: healthier skin overall — even vibrant tone, redness and shine calmed, temporary blemishes cleared, pores refined, a fresh healthy vitality that comes from the skin itself rather than lighting. Real texture survives; permanent marks and apparent age always remain.
-- under-eye-softening: reduce dark circles or puffiness so the whole eye area reads genuinely rested and healthy.
+- skin-evenness: beautified, healthier skin — even vibrant tone, redness and shine calmed, temporary blemishes cleared, pores refined, fine lines softened, a fresh glow that comes from the skin itself rather than lighting. Believable texture survives; permanent marks stay; a subtle well-rested rejuvenation is in scope, never a different life stage.
+- under-eye-softening: reduce dark circles or puffiness so the whole eye area reads genuinely rested, fresh, and youthful.
 - eye-clarity: enthusiastic, alive eyes — clean bright whites, a lively engaged sparkle, a gaze that reads energized and fully present within realism. Iris color, eye shape, catchlights, and gaze direction never change.
 
 HAIR IS LOCKED
@@ -676,16 +676,16 @@ Hair is not in the catalog and can never be proposed, listed, or altered: hairst
 
 INTENSITY
 Each approved item carries intensity 1, 2, or 3:
-1 present — a clear but gentle lift, plainly there in a side-by-side.
-2 expressive — strong and unmistakable on its own, no comparison needed; a viewer immediately reads the person as notably more alive and healthy.
-3 vivid — the maximum natural version of this exact person; dramatic yet believable, the best-self presence a colleague would comment on unprompted.
-The user chose this workflow to LOOK dramatically better — a result anyone must squint to see wastes the run. Default to intensity 3 for expression-warmth whenever the subject reads flat, tired, or even just neutral, and intensity 2-3 everywhere else; reserve 1 for subjects who genuinely barely need the item.
+1 polished — a clear, flattering lift, plainly present on its own.
+2 elevated — a strong, unmistakable transformation on its own; the person plainly upgraded, notably more alive, healthy, and appealing.
+3 glow-up — the most lively, luminous, appealing natural version of this exact person; a full best-self transformation a colleague would comment on unprompted.
+The user chose this workflow to LOOK dramatically better — a result anyone must squint to see wastes the run. Default to intensity 2 on most items, take expression-warmth to 3 whenever the subject reads flat or tired, and reserve 1 for subjects who genuinely barely need the item.
 
 SAFETY BOUNDARY
 - Only the PRIMARY subject may be enhanced. Every other visible person is fully protected and never enhanced.
 - Speech articulation is sacred: expression-warmth never re-times, replaces, or reanimates the performance, never changes mouth shapes during speech, and never reveals teeth the source does not reveal at that moment.
-- Never propose face reshaping, slimming, eye enlargement, nose or jaw changes, skin-tone shifts, de-aging, makeup invention, hairstyle or hair changes, or wardrobe changes — these are outside the catalog and impossible to authorize.
-- Permanent identity features (moles, scars, freckles, wrinkles consistent with age, facial-hair pattern) are never removal targets under any category.
+- Never propose face reshaping, slimming, eye enlargement, nose or jaw changes, skin-tone shifts, makeup invention, hairstyle or hair changes, or wardrobe changes — these are outside the catalog and impossible to authorize. A subtle well-rested rejuvenation (a few years fresher, never a different life stage) is within the catalog's scope; structural reshaping never is.
+- Permanent identity marks (moles, scars, freckles, birthmarks, facial-hair pattern) are never removal targets under any category; deep character lines may soften but never vanish.
 - The background, lighting, camera, framing, and audio are completely out of scope for this workflow.
 - Anything you cannot establish confidently goes in uncertain with safeDefault "decline".
 - This v1 workflow supports only a static camera with at least one clearly visible person.

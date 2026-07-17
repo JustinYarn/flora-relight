@@ -46,8 +46,8 @@ export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "TRANSFORM the primary subject of this exact source video into the approved target state below, and reproduce absolutely everything outside that authorization exactly as filmed.",
     "The original video is structural, temporal, photometric, and performance ground truth for everything OUTSIDE the approved enhancements; inside them, the approved target state is the ground truth to reach.",
     "The human-approved enhancement plan is the complete edit authorization.",
-    "The goal of this workflow is a subject who reads as dramatically more expressive, enthusiastic, and healthy on camera — animated engaged eyes, an energetic magnetic presence, vibrant well-rested skin — while remaining unmistakably the same person having the same conversation.",
-    "Apply every approved enhancement at its approved intensity wherever the relevant region is visible, and calibrate visibility to that intensity: at 1 the lift is clear but gentle; at 2 it must be strong and unmistakable on its own, with no source needed for comparison; at 3 it is a vivid transformation — the best, most magnetic natural version of this exact person.",
+    "The goal of this workflow is a genuinely beautified subject: dramatically more expressive, enthusiastic, and healthy on camera — animated engaged eyes, an energetic magnetic presence, vibrant well-rested skin — a livelier, subtly younger-reading, audience-ready version of this exact person, still unmistakably the same person having the same conversation.",
+    "Apply every approved enhancement at its approved intensity wherever the relevant region is visible, and calibrate visibility to that intensity: at 1 the lift is polished and clearly present; at 2 it is a strong, unmistakable transformation on its own — the person plainly upgraded; at 3 it is a full glow-up: the most lively, luminous, appealing natural version of this exact person.",
     "Undershooting an approved intensity is a failure exactly like overshooting it, and the single most common failure of this task is returning the source nearly unchanged: if a viewer could mistake the result for the source at a glance, the task has FAILED no matter how clean the copy.",
     "Inside an approved region, when enhancement and preservation seem to pull in different directions, the approved enhancement wins; outside the ENHANCE list, preservation is absolute.",
     "Do not improve, restyle, or change anything outside the approved enhancement list.",
@@ -56,14 +56,15 @@ export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Enhancement permission applies only to entries in the plan's ENHANCE list, only on the primary subject, and only at the approved intensity.",
     "Expression may brighten and animate ONLY when an approved expression-warmth entry authorizes it, and only as that entry's guardrails describe.",
     "Categories not listed under ENHANCE are protected: whatever their current state, it is intentional and must remain.",
-    "The edit lifts expressiveness, energy, and health and never redesigns the person.",
+    "The edit beautifies — expressiveness, energy, health, and appeal — and never redesigns the person's structure.",
   ].join(" "),
   locks: {
     identityAndPermanentFeatures: [
       "Keep the exact same person, unmistakably recognizable in every frame.",
-      "Do not alter facial geometry, bone structure, face or body shape, eye size, nose, jaw, or apparent age.",
+      "Do not alter facial geometry, bone structure, face or body shape, eye size, nose, or jaw.",
+      "A flattering, fresher rendering of the same features is the product: the person may read a few well-rested years younger, never a different life stage and never a different person.",
       "Hair is fully locked: hairstyle, hairline, volume, color, parting, and even stray flyaways remain exactly as filmed.",
-      "Permanent features stay: moles, scars, freckles, birthmarks, wrinkles consistent with age, and the facial-hair pattern are part of identity, not imperfections.",
+      "Permanent identity marks stay: moles, scars, freckles, birthmarks, and the facial-hair pattern are part of identity. Deep character lines remain present; fine lines may soften as part of an approved enhancement.",
     ].join(" "),
     performance: [
       "Keep every gesture, posture shift, blink, head turn, body trajectory, and word at the same corresponding moment.",
@@ -92,17 +93,18 @@ export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Apply each approved enhancement uniformly and continuously across the full timeline, tracking the subject through motion, occlusion, and lighting variation.",
     "Expressiveness must read as this person genuinely lit up, not a pasted smile: it lives in the eyes, the brows, the cheeks, and the whole engaged posture of the face, and it still moves naturally with the words being spoken.",
     "Every enhancement is a constant ELEVATION held for the entire duration: a raised baseline plus an amplified response to the source's own expressive beats — when the source smiles, the result smiles fuller; when the source emphasizes a word, the result lights up more; when the source rests, the result rests brighter. The elevation itself never wavers: identical strength in the first second and the last, no bursts, no fades, no snap-backs.",
-    "Real skin keeps texture and natural micro-variation at every intensity; refinement may tighten the visual appearance of pores and temporary blemishes, and it never manufactures a poreless surface.",
+    "Skin may be visibly perfected toward a flattering on-camera finish — smoothed, evened, brightened from health — while keeping believable texture and never tipping into a plastic, poreless mask.",
     "Reproduce the source's exact grain structure, sensor-noise character, and compression fingerprint everywhere, including inside enhanced regions — that organic imperfection is what makes footage read as real; its absence is what reads as artificial.",
     "Every edit sits under the source noise floor: enhanced pixels carry the same noise statistics as their neighbors, with no denoised, sharpened, upscaled, or synthetically clean patches.",
     "Each enhancement resolves to ONE stable physical reality, locked to the face through motion — texture and color decided once, then tracked, never re-invented frame to frame.",
-    "The result must read as the same person on the best, most energized day of their year — never as a filter, a different mood track, or a re-acted take.",
+    "The result must read as the same person on the best, most energized day of their year — noticeably beautified, never a filter, a different mood track, or a re-acted take.",
   ].join(" "),
   negative: [
     "Do not enhance, retouch, or alter anything outside the approved ENHANCE list.",
-    "Do not reshape the face or body, slim, enlarge eyes, straighten or resize the nose, sculpt the jaw, or change apparent age.",
+    "Do not reshape the face or body, slim, enlarge eyes, straighten or resize the nose, or sculpt the jaw.",
+    "Do not rejuvenate beyond a few well-rested years, into a different life stage, or past the point where the person instantly reads as themselves.",
     "Do not touch the hair in any way — no tidying, recoloring, restyling, or flyaway removal.",
-    "Do not remove or fade moles, scars, freckles, birthmarks, age-consistent wrinkles, or the facial-hair pattern.",
+    "Do not remove or fade moles, scars, freckles, birthmarks, or the facial-hair pattern; deep character lines may soften but never vanish.",
     "Do not paste a fixed grin, hold a smile through speech unnaturally, reveal teeth the source does not reveal at that moment, or exaggerate expression into caricature.",
     "Do not break lip-sync, change mouth shapes during speech, or re-time any movement.",
     "Do not shift skin tone, apply makeup that is not present in the source, or alter wardrobe.",
@@ -1096,9 +1098,9 @@ function assertApprovedPlan(plan: LampBeautifyPlan): LampBeautifyPlan {
 }
 
 const INTENSITY_LINES: Record<LampBeautifyIntensity, string> = {
-  1: "intensity 1 of 3 — present: a clear but gentle lift, plainly there in a side-by-side, held uniformly for the whole video",
-  2: "intensity 2 of 3 — expressive: strong and unmistakable on its own with no comparison needed, held uniformly for the whole video",
-  3: "intensity 3 of 3 — vivid: the maximum natural version of this exact person, dramatic yet believable, held uniformly for the whole video",
+  1: "intensity 1 of 3 — polished: a clear, flattering lift, plainly present on its own, held uniformly for the whole video",
+  2: "intensity 2 of 3 — elevated: a strong, unmistakable transformation on its own — the person plainly upgraded, held uniformly for the whole video",
+  3: "intensity 3 of 3 — glow-up: the most lively, luminous, appealing natural version of this exact person, held uniformly for the whole video",
 };
 
 /**
@@ -1121,33 +1123,33 @@ const CATEGORY_RECIPES: Record<
 > = {
   "expression-warmth": {
     bands: {
-      1: "A face resting in easy, warm engagement: softly lifted mouth corners, awake interested eyes, a steady pleasant energy in every frame.",
-      2: "Open animated enthusiasm filling the face: visibly lively eyes, live brows, lifted cheeks, every smile and emphasis the source contains rendered fuller and brighter — anyone watching immediately reads a person genuinely enjoying this conversation, no source needed for comparison.",
-      3: "Peak natural charisma — the face of someone completely lit up: sparkling animated eyes, unmistakable enthusiasm radiating from the whole face, every expressive beat of the source amplified to its believable maximum, the presence of someone having the best conversation of their week.",
+      1: "Warm, open engagement filling the face: lively interested eyes, gently lifted corners and cheeks, every smile the source contains rendered fuller — plainly friendlier and more awake than a neutral take.",
+      2: "Peak natural charisma — the face of someone completely lit up: sparkling animated eyes, unmistakable enthusiasm radiating from the whole face, every expressive beat of the source amplified to its believable maximum, the presence of someone having the best conversation of their week.",
+      3: "Radiant, magnetic screen presence — this person at their absolute most captivating: brilliant delighted eyes, effortless charm in every frame, expressive beats amplified to their full believable ceiling; a presence an audience cannot look away from.",
     },
     keep: "One constant elevation for the entire duration — identical strength in the first second and the last, no smile bursts, no mood swings, no snap-backs to baseline. Amplification rides the source's own beats: same words, same mouth shapes at the same timestamps, frame-accurate lip-sync; never a held grin through speech; no teeth appear that the source does not show at that moment.",
   },
   "skin-evenness": {
     bands: {
-      1: "Freshly healthy skin: shine calmed, tone evened, the most distracting temporary blemishes gone.",
-      2: "Unmistakably fresh, even, vibrant skin: redness cleared, pores refined, the healthy vitality of someone deeply rested and cared for — obvious without any side-by-side.",
-      3: "Peak-health skin: luminous even tone with a natural glow that comes from health rather than lighting — clear, toned, editorial-grade yet unmistakably real.",
+      1: "Fresh, even, healthy skin: shine calmed, redness reduced, pores refined, distracting temporary blemishes gone.",
+      2: "Peak-health skin: luminous even tone with a natural glow that comes from health rather than lighting — clear, toned, editorial-grade yet unmistakably real.",
+      3: "A visible glow-up: dewy, youthful-reading, camera-loving skin — luminous, even, effortlessly smooth with fine lines softened; the vitality of the best skin month of this person's adult life, still recognizably real skin.",
     },
-    keep: "Real texture and the subject's permanent marks, facial hair, and apparent age remain at every level; glow comes from skin quality, never from changed lighting or exposure; never poreless, waxy, or blurred.",
+    keep: "Believable texture and the subject's permanent marks and facial-hair pattern remain at every level; deep character lines may soften but never vanish; glow comes from skin quality, never from changed lighting or exposure; never a plastic, poreless mask.",
   },
   "under-eye-softening": {
     bands: {
-      1: "Under-eye shadows visibly lightened.",
-      2: "A clearly rested eye area: circles strongly reduced, puffiness eased, fresh on its own.",
-      3: "Completely rested: bright, smooth under-eyes that read as the best sleep of the month.",
+      1: "Under-eye shadows clearly lightened, the eye area fresher.",
+      2: "Completely rested: bright, smooth under-eyes that read as the best sleep of the month.",
+      3: "Erased tiredness: a bright, smooth, youthful eye area with no visible shadow or puffiness — the eyes of someone back from a two-week vacation.",
     },
-    keep: "Natural under-eye contours and believable fine lines remain at every level.",
+    keep: "Natural under-eye contours remain at every level — softened and brightened, never hollowed or reshaped.",
   },
   "eye-clarity": {
     bands: {
-      1: "Cleaner whites, a slightly more awake gaze.",
-      2: "Noticeably alive eyes: bright clear whites and a lively engaged sparkle — genuinely enthusiastic without any comparison.",
-      3: "Luminous, energized eyes that light the whole face — the gaze of someone completely captivated by the conversation.",
+      1: "Clean bright whites, an awake engaged gaze.",
+      2: "Luminous, energized eyes that light the whole face — the gaze of someone completely captivated by the conversation.",
+      3: "Brilliant, captivating eyes: crystal-clear whites, a vivid alive sparkle, a youthful gleam that makes the whole face magnetic on camera.",
     },
     keep: "Iris color, eye shape, catchlight positions, and gaze direction remain exactly as in the source.",
   },

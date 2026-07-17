@@ -283,7 +283,7 @@ test("generation prompt renders only approved enhancements", () => {
   assert.match(rendered, /LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v1/);
   assert.match(rendered, /\[expression-warmth\] intensity 2 of 3/);
   assert.match(rendered, /\[skin-evenness\] intensity 2 of 3/);
-  assert.match(rendered, /Permanent features stay/);
+  assert.match(rendered, /Permanent identity marks stay/);
   assert.match(rendered, /every background pixel source-faithful/i);
   assert.match(rendered, /Do not produce plastic, waxy, over-smoothed/);
 
@@ -675,10 +675,13 @@ test("the warmth rewrite: hair locked, expression-warmth is the headline", () =>
 
   assert.match(rendered, /\[expression-warmth\] intensity 2 of 3/);
   assert.match(rendered, /dramatically more expressive, enthusiastic, and healthy/);
-  assert.match(rendered, /strong and unmistakable on its own/);
+  assert.match(rendered, /strong, unmistakable transformation on its own/);
+  assert.match(rendered, /full glow-up/);
+  assert.match(rendered, /subtly younger-reading/);
+  assert.match(rendered, /Do not rejuvenate beyond a few well-rested years/);
   assert.match(rendered, /Do not touch the hair in any way/);
   assert.match(rendered, /Hair is fully locked/);
-  assert.match(rendered, /pores refined/);
+  assert.match(rendered, /Peak-health skin/);
   assert.match(rendered, /Do not break lip-sync/);
   assert.match(rendered, /never a held grin through speech/i);
   // Elevation is constant with amplified response — the anti-snap-back
