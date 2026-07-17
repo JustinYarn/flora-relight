@@ -94,7 +94,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
       "reduce-enhancement-intensity",
       "remove-unapproved-beautification",
     ],
-    rubric: `Treat the approved enhancement plan as the exact edit authorization. Each approved item must be visibly applied at its approved intensity — 1 deniable, 2 noticeable side-by-side, 3 clearly groomed yet plausible. An item applied noticeably stronger than approved is a violation, as is one left effectively unapplied. Any beautification outside the approved list — makeup, reshaping, tone shifts, hairstyle changes, or enhancement of unlisted regions — fails regardless of how flattering it looks.`,
+    rubric: `Treat the approved enhancement plan as the exact edit authorization and judge TARGET MATCHING per item: at intensity 1 the lift may be deniable; at 2 it must be evident at a glance in a side-by-side at normal playback; at 3 it must be unmistakable even without the source. Too weak for the approved intensity is a failure exactly like too strong — report undershoot with correctionAction complete-approved-enhancement and overshoot with reduce-enhancement-intensity. Any beautification outside the approved list — makeup, reshaping, tone shifts, hairstyle changes, or enhancement of unlisted regions — fails regardless of how flattering it looks.`,
   },
   {
     id: "enhancement-quality",
@@ -108,7 +108,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 80,
     borderlineThreshold: 65,
     allowedCorrectionActions: ["complete-approved-enhancement"],
-    rubric: `Judge whether the subject reads as the same person on their best, most enthusiastic day at normal playback size: noticeably brighter, warmer, and fresher than the source. An enhancement plan should produce a visible lift in warmth and energy; returning a near-copy because the changes were subtle is a failure. Do not reward maximal retouching or a forced mood: the best result is convincingly warmer while remaining entirely plausible as unedited footage of a genuinely good day.`,
+    rubric: `Judge whether the subject reads as the same person on their best, most enthusiastic day at normal playback size: noticeably brighter, warmer, and fresher than the source. Calibrate expectations to the plan's intensities: with any item approved at 2 or 3, a result that is hard to distinguish from the source is a hard failure of this workflow's one job, scored accordingly. Do not reward maximal retouching or a forced mood: the best result is convincingly transformed while remaining entirely plausible as real footage of a genuinely good day.`,
   },
   {
     id: "natural-skin-texture",
@@ -655,11 +655,27 @@ function evaluatorPlanProjection(plan: LampBeautifyPlan): unknown {
   };
 }
 
+const INTENSITY_EXPECTATION: Record<1 | 2 | 3, string> = {
+  1: "subtle — a real but deniable lift; absence of any visible change is still undershoot",
+  2: "noticeable — evident at a glance in a side-by-side at normal playback; if you must hunt for it, it undershot",
+  3: "striking — unmistakable even without the source; if a side-by-side is needed to spot it, it undershot badly",
+};
+
 export function renderLampBeautifyHolisticEvaluatorPrompt(input: {
   plan: LampBeautifyPlan;
   iteration: 1 | 2;
 }): string {
   const plan = parseLampBeautifyPlan(input.plan);
+  const intensityContract =
+    plan.decision === "enhance"
+      ? [
+          "INTENSITY CONTRACT — judge target matching in BOTH directions:",
+          ...plan.enhance.map(
+            (item) =>
+              `- [${item.id}] approved at ${item.intensity} of 3: expected ${INTENSITY_EXPECTATION[item.intensity]}. Undershoot => violation with correctionAction complete-approved-enhancement; implausible overshoot => violation with correctionAction reduce-enhancement-intensity.`
+          ),
+        ].join("\n")
+      : "INTENSITY CONTRACT — exceptional no-op: any semantic or aesthetic change from the source is a violation.";
   const rubricBlock = LAMP_BEAUTIFY_VISUAL_EVAL_DEFS.map(
     (definition) =>
       `- ${definition.id} (weight ${definition.weight}): ${definition.rubric}`
@@ -671,6 +687,8 @@ export function renderLampBeautifyHolisticEvaluatorPrompt(input: {
     "",
     "APPROVED ENHANCEMENT PLAN (verbatim, includes declined and uncertain categories for your reference):",
     JSON.stringify(evaluatorPlanProjection(plan), null, 2),
+    "",
+    intensityContract,
     "",
     "Evaluation principles:",
     "- Approved items must be applied at their approved intensity: 1 deniable, 2 noticeable side-by-side, 3 clearly groomed yet plausible.",

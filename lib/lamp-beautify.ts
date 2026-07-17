@@ -639,10 +639,10 @@ Hair is not in the catalog and can never be proposed, listed, or altered: hairst
 
 INTENSITY
 Each approved item carries intensity 1, 2, or 3:
-1 subtle — barely perceptible, deniable.
-2 balanced — noticeable side-by-side, natural in isolation.
-3 polished — clearly groomed and upbeat for camera, still physically plausible.
-This workflow wants a visible lift: prefer intensity 2 for the traits that drive warmth (expression-warmth, skin-evenness, under-eye-softening) unless the source argues otherwise, and reserve 1 for subjects who barely need it and 3 for pronounced flatness or fatigue.
+1 subtle — a real but deniable lift.
+2 noticeable — evident at a glance in a side-by-side at normal playback.
+3 striking — unmistakable even without the source for comparison; a lift a colleague would comment on.
+The user chose this workflow to LOOK noticeably better — an invisible result wastes the run. Default to intensity 2 or 3 on the traits that drive warmth (expression-warmth, skin-evenness, under-eye-softening); reserve 1 for subjects who genuinely barely need the item.
 
 SAFETY BOUNDARY
 - Only the PRIMARY subject may be enhanced. Every other visible person is fully protected and never enhanced.

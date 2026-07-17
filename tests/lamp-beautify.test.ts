@@ -566,9 +566,9 @@ test("the warmth rewrite: hair locked, expression-warmth is the headline", () =>
   assert.match(rendered, /noticeably brighter, warmer, and more enthusiastic/);
   assert.match(rendered, /Do not touch the hair in any way/);
   assert.match(rendered, /Hair is fully locked/);
-  assert.match(rendered, /refine the visual appearance of pores/);
+  assert.match(rendered, /refined pores|pores visibly tightened/);
   assert.match(rendered, /Do not break lip-sync/);
-  assert.match(rendered, /never a pasted or held smile/i);
+  assert.match(rendered, /never freezes into a held grin through speech/i);
 
   // A post-freeze plan has no first-generation form — cleanly rejected.
   assert.equal(
