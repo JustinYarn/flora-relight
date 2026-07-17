@@ -91,6 +91,7 @@ export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Reproduce the source's exact grain structure, sensor-noise character, and compression fingerprint everywhere, including inside enhanced regions — that organic imperfection is what makes footage read as real; its absence is what reads as artificial.",
     "Every edit sits under the source noise floor: enhanced pixels carry the same noise statistics as their neighbors, with no denoised, sharpened, upscaled, or synthetically clean patches.",
     "Each enhancement resolves to ONE stable physical reality, locked to the face through motion — texture and color decided once, then tracked, never re-invented frame to frame.",
+    "Every enhancement is a constant offset over the source performance: the same amplitude at every timestamp. When the source expression moves, the result moves by the same amount plus that fixed offset — enhancements never pulse, ramp, or oscillate on their own.",
     "The result must read as the same person on their best, most enthusiastic day — never as a filter, a different mood track, or a re-acted take.",
   ].join(" "),
   negative: [
@@ -106,7 +107,7 @@ export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Do not change the background, room content, lighting, color grade, focus, framing, or camera.",
     "Do not add text, captions, logos, watermarks, graphics, or visible masks.",
     "Do not change playback speed, duration, frame cadence, event timing, or source audio.",
-    "Generation artifacts to exclude entirely: temporal flicker, shimmer, strobing, luminance pumping, boiling or crawling texture, texture reinvention between frames, morphing or warping features, ghosting, double edges, edge halos, over-sharpening ringing, banding in smooth gradients, color drift, chroma blotches, blockiness, moiré, added grain, denoised or waxy patches, AI smoothness, uncanny-valley sheen.",
+    "Generation artifacts to exclude entirely: temporal flicker, shimmer, strobing, luminance pumping, boiling or crawling texture, texture reinvention between frames, morphing or warping features, ghosting, double edges, edge halos, over-sharpening ringing, banding in smooth gradients, color drift, chroma blotches, blockiness, moiré, added grain, denoised or waxy patches, AI smoothness, uncanny-valley sheen, smile bursts, expression snap-backs, warmth pulsing, mood oscillation.",
   ],
 };
 
@@ -168,6 +169,7 @@ export const LEGACY_V2_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Reproduce the source's exact grain structure, sensor-noise character, and compression fingerprint everywhere, including inside enhanced regions — that organic imperfection is what makes footage read as real; its absence is what reads as artificial.",
     "Every edit sits under the source noise floor: enhanced pixels carry the same noise statistics as their neighbors, with no denoised, sharpened, upscaled, or synthetically clean patches.",
     "Each enhancement resolves to ONE stable physical reality, locked to the face through motion — texture and color decided once, then tracked, never re-invented frame to frame.",
+    "Every enhancement is a constant offset over the source performance: the same amplitude at every timestamp. When the source expression moves, the result moves by the same amount plus that fixed offset — enhancements never pulse, ramp, or oscillate on their own.",
     "The result must read as the same person on their best, most enthusiastic day — never as a filter, a different mood track, or a re-acted take.",
   ].join(" "),
   negative: [
@@ -183,7 +185,7 @@ export const LEGACY_V2_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Do not change the background, room content, lighting, color grade, focus, framing, or camera.",
     "Do not add text, captions, logos, watermarks, graphics, or visible masks.",
     "Do not change playback speed, duration, frame cadence, event timing, or source audio.",
-    "Generation artifacts to exclude entirely: temporal flicker, shimmer, strobing, luminance pumping, boiling or crawling texture, texture reinvention between frames, morphing or warping features, ghosting, double edges, edge halos, over-sharpening ringing, banding in smooth gradients, color drift, chroma blotches, blockiness, moiré, added grain, denoised or waxy patches, AI smoothness, uncanny-valley sheen.",
+    "Generation artifacts to exclude entirely: temporal flicker, shimmer, strobing, luminance pumping, boiling or crawling texture, texture reinvention between frames, morphing or warping features, ghosting, double edges, edge halos, over-sharpening ringing, banding in smooth gradients, color drift, chroma blotches, blockiness, moiré, added grain, denoised or waxy patches, AI smoothness, uncanny-valley sheen, smile bursts, expression snap-backs, warmth pulsing, mood oscillation.",
   ],
 };
 
@@ -300,7 +302,7 @@ export const LEGACY_V1_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Do not change the background, room content, lighting, color grade, focus, framing, or camera.",
     "Do not add text, captions, logos, watermarks, graphics, or visible masks.",
     "Do not change playback speed, duration, frame cadence, event timing, or source audio.",
-    "Generation artifacts to exclude entirely: temporal flicker, shimmer, strobing, luminance pumping, boiling or crawling texture, texture reinvention between frames, morphing or warping features, ghosting, double edges, edge halos, over-sharpening ringing, banding in smooth gradients, color drift, chroma blotches, blockiness, moiré, added grain, denoised or waxy patches, AI smoothness, uncanny-valley sheen.",
+    "Generation artifacts to exclude entirely: temporal flicker, shimmer, strobing, luminance pumping, boiling or crawling texture, texture reinvention between frames, morphing or warping features, ghosting, double edges, edge halos, over-sharpening ringing, banding in smooth gradients, color drift, chroma blotches, blockiness, moiré, added grain, denoised or waxy patches, AI smoothness, uncanny-valley sheen, smile bursts, expression snap-backs, warmth pulsing, mood oscillation.",
   ],
 };
 
@@ -391,9 +393,9 @@ function assertApprovedPlan(plan: LampBeautifyPlan): LampBeautifyPlan {
 }
 
 const INTENSITY_LINES: Record<LampBeautifyIntensity, string> = {
-  1: "intensity 1 of 3 — subtle: a real but deniable lift",
-  2: "intensity 2 of 3 — noticeable: evident at a glance in a side-by-side at normal playback",
-  3: "intensity 3 of 3 — striking: unmistakable even without the source for comparison, a lift a colleague would comment on",
+  1: "intensity 1 of 3 — subtle: a real but deniable lift, held steadily across the whole video",
+  2: "intensity 2 of 3 — noticeable: evident at a glance in a side-by-side, held steadily across the whole video",
+  3: "intensity 3 of 3 — polished: clearly evident on its own yet always natural, held steadily across the whole video",
 };
 
 /**
@@ -414,11 +416,11 @@ const CATEGORY_RECIPES: Record<
 > = {
   "expression-warmth": {
     bands: {
-      1: "A faint warmth at rest: mouth corners sit a touch softer, eyes a touch more awake.",
-      2: "Clearly friendlier: mouth corners visibly lifted between phrases, smiling eyes, an engaged forward energy that a viewer notices immediately in a side-by-side.",
-      3: "Openly upbeat and magnetic: a genuine smiling demeanor whenever the words allow it, bright animated eyes, lifted cheeks — the best-mood version of this exact person, unmistakable on its own.",
+      1: "A faint steady warmth at rest: mouth corners sit a touch softer, eyes a touch more awake — the same gentle level in every frame.",
+      2: "Clearly friendlier as a constant disposition: softly lifted corners and smiling eyes present in every frame, an engaged forward energy a viewer notices in a side-by-side — never a smile the source does not contain.",
+      3: "Warmly engaged throughout: an evident good-mood baseline — brighter eyes, gently lifted corners and cheeks in every frame — clearly a great day, yet always reading as this person's own natural manner.",
     },
-    keep: "Same words, same mouth shapes at the same timestamps, frame-accurate lip-sync. Warmth never freezes into a held grin through speech, and no teeth appear that the source does not show at that moment.",
+    keep: "Warmth is a LEVEL, not an event: one constant offset applied to the source's own expression dynamics for the entire duration — identical strength in the first second and the last, no smile bursts, no mood swings, no snap-backs to baseline. Same words, same mouth shapes at the same timestamps, frame-accurate lip-sync; never a held grin through speech; no teeth appear that the source does not show at that moment.",
   },
   "skin-evenness": {
     bands: {
@@ -523,9 +525,9 @@ export function renderLampBeautifyCorrection(
       return "Restore the source performance timing and trajectories exactly, including gestures, blinks, head motion, body motion, and lip movement; do not retime or reanimate.";
     case "complete-approved-enhancement": {
       const items = findEnhanceItems(canonical, correction);
-      return `Fully apply these approved enhancements at their approved intensity wherever the region is visible: ${items
+      return `Fully and UNIFORMLY apply these approved enhancements at their approved intensity — one constant level across the entire timeline, wherever the region is visible: ${items
         .map((item) => `[${item.id}] at intensity ${item.intensity}`)
-        .join("; ")}. A near-unchanged result is not compliant.`;
+        .join("; ")}. A near-unchanged result is not compliant, and neither is an enhancement that appears in bursts or drops back to baseline.`;
     }
     case "reduce-enhancement-intensity": {
       const items = findEnhanceItems(canonical, correction);

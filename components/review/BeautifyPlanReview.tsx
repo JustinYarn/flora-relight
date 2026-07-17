@@ -25,7 +25,7 @@ function formatReservationUsd(usd: number): string {
 
 const INTENSITY_LABEL: Record<1 | 2 | 3, string> = {
   1: "intensity 1 · subtle",
-  2: "intensity 2 · balanced",
+  2: "intensity 2 · noticeable",
   3: "intensity 3 · polished",
 };
 
@@ -300,7 +300,7 @@ export function BeautifyPlanReview({
                   [
                     [null, "As planned"],
                     [1, "1 · Subtle"],
-                    [2, "2 · Balanced"],
+                    [2, "2 · Noticeable"],
                     [3, "3 · Polished"],
                   ] as Array<[LampBeautifyIntensity | null, string]>
                 ).map(([value, label]) => {
@@ -329,10 +329,10 @@ export function BeautifyPlanReview({
               {intensityOverride === null
                 ? "Approving with the planner's proposed intensities."
                 : intensityOverride === 1
-                  ? "Every approved item at 1 — barely perceptible, deniable."
+                  ? "Every approved item at 1 — a real but deniable lift, held steadily for the whole video."
                   : intensityOverride === 2
-                    ? "Every approved item at 2 — noticeable side-by-side, natural in isolation."
-                    : "Every approved item at 3 — clearly groomed for camera, still physically plausible."}
+                    ? "Every approved item at 2 — evident side-by-side, held steadily for the whole video."
+                    : "Every approved item at 3 — clearly evident yet always natural, held steadily for the whole video."}
             </p>
           </div>
         ) : null}

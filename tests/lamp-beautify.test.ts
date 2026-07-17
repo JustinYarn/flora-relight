@@ -568,7 +568,11 @@ test("the warmth rewrite: hair locked, expression-warmth is the headline", () =>
   assert.match(rendered, /Hair is fully locked/);
   assert.match(rendered, /refined pores|pores visibly tightened/);
   assert.match(rendered, /Do not break lip-sync/);
-  assert.match(rendered, /never freezes into a held grin through speech/i);
+  assert.match(rendered, /never a held grin through speech/i);
+  // Warmth is a level, not an event — the anti-snap-back contract.
+  assert.match(rendered, /Warmth is a LEVEL, not an event/);
+  assert.match(rendered, /no smile bursts, no mood swings, no snap-backs/);
+  assert.match(rendered, /smile bursts, expression snap-backs, warmth pulsing, mood oscillation/);
 
   // A post-freeze plan has no first-generation form — cleanly rejected.
   assert.equal(

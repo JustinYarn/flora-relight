@@ -76,7 +76,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 90,
     borderlineThreshold: 75,
     allowedCorrectionActions: ["restore-identity"],
-    rubric: `Compare facial geometry, bone structure, distinctive features, apparent age, and recognizability throughout the complete source and candidate. Approved enhancement grants no permission to change who the person is: any frame that reads as a different, younger-by-design, or structurally reshaped person fails. An approved expression-warmth entry may read gently warmer and more engaged than the source; that mood shift alone is not an identity violation, but caricature, a pasted grin, or geometry change is. Judge the worst moment, especially under head motion and expression changes.`,
+    rubric: `Compare facial geometry, bone structure, distinctive features, apparent age, and recognizability throughout the complete source and candidate. Approved enhancement grants no permission to change who the person is: any frame that reads as a different, younger-by-design, or structurally reshaped person fails. An approved expression-warmth entry may read gently warmer and more engaged than the source; that steady mood shift alone is not an identity violation, but exaggerated or theatrical emotion, caricature, a pasted grin, or geometry change is. Judge the worst moment, especially under head motion and expression changes.`,
   },
   {
     id: "enhancement-adherence",
@@ -206,7 +206,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 85,
     borderlineThreshold: 70,
     allowedCorrectionActions: ["complete-approved-enhancement"],
-    rubric: `Inspect the complete video for enhancement flicker, pulsing, drifting strength, or regions where an approved item visibly switches on and off across frames, occlusions, or head turns. Also sweep for generation artifacts anywhere in frame: shimmer, boiling or crawling texture, morphing or warping, ghosting, double edges, edge halos, banding, chroma blotches, blockiness, moiré. Each approved enhancement must read as one continuous physical reality, locked to the subject through motion, rendered at the source's own grain and compression character.`,
+    rubric: `Inspect the complete video for enhancement flicker, pulsing, drifting strength, or regions where an approved item visibly switches on and off across frames, occlusions, or head turns. Expression warmth gets special scrutiny: the warmth level must be one constant disposition across the whole video — a smile that surges and then snaps back to the source's flat baseline seconds later is uncanny and a major violation, even if each individual frame looks good. Also sweep for generation artifacts anywhere in frame: shimmer, boiling or crawling texture, morphing or warping, ghosting, double edges, edge halos, banding, chroma blotches, blockiness, moiré. Each approved enhancement must read as one continuous physical reality, locked to the subject through motion, rendered at the source's own grain and compression character.`,
   },
   {
     id: "audio-integrity",
@@ -656,9 +656,9 @@ function evaluatorPlanProjection(plan: LampBeautifyPlan): unknown {
 }
 
 const INTENSITY_EXPECTATION: Record<1 | 2 | 3, string> = {
-  1: "subtle — a real but deniable lift; absence of any visible change is still undershoot",
-  2: "noticeable — evident at a glance in a side-by-side at normal playback; if you must hunt for it, it undershot",
-  3: "striking — unmistakable even without the source; if a side-by-side is needed to spot it, it undershot badly",
+  1: "subtle — a real but deniable lift held steadily for the whole duration; absence of any visible change is still undershoot",
+  2: "noticeable — evident at a glance in a side-by-side and held steadily for the whole duration; if you must hunt for it, it undershot",
+  3: "polished — clearly evident on its own yet always natural, held steadily for the whole duration; exaggeration or caricature is overshoot exactly as invisibility is undershoot",
 };
 
 export function renderLampBeautifyHolisticEvaluatorPrompt(input: {
@@ -669,7 +669,7 @@ export function renderLampBeautifyHolisticEvaluatorPrompt(input: {
   const intensityContract =
     plan.decision === "enhance"
       ? [
-          "INTENSITY CONTRACT — judge target matching in BOTH directions:",
+          "INTENSITY CONTRACT — judge target matching in BOTH directions, and STEADINESS: every item must hold one constant level for the entire duration. An enhancement that appears in bursts, spikes and snaps back, or drifts in strength is a violation (report it on enhancement-temporal-stability with correctionAction complete-approved-enhancement).",
           ...plan.enhance.map(
             (item) =>
               `- [${item.id}] approved at ${item.intensity} of 3: expected ${INTENSITY_EXPECTATION[item.intensity]}. Undershoot => violation with correctionAction complete-approved-enhancement; implausible overshoot => violation with correctionAction reduce-enhancement-intensity.`
