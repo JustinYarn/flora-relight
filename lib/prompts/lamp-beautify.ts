@@ -1,6 +1,8 @@
 import {
+  LAMP_BEAUTIFY_ACTIVE_CATALOG,
   lampBeautifyPlanRequiresGeneration,
   parseLampBeautifyPlan,
+  type LampBeautifyActiveCategory,
   type LampBeautifyEnhanceItem,
   type LampBeautifyIntensity,
   type LampBeautifyPlan,
@@ -41,19 +43,19 @@ export interface LampBeautifyMegaPrompt {
  */
 export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
   task: [
-    "Apply a bounded professional on-camera touch-up to the primary subject of this exact source video as a restrained, source-faithful edit.",
+    "Apply a bounded professional on-camera enhancement to the primary subject of this exact source video as a source-faithful edit.",
     "The original video is structural, temporal, photometric, and performance ground truth.",
     "The human-approved enhancement plan is the complete edit authorization.",
-    "The goal of this workflow is a subject who reads as noticeably brighter, warmer, and more enthusiastic on camera — better rested, more engaged, more positive — while remaining unmistakably the same person having the same conversation.",
-    "Apply every approved enhancement at its approved intensity wherever the relevant region is visible, and calibrate visibility to that intensity: at 1 the lift may be deniable; at 2 it must be evident at a glance in a side-by-side at normal playback; at 3 it must be unmistakable even without the source — a lift a colleague would comment on.",
-    "Undershooting an approved intensity is a failure exactly like overshooting it. A result that is hard to tell from the source has failed this workflow's one job.",
+    "The goal of this workflow is a subject who reads as dramatically more expressive, enthusiastic, and healthy on camera — animated engaged eyes, an energetic magnetic presence, vibrant well-rested skin — while remaining unmistakably the same person having the same conversation.",
+    "Apply every approved enhancement at its approved intensity wherever the relevant region is visible, and calibrate visibility to that intensity: at 1 the lift is clear but gentle; at 2 it must be strong and unmistakable on its own, with no source needed for comparison; at 3 it is a vivid transformation — the best, most magnetic natural version of this exact person.",
+    "Undershooting an approved intensity is a failure exactly like overshooting it. A result a viewer must squint at to notice has failed this workflow's one job.",
     "Do not improve, restyle, or change anything outside the approved enhancement list.",
   ].join(" "),
   scope: [
     "Enhancement permission applies only to entries in the plan's ENHANCE list, only on the primary subject, and only at the approved intensity.",
-    "Expression may warm ONLY when an approved expression-warmth entry authorizes it, and only as that entry's guardrails describe.",
+    "Expression may brighten and animate ONLY when an approved expression-warmth entry authorizes it, and only as that entry's guardrails describe.",
     "Categories not listed under ENHANCE are protected: whatever their current state, it is intentional and must remain.",
-    "The edit is grooming-level: it may lift warmth, energy, and surface freshness and never redesigns the person.",
+    "The edit lifts expressiveness, energy, and health and never redesigns the person.",
   ].join(" "),
   locks: {
     identityAndPermanentFeatures: [
@@ -86,13 +88,13 @@ export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
   },
   application: [
     "Apply each approved enhancement uniformly and continuously across the full timeline, tracking the subject through motion, occlusion, and lighting variation.",
-    "Warmth must read as genuine mood, not a pasted smile: it lives in micro-lifts at the mouth corners, the eyes, and the cheeks, and it still moves naturally with the words being spoken.",
+    "Expressiveness must read as this person genuinely lit up, not a pasted smile: it lives in the eyes, the brows, the cheeks, and the whole engaged posture of the face, and it still moves naturally with the words being spoken.",
+    "Every enhancement is a constant ELEVATION held for the entire duration: a raised baseline plus an amplified response to the source's own expressive beats — when the source smiles, the result smiles fuller; when the source emphasizes a word, the result lights up more; when the source rests, the result rests brighter. The elevation itself never wavers: identical strength in the first second and the last, no bursts, no fades, no snap-backs.",
     "Real skin keeps texture and natural micro-variation at every intensity; refinement may tighten the visual appearance of pores and temporary blemishes, and it never manufactures a poreless surface.",
     "Reproduce the source's exact grain structure, sensor-noise character, and compression fingerprint everywhere, including inside enhanced regions — that organic imperfection is what makes footage read as real; its absence is what reads as artificial.",
     "Every edit sits under the source noise floor: enhanced pixels carry the same noise statistics as their neighbors, with no denoised, sharpened, upscaled, or synthetically clean patches.",
     "Each enhancement resolves to ONE stable physical reality, locked to the face through motion — texture and color decided once, then tracked, never re-invented frame to frame.",
-    "Every enhancement is a constant offset over the source performance: the same amplitude at every timestamp. When the source expression moves, the result moves by the same amount plus that fixed offset — enhancements never pulse, ramp, or oscillate on their own.",
-    "The result must read as the same person on their best, most enthusiastic day — never as a filter, a different mood track, or a re-acted take.",
+    "The result must read as the same person on the best, most energized day of their year — never as a filter, a different mood track, or a re-acted take.",
   ].join(" "),
   negative: [
     "Do not enhance, retouch, or alter anything outside the approved ENHANCE list.",
@@ -767,9 +769,9 @@ function assertApprovedPlan(plan: LampBeautifyPlan): LampBeautifyPlan {
 }
 
 const INTENSITY_LINES: Record<LampBeautifyIntensity, string> = {
-  1: "intensity 1 of 3 — subtle: a real but deniable lift, held steadily across the whole video",
-  2: "intensity 2 of 3 — noticeable: evident at a glance in a side-by-side, held steadily across the whole video",
-  3: "intensity 3 of 3 — polished: clearly evident on its own yet always natural, held steadily across the whole video",
+  1: "intensity 1 of 3 — present: a clear but gentle lift, plainly there in a side-by-side, held uniformly for the whole video",
+  2: "intensity 2 of 3 — expressive: strong and unmistakable on its own with no comparison needed, held uniformly for the whole video",
+  3: "intensity 3 of 3 — vivid: the maximum natural version of this exact person, dramatic yet believable, held uniformly for the whole video",
 };
 
 /**
@@ -782,64 +784,58 @@ type BeautifyBandRecipes = Record<LampBeautifyIntensity, string>;
  * The dynamic range lives HERE, not in one soft sentence — the first Lamp
  * slider failed because a large ladder varied only a few timid words
  * (LAMP-INTENSITY.md). Each band states what must be VISIBLE at that level;
- * the keep-clause states what survives at every level.
+ * the keep-clause states what survives at every level. Only active-catalog
+ * categories exist here: retired ids render exclusively through the frozen
+ * legacy generations.
  */
 const CATEGORY_RECIPES: Record<
-  LampBeautifyEnhanceItem["id"],
+  LampBeautifyActiveCategory,
   { bands: BeautifyBandRecipes; keep: string }
 > = {
   "expression-warmth": {
     bands: {
-      1: "A faint steady warmth at rest: mouth corners sit a touch softer, eyes a touch more awake — the same gentle level in every frame.",
-      2: "Clearly friendlier as a constant disposition: softly lifted corners and smiling eyes present in every frame, an engaged forward energy a viewer notices in a side-by-side — never a smile the source does not contain.",
-      3: "Warmly engaged throughout: an evident good-mood baseline — brighter eyes, gently lifted corners and cheeks in every frame — clearly a great day, yet always reading as this person's own natural manner.",
+      1: "Clearly warmer and more awake than the source: softly lifted mouth corners, brighter engaged eyes, a steady pleasant energy in every frame.",
+      2: "Strongly expressive and animated: visibly lively eyes, an evident enthusiastic presence that fills the frame, every smile and emphasis the source contains rendered fuller and brighter — a viewer immediately reads this person as lit up, no source needed for comparison.",
+      3: "Vividly magnetic: the most engaging natural version of this person — sparkling animated eyes, unmistakable enthusiasm radiating from the whole face, every expressive beat of the source amplified to its believable maximum, the presence of someone having the best conversation of their week.",
     },
-    keep: "Warmth is a LEVEL, not an event: one constant offset applied to the source's own expression dynamics for the entire duration — identical strength in the first second and the last, no smile bursts, no mood swings, no snap-backs to baseline. Same words, same mouth shapes at the same timestamps, frame-accurate lip-sync; never a held grin through speech; no teeth appear that the source does not show at that moment.",
+    keep: "One constant elevation for the entire duration — identical strength in the first second and the last, no smile bursts, no mood swings, no snap-backs to baseline. Amplification rides the source's own beats: same words, same mouth shapes at the same timestamps, frame-accurate lip-sync; never a held grin through speech; no teeth appear that the source does not show at that moment.",
   },
   "skin-evenness": {
     bands: {
-      1: "Shine taken down and the most distracting temporary blemishes calmed; texture untouched to close inspection.",
-      2: "Visibly fresher: even tone, reduced redness, refined pores — skin that reads recently rested and cared for the moment the two frames sit side by side.",
-      3: "Editorial-clean: shine gone, tone uniform, pores visibly tightened, temporary blemishes cleared — the skin of a professionally prepped on-camera day.",
+      1: "Visibly healthier: shine calmed, tone evened, the most distracting temporary blemishes cleared.",
+      2: "Unmistakably fresh and healthy on its own: even vibrant tone, redness gone, pores refined, a natural vitality that reads deeply rested and cared for without any side-by-side.",
+      3: "Peak healthy: luminous even skin with a natural glow that comes from health rather than lighting — clear, toned, editorial-grade yet unmistakably real skin.",
     },
-    keep: "Real texture and the subject's permanent marks, facial hair, and apparent age remain at every level; never poreless, waxy, or blurred.",
+    keep: "Real texture and the subject's permanent marks, facial hair, and apparent age remain at every level; glow comes from skin quality, never from changed lighting or exposure; never poreless, waxy, or blurred.",
   },
   "under-eye-softening": {
     bands: {
-      1: "Circles slightly lightened.",
-      2: "Clearly better rested: shadows visibly lifted and puffiness eased.",
-      3: "Fully rested: under-eyes bright and smooth enough to read as a great night's sleep.",
+      1: "Shadows visibly lightened.",
+      2: "Clearly rested: circles strongly reduced, puffiness eased, the whole eye area reading fresh on its own.",
+      3: "Completely rested: bright, smooth under-eyes that read as the best sleep of the month.",
     },
     keep: "Natural under-eye contours and believable fine lines remain at every level.",
   },
-  "teeth-brightening": {
-    bands: {
-      1: "A fresh, clean lift.",
-      2: "Clearly whiter within natural enamel tones.",
-      3: "Camera-ready white: bright and immediately noticeable whenever the smile shows, still plausible enamel rather than veneer glare.",
-    },
-    keep: "Tooth shape, alignment, and mouth movement remain exactly as in the source; brighten only where the source genuinely shows teeth.",
-  },
   "eye-clarity": {
     bands: {
-      1: "Redness reduced, whites cleaner.",
-      2: "Noticeably clearer and brighter: clean whites and a more awake gaze.",
-      3: "Striking clarity: bright whites and a lively, alert sparkle that lifts the whole face.",
+      1: "Whites cleaner, gaze a touch more awake.",
+      2: "Noticeably alive: bright clear whites and a lively engaged sparkle — eyes that read genuinely enthusiastic without any comparison.",
+      3: "Striking: luminous, energized eyes that light the whole face — the gaze of someone completely captivated by the conversation.",
     },
     keep: "Iris color, eye shape, catchlight positions, and gaze direction remain exactly as in the source.",
-  },
-  "hair-tidy": {
-    bands: {
-      1: "Legacy category — no longer offered. Hair is fully locked.",
-      2: "Legacy category — no longer offered. Hair is fully locked.",
-      3: "Legacy category — no longer offered. Hair is fully locked.",
-    },
-    keep: "Hairstyle, hairline, volume, color, and flyaways remain exactly as filmed.",
   },
 };
 
 function renderEnhanceItem(item: LampBeautifyEnhanceItem): string {
-  const recipe = CATEGORY_RECIPES[item.id];
+  const recipe =
+    CATEGORY_RECIPES[item.id as LampBeautifyActiveCategory] as
+      | { bands: BeautifyBandRecipes; keep: string }
+      | undefined;
+  if (!recipe || !(LAMP_BEAUTIFY_ACTIVE_CATALOG as readonly string[]).includes(item.id)) {
+    throw new Error(
+      `Category "${item.id}" is no longer offered and cannot render into a new generation prompt; only frozen legacy generations carry it.`
+    );
+  }
   return [
     `[${item.id}] ${INTENSITY_LINES[item.intensity]}.`,
     `Target: ${recipe.bands[item.intensity]}`,
@@ -982,7 +978,8 @@ function renderCorrections(
 }
 
 export function renderLampBeautifyMegaPrompt(
-  prompt: Omit<LampBeautifyMegaPrompt, "rendered">
+  prompt: Omit<LampBeautifyMegaPrompt, "rendered">,
+  renderBlock: (plan: LampBeautifyPlan) => string = renderLampBeautifyPlanBlock
 ): string {
   const plan = assertApprovedPlan(prompt.plan);
   const base = prompt.base;
@@ -1004,7 +1001,7 @@ export function renderLampBeautifyMegaPrompt(
     base.scope,
     "",
     PLAN_HEADING,
-    renderLampBeautifyPlanBlock(plan),
+    renderBlock(plan),
     "",
     LOCKS_HEADING,
     locks,
@@ -1047,7 +1044,13 @@ export function isPersistedInitialLampBeautifyPrompt(
   plan: LampBeautifyPlan,
   rendered: string
 ): boolean {
-  if (rendered === initialLampBeautifyMegaPrompt(plan).rendered) return true;
+  // A plan holding retired categories has no current-generation form; that
+  // never disqualifies its frozen legacy forms below.
+  try {
+    if (rendered === initialLampBeautifyMegaPrompt(plan).rendered) return true;
+  } catch {
+    // Fall through to the frozen generations.
+  }
   // Frozen prior generations, newest first. A plan whose categories postdate
   // a generation cannot have bytes from it; those renderers refuse and the
   // answer for that generation is simply no.
@@ -1078,18 +1081,15 @@ export function isPersistedInitialLampBeautifyPrompt(
   ];
   for (const generation of generations) {
     try {
-      const generationBase = renderLampBeautifyMegaPrompt({
-        version: 1,
-        base: generation.base,
-        plan,
-        corrections: [],
-      });
-      const currentBlock = renderLampBeautifyPlanBlock(plan);
-      const generationBlock = generation.block(plan);
-      const candidate =
-        currentBlock === generationBlock
-          ? generationBase
-          : generationBase.replace(currentBlock, generationBlock);
+      const candidate = renderLampBeautifyMegaPrompt(
+        {
+          version: 1,
+          base: generation.base,
+          plan,
+          corrections: [],
+        },
+        generation.block
+      );
       if (rendered === candidate) return true;
     } catch {
       // This generation cannot render the plan — try the next.
@@ -1146,18 +1146,21 @@ function renderPersistedV2(
   );
   // Persisted v1 bytes are immutable: prompts compiled under an earlier
   // generation carry that generation's frozen block. Every shipped form
-  // binds the same approved plan.
-  const acceptedPlanBlocks = [renderLampBeautifyPlanBlock(plan)];
-  for (const legacyRenderer of [
+  // binds the same approved plan; a renderer that cannot express this
+  // plan's categories (retired or not-yet-introduced) simply contributes
+  // no candidate.
+  const acceptedPlanBlocks: string[] = [];
+  for (const blockRenderer of [
+    renderLampBeautifyPlanBlock,
     renderLegacyLampBeautifyPlanBlockV5,
     renderLegacyLampBeautifyPlanBlockV3,
     renderLegacyLampBeautifyPlanBlockV2,
     renderLegacyLampBeautifyPlanBlockV1,
   ]) {
     try {
-      acceptedPlanBlocks.push(legacyRenderer(plan));
+      acceptedPlanBlocks.push(blockRenderer(plan));
     } catch {
-      // Categories postdating that generation have no form in it.
+      // This generation has no form for the plan's categories.
     }
   }
   if (!acceptedPlanBlocks.includes(persistedPlanBlock)) {

@@ -8,14 +8,31 @@
  * always treated as decline-by-default.
  */
 
-export const LAMP_BEAUTIFY_PLAN_VERSION = "lamp-beautify-plan-v1" as const;
+/**
+ * Every plan version that ever shipped, newest first. The version is part of
+ * the persisted plan AND its binding hash, so parsing must accept the full
+ * set forever and must never restamp a persisted plan with a newer version —
+ * that would silently change the hash every execution bound.
+ */
+export const LAMP_BEAUTIFY_PLAN_VERSIONS = [
+  "lamp-beautify-plan-v2",
+  "lamp-beautify-plan-v1",
+] as const;
+
+export type LampBeautifyPlanVersion =
+  (typeof LAMP_BEAUTIFY_PLAN_VERSIONS)[number];
+
+/** The version newly drafted plans are stamped with. */
+export const LAMP_BEAUTIFY_PLAN_VERSION = LAMP_BEAUTIFY_PLAN_VERSIONS[0];
 
 /**
  * The closed enhancement catalog. Plan items, corrections, and evaluation
  * all speak this vocabulary; nothing outside it can ever be authorized.
- * "hair-tidy" is legacy: persisted plans keep parsing, but the planner no
- * longer offers it — hair is fully locked as of the 2026-07-17 warmth
- * rewrite, and "expression-warmth" is the headline trait.
+ * "hair-tidy" and "teeth-brightening" are legacy: persisted plans keep
+ * parsing and legacy prompt renderers keep rendering them, but the planner
+ * no longer offers them — hair is fully locked, and the expressiveness
+ * catalog dropped teeth as noise that never moved how alive the person
+ * reads. "expression-warmth" is the headline trait.
  */
 export const LAMP_BEAUTIFY_CATALOG = [
   "expression-warmth",
@@ -33,7 +50,6 @@ export const LAMP_BEAUTIFY_ACTIVE_CATALOG = [
   "expression-warmth",
   "skin-evenness",
   "under-eye-softening",
-  "teeth-brightening",
   "eye-clarity",
 ] as const;
 
@@ -41,9 +57,9 @@ export type LampBeautifyActiveCategory =
   (typeof LAMP_BEAUTIFY_ACTIVE_CATALOG)[number];
 
 /**
- * The intensity ladder mirrors the Lamp slider: 1 is deniable, 2 is visible
- * side-by-side yet natural in isolation, 3 is clearly camera-groomed while
- * remaining physically plausible.
+ * The intensity ladder mirrors the Lamp slider: 1 is a clear but gentle
+ * lift, 2 is strong and unmistakable on its own, 3 is the maximum natural
+ * version of the person — vivid while still physically plausible.
  */
 export type LampBeautifyIntensity = 1 | 2 | 3;
 
@@ -51,7 +67,6 @@ export const LAMP_BEAUTIFY_NO_OP_REGIONS = [
   "expression",
   "skin",
   "under-eyes",
-  "teeth",
   "eyes",
 ] as const;
 
@@ -102,7 +117,7 @@ export type LampBeautifyPlanApproval =
     };
 
 export interface LampBeautifyPlan {
-  version: typeof LAMP_BEAUTIFY_PLAN_VERSION;
+  version: LampBeautifyPlanVersion;
   id: string;
   runId: string;
   createdAt: number;
@@ -409,15 +424,25 @@ export function buildLampBeautifyPlan(input: {
 
 /** Re-validate a persisted JSON value before it is trusted by the compiler. */
 export function parseLampBeautifyPlan(value: unknown): LampBeautifyPlan {
-  if (!isRecord(value) || value.version !== LAMP_BEAUTIFY_PLAN_VERSION) {
+  if (
+    !isRecord(value) ||
+    !(LAMP_BEAUTIFY_PLAN_VERSIONS as readonly unknown[]).includes(value.version)
+  ) {
     throw new Error("Unknown Lamp Beautify plan version.");
   }
-  const draft = buildLampBeautifyPlan({
-    raw: value,
-    planId: requiredString(value.id, "id"),
-    runId: requiredString(value.runId, "runId"),
-    createdAt: typeof value.createdAt === "number" ? value.createdAt : Number.NaN,
-  });
+  // Rebuild for validation, then carry the PERSISTED version through — the
+  // version is inside the binding hash, so restamping would orphan every
+  // execution the plan ever bound.
+  const draft: LampBeautifyPlan = {
+    ...buildLampBeautifyPlan({
+      raw: value,
+      planId: requiredString(value.id, "id"),
+      runId: requiredString(value.runId, "runId"),
+      createdAt:
+        typeof value.createdAt === "number" ? value.createdAt : Number.NaN,
+    }),
+    version: value.version as LampBeautifyPlanVersion,
+  };
   if (!isRecord(value.approval) || value.approval.status === "draft") {
     return draft;
   }
@@ -598,26 +623,39 @@ export function createMockLampBeautifyPlan(
           id: "expression-warmth",
           intensity: 2,
           rationale:
-            "A gentle warmth lift reads as more engaged without changing the performance.",
+            "An expressive lift reads as clearly more engaged without changing the performance.",
           evidence: "The resting expression sits flatter than the friendly tone of voice.",
         },
         {
           id: "skin-evenness",
-          intensity: 1,
+          intensity: 2,
           rationale:
-            "Reducing temporary shine reads as better-rested without changing the person.",
+            "Healthier, fresher skin reads as better-rested without changing the person.",
           evidence: "Mild forehead shine is visible under the key light.",
         },
       ],
       declined: [
         {
-          id: "teeth-brightening",
-          reason: "Teeth are barely visible while speaking.",
+          id: "under-eye-softening",
+          reason: "The under-eye area already reads rested.",
         },
       ],
       uncertain: [],
     },
   });
+}
+
+/**
+ * True when every approved enhancement is a category the planner still
+ * offers. A plan drafted under an older catalog stays readable forever, but
+ * only active-catalog plans may start a NEW execution — the current prompt
+ * generation has no rendering for retired categories.
+ */
+export function lampBeautifyPlanUsesActiveCatalog(
+  plan: LampBeautifyPlan
+): boolean {
+  const active: readonly string[] = LAMP_BEAUTIFY_ACTIVE_CATALOG;
+  return plan.enhance.every((item) => active.includes(item.id));
 }
 
 /**
@@ -627,22 +665,21 @@ export function createMockLampBeautifyPlan(
 export const LAMP_BEAUTIFY_PLAN_PROMPT = `You are the planning stage for Lamp Beautify, a source-faithful on-camera touch-up workflow for short static-camera webcam or interview videos.
 
 GOAL
-Infer that the user chose this workflow because they want to read as noticeably brighter, warmer, and more enthusiastic on camera — better rested, more engaged, gently more positive — while remaining unmistakably themselves having the same conversation. Inspect the COMPLETE source timeline and propose bounded enhancement whenever it would genuinely lift the subject's on-camera warmth and freshness. The catalog is closed:
-- expression-warmth: the headline trait. Gently bias the resting expression warmer — micro-lifts at the mouth corners, subtly brighter and more engaged eyes, a touch more life in the cheeks — riding on top of the real performance. Same words, same mouth shapes at the same timestamps, same gestures; genuine good mood, never a pasted or held smile. Propose it whenever the subject reads flat, tired, or more serious than a friendly professional conversation calls for.
-- skin-evenness: reduce temporary blemishes, shine, and irritation, and refine the visual appearance of pores for a fresher, tighter surface. Real texture survives; permanent marks and apparent age always remain.
-- under-eye-softening: subtly reduce dark circles or puffiness so the subject reads better rested.
-- teeth-brightening: mild natural whitening within plausible enamel tones, where the source genuinely shows teeth.
-- eye-clarity: reduce visible redness, brighten the sclera slightly, and let the eyes read a touch more awake within realism.
+Infer that the user chose this workflow because they want to read as dramatically more expressive, enthusiastic, and healthy on camera — animated engaged eyes, an energetic magnetic presence, vibrant well-rested skin — while remaining unmistakably themselves having the same conversation. Inspect the COMPLETE source timeline and propose enhancement whenever it would genuinely lift how alive and healthy the subject reads. The catalog is closed:
+- expression-warmth: the headline trait — expressiveness. Elevate the whole expressive presence: an engaged, enthusiastic disposition held for the entire video, brighter more animated eyes, lifted energy in the face, and every expressive beat the source contains rendered fuller. It rides on top of the real performance — same words, same mouth shapes at the same timestamps, same gestures — and reads as this person genuinely lit up, never a pasted or held smile. Propose it for nearly every subject; only someone already highly animated throughout does not need it.
+- skin-evenness: healthier skin overall — even vibrant tone, redness and shine calmed, temporary blemishes cleared, pores refined, a fresh healthy vitality that comes from the skin itself rather than lighting. Real texture survives; permanent marks and apparent age always remain.
+- under-eye-softening: reduce dark circles or puffiness so the whole eye area reads genuinely rested and healthy.
+- eye-clarity: enthusiastic, alive eyes — clean bright whites, a lively engaged sparkle, a gaze that reads energized and fully present within realism. Iris color, eye shape, catchlights, and gaze direction never change.
 
 HAIR IS LOCKED
 Hair is not in the catalog and can never be proposed, listed, or altered: hairstyle, hairline, volume, color, parting, and stray flyaways all remain exactly as filmed.
 
 INTENSITY
 Each approved item carries intensity 1, 2, or 3:
-1 subtle — a real but deniable lift.
-2 noticeable — evident at a glance in a side-by-side at normal playback.
-3 striking — unmistakable even without the source for comparison; a lift a colleague would comment on.
-The user chose this workflow to LOOK noticeably better — an invisible result wastes the run. Default to intensity 2 or 3 on the traits that drive warmth (expression-warmth, skin-evenness, under-eye-softening); reserve 1 for subjects who genuinely barely need the item.
+1 present — a clear but gentle lift, plainly there in a side-by-side.
+2 expressive — strong and unmistakable on its own, no comparison needed; a viewer immediately reads the person as notably more alive and healthy.
+3 vivid — the maximum natural version of this exact person; dramatic yet believable, the best-self presence a colleague would comment on unprompted.
+The user chose this workflow to LOOK dramatically better — a result anyone must squint to see wastes the run. Default to intensity 3 for expression-warmth whenever the subject reads flat, tired, or even just neutral, and intensity 2-3 everywhere else; reserve 1 for subjects who genuinely barely need the item.
 
 SAFETY BOUNDARY
 - Only the PRIMARY subject may be enhanced. Every other visible person is fully protected and never enhanced.
@@ -691,11 +728,10 @@ Respond with strict JSON only. Use this schema:
       { "region": "expression", "finding": "<specific finding>" },
       { "region": "skin", "finding": "<specific finding>" },
       { "region": "under-eyes", "finding": "<specific finding>" },
-      { "region": "teeth", "finding": "<specific finding>" },
       { "region": "eyes", "finding": "<specific finding>" }
     ],
     "whyEnhancementWouldNotImprovePresentation": "<at least 12 words>"
   }
 }
 
-Report the observed sourceScope honestly. Lamp Beautify v1 will reject a moving camera and scenes where no person is clearly visible; single-person and multiple-people scenes are both supported. For enhance, set noOpJustification to null and include at least one catalog item. For exceptional-no-op, provide the justification object, keep enhance and uncertain empty, and include all five regionEvidence entries exactly once.`;
+Report the observed sourceScope honestly. Lamp Beautify v1 will reject a moving camera and scenes where no person is clearly visible; single-person and multiple-people scenes are both supported. For enhance, set noOpJustification to null and include at least one catalog item. For exceptional-no-op, provide the justification object, keep enhance and uncertain empty, and include all four regionEvidence entries exactly once.`;

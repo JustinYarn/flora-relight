@@ -656,9 +656,9 @@ function evaluatorPlanProjection(plan: LampBeautifyPlan): unknown {
 }
 
 const INTENSITY_EXPECTATION: Record<1 | 2 | 3, string> = {
-  1: "subtle — a real but deniable lift held steadily for the whole duration; absence of any visible change is still undershoot",
-  2: "noticeable — evident at a glance in a side-by-side and held steadily for the whole duration; if you must hunt for it, it undershot",
-  3: "polished — clearly evident on its own yet always natural, held steadily for the whole duration; exaggeration or caricature is overshoot exactly as invisibility is undershoot",
+  1: "present — a clear but gentle lift, plainly there in a side-by-side and held uniformly for the whole duration; a change you must hunt for is undershoot",
+  2: "expressive — strong and unmistakable ON ITS OWN, with no source needed for comparison, held uniformly for the whole duration; a lift that is only visible side-by-side undershot this band",
+  3: "vivid — the maximum natural version of this person, dramatic yet believable, held uniformly for the whole duration; caricature or physically implausible exaggeration is overshoot exactly as subtlety is undershoot",
 };
 
 export function renderLampBeautifyHolisticEvaluatorPrompt(input: {

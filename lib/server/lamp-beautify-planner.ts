@@ -301,11 +301,11 @@ export function isLampBeautifyPlanArtifact(
     return false;
   }
   if (value.status === "ready") {
+    // parse enforces membership in the shipped-version set; cached artifacts
+    // from earlier plan versions stay valid forever.
     try {
-      return (
-        parseLampBeautifyPlan(value.plan).version ===
-        LAMP_BEAUTIFY_PLAN_VERSION
-      );
+      parseLampBeautifyPlan(value.plan);
+      return true;
     } catch {
       return false;
     }

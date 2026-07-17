@@ -4,6 +4,7 @@ import {
   applyLampBeautifyIntensityOverride,
   approveLampBeautifyPlan,
   hashLampBeautifyPlan,
+  lampBeautifyPlanUsesActiveCatalog,
   type LampBeautifyIntensity,
 } from "@/lib/lamp-beautify";
 import { lampBeautifyPlanOperationId } from "@/lib/lamp-beautify-operations";
@@ -173,6 +174,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return jsonError(
       409,
       "The enhancement plan belongs to a different source run and cannot be approved."
+    );
+  }
+  if (!lampBeautifyPlanUsesActiveCatalog(draftPlan)) {
+    return jsonError(
+      409,
+      "This plan was drafted under an older enhancement catalog and can no longer start a run. Create a fresh run for this clip to get a current plan."
     );
   }
   if (body.intensityOverride !== undefined) {

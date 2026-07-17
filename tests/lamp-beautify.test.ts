@@ -12,6 +12,7 @@ import {
   LAMP_BEAUTIFY_PLAN_PROMPT,
   lampBeautifyPlanRequiresGeneration,
   lampBeautifyPlansDifferOnlyByIntensity,
+  lampBeautifyPlanUsesActiveCatalog,
   parseLampBeautifyPlan,
   type LampBeautifyPlan,
 } from "../lib/lamp-beautify.ts";
@@ -216,22 +217,74 @@ test("scope, approval, and hashing follow the house contract", async () => {
   assert.equal(parseLampBeautifyPlan(mock).id, mock.id);
 });
 
+function activeRaw() {
+  return {
+    sourceScope: {
+      cameraMotion: "static",
+      visiblePeople: "single-person",
+    },
+    decision: "enhance",
+    subjectSummary:
+      "Close-up webcam framing with a flat resting expression and mild forehead shine.",
+    enhance: [
+      {
+        id: "expression-warmth",
+        intensity: 2,
+        rationale:
+          "An expressive lift reads as clearly more engaged and enthusiastic on camera.",
+        evidence: "The resting expression sits flatter than the tone of voice.",
+      },
+      {
+        id: "skin-evenness",
+        intensity: 2,
+        rationale:
+          "Healthier, fresher skin reads as better rested without changing the person.",
+        evidence: "Forehead shine is visible under the key light throughout.",
+      },
+    ],
+    declined: [
+      {
+        id: "under-eye-softening",
+        reason: "The under-eye area already reads rested.",
+      },
+    ],
+    uncertain: [
+      {
+        id: "eye-clarity",
+        uncertainty:
+          "Slight redness may be the room's warm light rather than the eyes.",
+        safeDefault: "decline",
+      },
+    ],
+  };
+}
+
+function activePlan(): LampBeautifyPlan {
+  return approveLampBeautifyPlan(
+    buildLampBeautifyPlan({
+      raw: activeRaw(),
+      planId: "plan-beautify-active-1",
+      runId: "run-beautify-active-1",
+      createdAt: CREATED_AT,
+    }),
+    CREATED_AT + 1_000
+  );
+}
+
 test("generation prompt renders only approved enhancements", () => {
-  const plan = approvedPlan();
+  const plan = activePlan();
   const rendered = initialLampBeautifyMegaPrompt(plan).rendered;
 
   assert.match(rendered, /LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v1/);
+  assert.match(rendered, /\[expression-warmth\] intensity 2 of 3/);
   assert.match(rendered, /\[skin-evenness\] intensity 2 of 3/);
-  assert.match(rendered, /\[hair-tidy\] intensity 1 of 3/);
   assert.match(rendered, /Permanent features stay/);
   assert.match(rendered, /every background pixel source-faithful/i);
   assert.match(rendered, /Do not produce plastic, waxy, over-smoothed/);
 
   // Declined and uncertain categories never reach generation input — naming
   // them would seed the idea (the ring-light lesson from Lamp Background).
-  // The base contract may mention teeth in its own guardrails (the no-grin
-  // rule); only the declined CATEGORY must stay out.
-  assert.doesNotMatch(rendered, /teeth-brightening/);
+  assert.doesNotMatch(rendered, /under-eye-softening/);
   assert.doesNotMatch(rendered, /eye-clarity/);
 
   // The evaluator, by contrast, must see the full catalog decisions.
@@ -239,7 +292,7 @@ test("generation prompt renders only approved enhancements", () => {
     plan,
     iteration: 1,
   });
-  assert.match(evaluatorPrompt, /teeth-brightening/);
+  assert.match(evaluatorPrompt, /under-eye-softening/);
   assert.match(evaluatorPrompt, /eye-clarity/);
 
   assert.equal(isPersistedInitialLampBeautifyPrompt(plan, rendered), true);
@@ -249,6 +302,13 @@ test("generation prompt renders only approved enhancements", () => {
       rendered.replace("Decision: ENHANCE", "Decision: REDESIGN")
     ),
     false
+  );
+
+  // Retired categories have no current-generation form: a legacy plan can
+  // never compile into a NEW prompt, only replay through frozen renderers.
+  assert.throws(
+    () => initialLampBeautifyMegaPrompt(approvedPlan()),
+    /no longer offered/
   );
 });
 
@@ -356,7 +416,7 @@ test("evaluation artifact enforces completeness and safe corrections", () => {
 });
 
 test("the final compiler preserves v1 bytes outside the header and corrections", () => {
-  const plan = approvedPlan();
+  const plan = activePlan();
   const initial = initialLampBeautifyMegaPrompt(plan);
   const artifact = buildLampBeautifyEvaluationArtifact({
     raw: allPassRaw(),
@@ -382,12 +442,12 @@ test("the final compiler preserves v1 bytes outside the header and corrections",
   const otherPlan = approveLampBeautifyPlan(
     buildLampBeautifyPlan({
       raw: (() => {
-        const raw = enhanceRaw();
+        const raw = activeRaw();
         raw.enhance[0]!.intensity = 3;
         return raw;
       })(),
       planId: "plan-beautify-2",
-      runId: "run-beautify-1",
+      runId: "run-beautify-active-1",
       createdAt: CREATED_AT,
     }),
     CREATED_AT + 2_000
@@ -430,8 +490,47 @@ test("beautify eval weights, gates, and prompt wiring hold", () => {
     assert.match(LAMP_BEAUTIFY_PLAN_PROMPT, new RegExp(category));
   }
   assert.doesNotMatch(LAMP_BEAUTIFY_PLAN_PROMPT, /hair-tidy/);
+  assert.doesNotMatch(LAMP_BEAUTIFY_PLAN_PROMPT, /teeth-brightening/);
   assert.match(LAMP_BEAUTIFY_PLAN_PROMPT, /HAIR IS LOCKED/);
   assert.match(LAMP_BEAUTIFY_PLAN_PROMPT, /expression-warmth: the headline trait/);
+});
+
+test("persisted plan versions parse forever and keep their binding hash", async () => {
+  // The version rides inside the binding hash: parse must carry a persisted
+  // version through unchanged, never restamp it with the current one.
+  const v1Plan = {
+    ...activePlan(),
+    version: "lamp-beautify-plan-v1",
+  } as LampBeautifyPlan;
+  const parsed = parseLampBeautifyPlan(v1Plan);
+  assert.equal(parsed.version, "lamp-beautify-plan-v1");
+  assert.equal(
+    await hashLampBeautifyPlan(v1Plan),
+    await hashLampBeautifyPlan(parsed)
+  );
+  assert.notEqual(
+    await hashLampBeautifyPlan(v1Plan),
+    await hashLampBeautifyPlan(activePlan())
+  );
+  assert.equal(activePlan().version, "lamp-beautify-plan-v2");
+  assert.throws(
+    () =>
+      parseLampBeautifyPlan({
+        ...activePlan(),
+        version: "lamp-beautify-plan-v99",
+      }),
+    /Unknown Lamp Beautify plan version/
+  );
+});
+
+test("only active-catalog plans may start a new execution", () => {
+  assert.deepEqual(
+    [...LAMP_BEAUTIFY_ACTIVE_CATALOG],
+    ["expression-warmth", "skin-evenness", "under-eye-softening", "eye-clarity"]
+  );
+  assert.equal(lampBeautifyPlanUsesActiveCatalog(activePlan()), true);
+  // The hair-tidy-era fixture predates the catalog — readable, not runnable.
+  assert.equal(lampBeautifyPlanUsesActiveCatalog(approvedPlan()), false);
 });
 
 test("workflow mode plumbing recognizes beautify", () => {
@@ -452,7 +551,7 @@ test("workflow mode plumbing recognizes beautify", () => {
 
 test("the intensity slider overrides levels and nothing else", async () => {
   const draft = buildLampBeautifyPlan({
-    raw: enhanceRaw(),
+    raw: activeRaw(),
     planId: "plan-slider-1",
     runId: "run-slider-1",
     createdAt: CREATED_AT,
@@ -483,11 +582,8 @@ test("the intensity slider overrides levels and nothing else", async () => {
   assert.equal(lampBeautifyPlansDifferOnlyByIntensity(draft, draft), true);
   const tampered = buildLampBeautifyPlan({
     raw: (() => {
-      const raw = enhanceRaw();
+      const raw = activeRaw();
       raw.enhance[0]!.id = "teeth-brightening" as never;
-      raw.declined = raw.declined.filter(
-        (item) => item.id !== "teeth-brightening"
-      );
       return raw;
     })(),
     planId: "plan-slider-1",
@@ -499,6 +595,7 @@ test("the intensity slider overrides levels and nothing else", async () => {
   // The generation prompt renders the dialed level.
   const approvedPolished = approveLampBeautifyPlan(polished, CREATED_AT + 10);
   const rendered = initialLampBeautifyMegaPrompt(approvedPolished).rendered;
+  assert.match(rendered, /\[expression-warmth\] intensity 3 of 3/);
   assert.match(rendered, /\[skin-evenness\] intensity 3 of 3/);
   assert.doesNotMatch(rendered, /intensity 2 of 3/);
 
@@ -529,7 +626,6 @@ test("the intensity slider overrides levels and nothing else", async () => {
           },
           { region: "skin", finding: "Even tone with no shine or blemishes." },
           { region: "under-eyes", finding: "No visible shadows or puffiness." },
-          { region: "teeth", finding: "Natural tone during brief visibility." },
           { region: "eyes", finding: "Clear sclera without redness." },
         ],
         whyEnhancementWouldNotImprovePresentation:
@@ -572,15 +668,18 @@ test("the warmth rewrite: hair locked, expression-warmth is the headline", () =>
   const rendered = initialLampBeautifyMegaPrompt(warm).rendered;
 
   assert.match(rendered, /\[expression-warmth\] intensity 2 of 3/);
-  assert.match(rendered, /micro-lifts at the mouth corners/);
-  assert.match(rendered, /noticeably brighter, warmer, and more enthusiastic/);
+  assert.match(rendered, /dramatically more expressive, enthusiastic, and healthy/);
+  assert.match(rendered, /strong and unmistakable on its own/);
   assert.match(rendered, /Do not touch the hair in any way/);
   assert.match(rendered, /Hair is fully locked/);
-  assert.match(rendered, /refined pores|pores visibly tightened/);
+  assert.match(rendered, /pores refined/);
   assert.match(rendered, /Do not break lip-sync/);
   assert.match(rendered, /never a held grin through speech/i);
-  // Warmth is a level, not an event — the anti-snap-back contract.
-  assert.match(rendered, /Warmth is a LEVEL, not an event/);
+  // Elevation is constant with amplified response — the anti-snap-back
+  // contract survives the expressiveness rewrite.
+  assert.match(rendered, /constant ELEVATION/);
+  assert.match(rendered, /amplified response to the source's own expressive beats/);
+  assert.match(rendered, /One constant elevation for the entire duration/);
   assert.match(rendered, /no smile bursts, no mood swings, no snap-backs/);
   assert.match(rendered, /smile bursts, expression snap-backs, warmth pulsing, mood oscillation/);
 
@@ -596,20 +695,22 @@ test("the warmth rewrite: hair locked, expression-warmth is the headline", () =>
 
 test("hair-tidy era runs stay valid through the frozen first generation", () => {
   // approvedPlan() is the pre-rewrite fixture: skin-evenness + hair-tidy.
+  // Retired categories render ONLY through their frozen generation — the
+  // current renderer refuses them, so the frame takes the legacy block.
   const plan = approvedPlan();
-  const legacyBase = renderLampBeautifyMegaPrompt({
-    version: 1,
-    base: LEGACY_V1_BEAUTIFY_BASE_PROMPT,
-    plan,
-    corrections: [],
-  });
-  const legacyV1 = legacyBase.replace(
-    renderLampBeautifyPlanBlock(plan),
-    renderLegacyLampBeautifyPlanBlockV1(plan)
+  const legacyV1 = renderLampBeautifyMegaPrompt(
+    {
+      version: 1,
+      base: LEGACY_V1_BEAUTIFY_BASE_PROMPT,
+      plan,
+      corrections: [],
+    },
+    renderLegacyLampBeautifyPlanBlockV1
   );
 
-  // The frozen bytes differ from a fresh compile and still prove the binding.
-  assert.notEqual(legacyV1, initialLampBeautifyMegaPrompt(plan).rendered);
+  // No fresh compile exists for this plan anymore — yet the frozen bytes
+  // still prove the binding.
+  assert.throws(() => initialLampBeautifyMegaPrompt(plan), /no longer offered/);
   assert.equal(isPersistedInitialLampBeautifyPrompt(plan, legacyV1), true);
 
   // The v2 compiler — replayed on every read of an old run — accepts them.
@@ -803,7 +904,7 @@ test("frozen generations are byte-pinned — an in-place edit fails here first",
 });
 
 test("legacy-billed final prompts stay valid through the frozen correction vocabulary", () => {
-  const plan = approvedPlan();
+  const plan = activePlan();
   const withViolations = allPassRaw();
   withViolations.results = withViolations.results.map((result) =>
     result.evalId === "enhancement-adherence"
@@ -863,7 +964,7 @@ test("legacy-billed final prompts stay valid through the frozen correction vocab
 });
 
 test("the clean-generation layer anchors source noise and names the artifacts", () => {
-  const plan = approvedPlan();
+  const plan = activePlan();
   const rendered = initialLampBeautifyMegaPrompt(plan).rendered;
 
   // Positive fidelity anchors — preserving the source's own imperfection is
