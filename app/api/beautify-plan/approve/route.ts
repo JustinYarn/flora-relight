@@ -160,7 +160,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   ) {
     return jsonError(
       409,
-      "A completed enhancement-plan analysis is required before approval."
+      run.beautifyPlan && run.live !== true
+        ? "This is a demo run — its plan never had a real planner analysis, so live generation cannot be authorized. Upload the clip as a live run to use the dial for real."
+        : "A completed enhancement-plan analysis is required before approval."
     );
   }
   if (operation.result.status !== "ready") {
