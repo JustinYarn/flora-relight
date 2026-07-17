@@ -121,7 +121,20 @@ type HumanCtor = new (config: Record<string, unknown>) => HumanLike;
 
 class GazeMeterFailure extends Error {}
 
-const nodeRequire = createRequire(import.meta.url);
+/**
+ * Webpack rewrites `require`/`require.resolve` calls it can see: resolving
+ * "@vladmandic/human" inside the bundled dev server returned the bare module
+ * id instead of a file path (dirname collapsed to "@vladmandic" and the meter
+ * fail-opened on every call). `__non_webpack_require__` compiles to the
+ * emitted chunk's own CJS require — the runtime loader webpack cannot touch.
+ * Plain-node contexts (tests, scripts/validate-gaze-meter.mjs) have no such
+ * global and keep the import.meta.url-based require.
+ */
+declare const __non_webpack_require__: NodeRequire | undefined;
+const nodeRequire: NodeRequire =
+  typeof __non_webpack_require__ === "function"
+    ? __non_webpack_require__
+    : createRequire(import.meta.url);
 
 let fetchBridgeInstalled = false;
 /**
@@ -176,16 +189,38 @@ function resolveModelDir(humanPackageDir: string): string {
   return path.join(humanPackageDir, "models");
 }
 
+/**
+ * Resolve a package's dist directory to an absolute path. A rewritten or
+ * shimmed resolver can hand back a bare module id; anything non-absolute
+ * falls through to the app-root node_modules layout, which holds in dev,
+ * tests, and the traced deploy bundle alike.
+ */
+function distDirOf(specifier: string, packageRelativeDist: string[]): string {
+  try {
+    const resolved = nodeRequire.resolve(specifier);
+    if (path.isAbsolute(resolved)) return path.dirname(resolved);
+  } catch {
+    // Fall through to the cwd-based layout.
+  }
+  return path.join(process.cwd(), "node_modules", ...packageRelativeDist);
+}
+
 async function createEngine(): Promise<HumanLike> {
   // The package's exports map lacks "./" prefixes on its subpath keys, so
   // Node treats them as conditions; the bare specifier resolves to
   // human.node.js (which hard-requires @tensorflow/tfjs-node). Reach the
   // wasm dist by absolute file path — exports maps do not apply there.
-  const humanDistDir = path.dirname(nodeRequire.resolve("@vladmandic/human"));
+  const humanDistDir = distDirOf("@vladmandic/human", [
+    "@vladmandic",
+    "human",
+    "dist",
+  ]);
   const humanPackageDir = path.dirname(humanDistDir);
-  const wasmDistDir = path.dirname(
-    nodeRequire.resolve("@tensorflow/tfjs-backend-wasm")
-  );
+  const wasmDistDir = distDirOf("@tensorflow/tfjs-backend-wasm", [
+    "@tensorflow",
+    "tfjs-backend-wasm",
+    "dist",
+  ]);
   const modelDir = resolveModelDir(humanPackageDir);
   installLocalFetchBridge([modelDir, wasmDistDir]);
 

@@ -65,6 +65,8 @@ import {
   projectLampBackgroundEvaluationForRead,
 } from "@/lib/lamp-background-read";
 import { LAMP_BACKGROUND_EVAL_IDS } from "@/lib/lamp-background-evaluation";
+import { LAMP_BEAUTIFY_EVAL_IDS } from "@/lib/lamp-beautify-evaluation";
+import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
 import {
   lampBackgroundEvaluationOperationId,
   lampBackgroundPlanOperationId,
@@ -117,7 +119,10 @@ import {
   lampIrisPromptForRun,
   projectLampIrisEvaluationForRead,
 } from "@/lib/lamp-iris-read";
-import { selectLampIrisDeliveredIteration } from "@/lib/lamp-iris-evaluation";
+import {
+  LAMP_IRIS_EVAL_IDS,
+  selectLampIrisDeliveredIteration,
+} from "@/lib/lamp-iris-evaluation";
 import {
   lampIrisEvaluationOperationId,
   lampIrisPlanOperationId,
@@ -125,6 +130,7 @@ import {
 import {
   compileLampIrisFinalPrompt,
   initialLampIrisMegaPrompt,
+  isPersistedFinalLampIrisPrompt,
 } from "@/lib/prompts/lamp-iris";
 import {
   isLampIrisPlanArtifact,
@@ -1241,10 +1247,18 @@ function providerOperationMatchesLampIrisExecution(
     );
   }
   if (operation.iteration !== 2) return false;
+  // The journaled Final may have been compiled under a frozen earlier
+  // correction-wording generation; acceptance mirrors the initial-prompt rule.
+  const first = lampIrisArtifact(evaluations.first, 1);
+  if (!first || !run.irisPlan || typeof operation.renderedPrompt !== "string") {
+    return false;
+  }
   try {
-    return (
-      operation.renderedPrompt ===
-      lampIrisFinalPrompt(run, execution, evaluations)?.rendered
+    return isPersistedFinalLampIrisPrompt(
+      execution.renderedPrompt,
+      run.irisPlan,
+      first,
+      operation.renderedPrompt
     );
   } catch {
     return false;
@@ -3455,9 +3469,13 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     value: body.humanGrade,
     requiredEvalIds: background
       ? LAMP_BACKGROUND_EVAL_IDS
-      : lamp
-        ? LAMP_EVAL_IDS
-        : ALL_EVAL_IDS,
+      : beautify
+        ? LAMP_BEAUTIFY_EVAL_IDS
+        : iris
+          ? LAMP_IRIS_EVAL_IDS
+          : lamp
+            ? LAMP_EVAL_IDS
+            : ALL_EVAL_IDS,
     ...(lamp ? { acceptedLegacyEvalIds: ALL_EVAL_IDS } : {}),
   });
   if (!grade) {
@@ -3465,8 +3483,15 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
   const lastIteration = materialized.iterations.at(-1);
   const selectedIndex = materialized.bestIterationIndex;
+  // Best-of-two settlement is a Lamp Iris-only field: the delivered take may
+  // be the Initial (1). Every other two-pass mode ships the Final (2).
+  const deliveredIteration = iris
+    ? authoritativeExecution?.deliveredIteration ?? 2
+    : 2;
   const shipped = twoPass
-    ? materialized.iterations.find((iteration) => iteration.index === 2)
+    ? materialized.iterations.find(
+        (iteration) => iteration.index === deliveredIteration
+      )
     : selectedIndex === undefined
       ? lastIteration
       : materialized.iterations.find(
@@ -3502,13 +3527,40 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           lampEvaluations
         ) &&
         lampArtifact(lampEvaluations.final, 2) !== undefined
-        : authoritativeExecution.status === "awaiting_review" &&
-          shipped?.index === 1 &&
-          shippedOperation !== undefined &&
-          providerOperationMatchesExecution(
-            shippedOperation,
-            authoritativeExecution
-          )
+        : beautify
+          ? authoritativeExecution.status === "awaiting_review" &&
+        shipped?.index === 2 &&
+        shippedOperation !== undefined &&
+        shippedOperation.result?.audioVerified === true &&
+        providerOperationMatchesLampBeautifyExecution(
+          shippedOperation,
+          materialized,
+          authoritativeExecution,
+          beautifyEvaluations
+        ) &&
+        lampBeautifyArtifact(beautifyEvaluations.final, 2) !== undefined
+          : iris
+            ? authoritativeExecution.status === "awaiting_review" &&
+        shipped?.index === deliveredIteration &&
+        shippedOperation !== undefined &&
+        shippedOperation.id === videoGenerationOperationId(deliveredIteration) &&
+        shippedOperation.result?.audioVerified === true &&
+        providerOperationMatchesLampIrisExecution(
+          shippedOperation,
+          materialized,
+          authoritativeExecution,
+          irisEvaluations
+        ) &&
+        lampIrisArtifact(irisEvaluations.final, 2) !== undefined &&
+        (deliveredIteration !== 1 ||
+          lampIrisArtifact(irisEvaluations.first, 1) !== undefined)
+            : authoritativeExecution.status === "awaiting_review" &&
+              shipped?.index === 1 &&
+              shippedOperation !== undefined &&
+              providerOperationMatchesExecution(
+                shippedOperation,
+                authoritativeExecution
+              )
     : true;
   const approvedBackgroundNoOp =
     !authoritativeExecution &&

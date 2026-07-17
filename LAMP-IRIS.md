@@ -124,6 +124,32 @@ Slider-calibration live runs measured ~$2.3–2.4 settled per two-pass run on a
 4. **Batch support** mirrors Beautify's status (single-clip plan-first flow;
    full batch contract not wired).
 
+## Provider content-filter constraint (learned live 2026-07-17)
+
+The provider runs an **asynchronous content filter over the whole prompt
+after admitting the create**. A rejected prompt is indistinguishable from a
+lost generation from the outside: `interactions.create` returns an id, then
+every read 400s — for a policy block the body says `Input blocked … The
+prompt contains sensitive words that violate Google's Generative AI
+Prohibited Use policy`. Four consecutive Finals (both gen-2 live runs and
+both gen-3 live runs) were killed this way while every Initial passed; the
+delta was exactly the correction-escalation wording. Blocked phrasings —
+frozen verbatim in `renderLegacyLampIrisCorrectionV2/V3` and pinned out of
+the current vocabulary by test — included "that output failed this
+workflow's one job", "the person watching must feel looked in the eye",
+"plainly different … in a same-frame comparison". Rules for all future
+prompt work in this mode:
+
+- State the required edit and its visibility bar in plain technical
+  vocabulary. Never blame a prior output; never describe effects on the
+  person watching; never frame the edit as producing a difference that
+  survives a comparison.
+- When a Final seals with the lost-interaction signature, `interactions.get`
+  the dead id directly (free) before blaming the spend allowance — the 400
+  body names a policy block explicitly.
+- A policy-blocked create generates zero output seconds; the burned cost is
+  the Initial + its evaluation (~$1.05), not the Final.
+
 ## Merge notes for the unified app
 
 This branch stacks on `codex/lamp-beautify` (which contains the Background

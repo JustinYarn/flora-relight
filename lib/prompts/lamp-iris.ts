@@ -544,8 +544,63 @@ function findCorrectItems(
 /**
  * Corrections are rendered from a closed action vocabulary and approved plan
  * entries. No judge-authored instruction is ever copied into provider input.
+ *
+ * Vocabulary constraint (learned live 2026-07-17): the provider runs an
+ * asynchronous content filter over the whole prompt AFTER admitting the
+ * create — a rejected prompt surfaces only as an interaction that reads 400
+ * "Input blocked … sensitive words" forever, indistinguishable from a lost
+ * generation. The v2/v3 escalation wordings ("that output failed this
+ * workflow's one job", "the person watching must feel looked in the eye",
+ * "plainly different … in a same-frame comparison") tripped it on four
+ * consecutive Finals while every Initial passed. Correction lines must stay
+ * in plain technical vocabulary: state the required edit and the visibility
+ * bar; never blame a prior output, never describe effects on the viewer.
  */
 export function renderLampIrisCorrection(
+  plan: LampIrisPlan,
+  correction: LampIrisCorrection
+): string {
+  const canonical = parseLampIrisPlan(plan);
+  switch (correction.action) {
+    case "restore-identity":
+      return "Restore the exact source person's facial geometry, recognizable features, permanent marks, and apparent age at every corresponding moment; gaze correction never changes who the person is.";
+    case "restore-performance-lipsync":
+      return "Restore the source performance exactly: head position and rotation, gestures, posture, body trajectory, and speech articulation with frame-accurate lip-sync at the same timestamps. The head is never re-aimed; contact lives in the eyes alone.";
+    case "complete-approved-gaze-correction": {
+      const items = findCorrectItems(canonical, correction);
+      return `Fully apply these approved gaze corrections at their approved intensity wherever the pattern occurs: ${items
+        .map((item) => `[${item.id}] at intensity ${item.intensity}`)
+        .join("; ")}. The correction must be clearly visible: wherever the source gaze rests on reading material, the corrected gaze rests on the camera lens instead, held naturally through speech. A gaze that still reads as anchored to reading material, or that settles near the lens without reaching it, is not compliant.`;
+    }
+    case "reduce-gaze-lock": {
+      const items = findCorrectItems(canonical, correction);
+      return `Ease these corrections back to their approved intensity — the previous pass over-locked the gaze: ${items
+        .map(
+          (item) =>
+            `[${item.id}] must read as intensity ${item.intensity} of 3, no stronger`
+        )
+        .join("; ")}. Restore the natural breaks and living texture that level preserves.`;
+    }
+    case "restore-blink-pattern":
+      return "Restore the source blink pattern exactly: every source blink at its source timestamp with natural lid travel, no blink removed, added, shortened, or stretched.";
+    case "repair-eye-naturalness":
+      return "Restore believable living eyes: natural micro-saccades and settling, eyelid aperture consistent with the corrected direction, both eyes converging naturally on the lens, and the source's exact iris, sclera, lash, brow, and catchlight appearance. No glassy, painted, frozen, or asymmetric eyes.";
+    case "remove-unapproved-changes":
+      return "Remove every change outside the approved CORRECT list. The face beyond the eyes, the expression, the mouth, skin, hair, wardrobe, and every unlisted region must match the source exactly.";
+    case "restore-untouched-surroundings":
+      return "Restore the background, room content, other people, lighting, color, focus, framing, and camera exactly to the source everywhere; this workflow edits only the primary subject's gaze.";
+  }
+}
+
+/**
+ * Frozen third-generation correction-line rendering (the pupil-literal
+ * escalation). Never billed a completed Final — every submission was blocked
+ * by the provider's content policy — but the wording is journaled on sealed
+ * operations, so reads accept it like any shipped form. Same freeze rule as
+ * the other generations: the whole vocabulary is copied so a future edit to
+ * any line cannot silently orphan persisted runs.
+ */
+export function renderLegacyLampIrisCorrectionV3(
   plan: LampIrisPlan,
   correction: LampIrisCorrection
 ): string {
@@ -581,11 +636,99 @@ export function renderLampIrisCorrection(
   }
 }
 
+/**
+ * Frozen second-generation correction-line rendering. Runs whose Final was
+ * compiled under the visibility rewrite carry this exact wording in their
+ * journal; validators accept it as an alternate rendering of the same
+ * corrections ledger. Only the completion escalation ever moved between
+ * generations, but the whole vocabulary is frozen so a future edit to any
+ * line cannot silently orphan persisted runs.
+ */
+export function renderLegacyLampIrisCorrectionV2(
+  plan: LampIrisPlan,
+  correction: LampIrisCorrection
+): string {
+  const canonical = parseLampIrisPlan(plan);
+  switch (correction.action) {
+    case "restore-identity":
+      return "Restore the exact source person's facial geometry, recognizable features, permanent marks, and apparent age at every corresponding moment; gaze correction never changes who the person is.";
+    case "restore-performance-lipsync":
+      return "Restore the source performance exactly: head position and rotation, gestures, posture, body trajectory, and speech articulation with frame-accurate lip-sync at the same timestamps. The head is never re-aimed; contact lives in the eyes alone.";
+    case "complete-approved-gaze-correction": {
+      const items = findCorrectItems(canonical, correction);
+      return `The previous pass left the gaze reading essentially as the source — that output failed this workflow's one job. Fully apply these approved gaze corrections at their approved intensity wherever the pattern occurs: ${items
+        .map((item) => `[${item.id}] at intensity ${item.intensity}`)
+        .join("; ")}. Produce plainly different eye direction at the same timestamps: wherever the source's eyes rest on reading material, the candidate's eyes are visibly on the lens in a same-frame comparison.`;
+    }
+    case "reduce-gaze-lock": {
+      const items = findCorrectItems(canonical, correction);
+      return `Ease these corrections back to their approved intensity — the previous pass over-locked the gaze: ${items
+        .map(
+          (item) =>
+            `[${item.id}] must read as intensity ${item.intensity} of 3, no stronger`
+        )
+        .join("; ")}. Restore the natural breaks and living texture that level preserves.`;
+    }
+    case "restore-blink-pattern":
+      return "Restore the source blink pattern exactly: every source blink at its source timestamp with natural lid travel, no blink removed, added, shortened, or stretched.";
+    case "repair-eye-naturalness":
+      return "Restore believable living eyes: natural micro-saccades and settling, eyelid aperture consistent with the corrected direction, both eyes converging naturally on the lens, and the source's exact iris, sclera, lash, brow, and catchlight appearance. No glassy, painted, frozen, or asymmetric eyes.";
+    case "remove-unapproved-changes":
+      return "Remove every change outside the approved CORRECT list. The face beyond the eyes, the expression, the mouth, skin, hair, wardrobe, and every unlisted region must match the source exactly.";
+    case "restore-untouched-surroundings":
+      return "Restore the background, room content, other people, lighting, color, focus, framing, and camera exactly to the source everywhere; this workflow edits only the primary subject's gaze.";
+  }
+}
+
+/**
+ * Frozen first-generation correction-line rendering — the wording live
+ * before the visibility rewrite. Same freeze rule as V2 above.
+ */
+export function renderLegacyLampIrisCorrectionV1(
+  plan: LampIrisPlan,
+  correction: LampIrisCorrection
+): string {
+  const canonical = parseLampIrisPlan(plan);
+  switch (correction.action) {
+    case "restore-identity":
+      return "Restore the exact source person's facial geometry, recognizable features, permanent marks, and apparent age at every corresponding moment; gaze correction never changes who the person is.";
+    case "restore-performance-lipsync":
+      return "Restore the source performance exactly: head position and rotation, gestures, posture, body trajectory, and speech articulation with frame-accurate lip-sync at the same timestamps. The head is never re-aimed; contact lives in the eyes alone.";
+    case "complete-approved-gaze-correction": {
+      const items = findCorrectItems(canonical, correction);
+      return `Fully apply these approved gaze corrections at their approved intensity wherever the pattern occurs: ${items
+        .map((item) => `[${item.id}] at intensity ${item.intensity}`)
+        .join("; ")}. A gaze that still reads as anchored to reading material is not compliant.`;
+    }
+    case "reduce-gaze-lock": {
+      const items = findCorrectItems(canonical, correction);
+      return `Ease these corrections back to their approved intensity — the previous pass over-locked the gaze: ${items
+        .map(
+          (item) =>
+            `[${item.id}] must read as intensity ${item.intensity} of 3, no stronger`
+        )
+        .join("; ")}. Restore the natural breaks and living texture that level preserves.`;
+    }
+    case "restore-blink-pattern":
+      return "Restore the source blink pattern exactly: every source blink at its source timestamp with natural lid travel, no blink removed, added, shortened, or stretched.";
+    case "repair-eye-naturalness":
+      return "Restore believable living eyes: natural micro-saccades and settling, eyelid aperture consistent with the corrected direction, both eyes converging naturally on the lens, and the source's exact iris, sclera, lash, brow, and catchlight appearance. No glassy, painted, frozen, or asymmetric eyes.";
+    case "remove-unapproved-changes":
+      return "Remove every change outside the approved CORRECT list. The face beyond the eyes, the expression, the mouth, skin, hair, wardrobe, and every unlisted region must match the source exactly.";
+    case "restore-untouched-surroundings":
+      return "Restore the background, room content, other people, lighting, color, focus, framing, and camera exactly to the source everywhere; this workflow edits only the primary subject's gaze.";
+  }
+}
+
 function renderCorrections(
   plan: LampIrisPlan,
   corrections: LampIrisCorrection[],
   eol = "\n",
-  measuredCalibration?: string
+  measuredCalibration?: string,
+  lineRenderer: (
+    plan: LampIrisPlan,
+    correction: LampIrisCorrection
+  ) => string = renderLampIrisCorrection
 ): string {
   const lines: string[] = [];
   if (measuredCalibration) {
@@ -593,7 +736,7 @@ function renderCorrections(
   }
   for (const correction of corrections) {
     lines.push(
-      `${lines.length + 1}. [${correction.severity.toUpperCase()}] ${renderLampIrisCorrection(
+      `${lines.length + 1}. [${correction.severity.toUpperCase()}] ${lineRenderer(
         plan,
         correction
       )}`
@@ -731,7 +874,11 @@ function renderPersistedV2(
   persistedV1: string,
   plan: LampIrisPlan,
   corrections: LampIrisCorrection[],
-  measuredCalibration?: string
+  measuredCalibration?: string,
+  lineRenderer?: (
+    plan: LampIrisPlan,
+    correction: LampIrisCorrection
+  ) => string
 ): string {
   if (!persistedV1.startsWith(V1_HEADER)) {
     throw new Error(
@@ -776,7 +923,8 @@ function renderPersistedV2(
       plan,
       corrections,
       correctionsSection.eol,
-      measuredCalibration
+      measuredCalibration,
+      lineRenderer
     ) +
     withV2Header.slice(correctionsSection.bodyEnd + offset)
   );
@@ -822,4 +970,52 @@ export function compileLampIrisFinalPrompt(
       measuredCalibration
     ),
   };
+}
+
+/**
+ * True when the rendered bytes are a faithful two-pass compile of this exact
+ * persisted initial prompt, approved plan, and first-pass evaluation — the
+ * current form or one of the frozen shipped generations, newest first (the
+ * same rule isPersistedInitialLampIrisPrompt applies to pass 1). The frozen
+ * generations predate GazeMeter, so their forms never carry a measured
+ * calibration line.
+ */
+export function isPersistedFinalLampIrisPrompt(
+  persistedInitialRendered: string,
+  plan: LampIrisPlan,
+  firstEvaluation: LampIrisEvaluationArtifact,
+  rendered: string
+): boolean {
+  try {
+    if (
+      rendered ===
+      compileLampIrisFinalPrompt(persistedInitialRendered, plan, firstEvaluation)
+        .rendered
+    ) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  const canonical = assertApprovedPlan(plan);
+  for (const legacyRenderer of [
+    renderLegacyLampIrisCorrectionV3,
+    renderLegacyLampIrisCorrectionV2,
+    renderLegacyLampIrisCorrectionV1,
+  ]) {
+    try {
+      const corrections = collectLampIrisCorrections(firstEvaluation, canonical);
+      const candidate = renderPersistedV2(
+        persistedInitialRendered,
+        canonical,
+        corrections,
+        undefined,
+        legacyRenderer
+      );
+      if (rendered === candidate) return true;
+    } catch {
+      // This generation cannot render the corrections — try the next.
+    }
+  }
+  return false;
 }
