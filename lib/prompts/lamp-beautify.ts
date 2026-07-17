@@ -43,12 +43,13 @@ export interface LampBeautifyMegaPrompt {
  */
 export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
   task: [
-    "Apply a bounded professional on-camera enhancement to the primary subject of this exact source video as a source-faithful edit.",
-    "The original video is structural, temporal, photometric, and performance ground truth.",
+    "TRANSFORM the primary subject of this exact source video into the approved target state below, and reproduce absolutely everything outside that authorization exactly as filmed.",
+    "The original video is structural, temporal, photometric, and performance ground truth for everything OUTSIDE the approved enhancements; inside them, the approved target state is the ground truth to reach.",
     "The human-approved enhancement plan is the complete edit authorization.",
     "The goal of this workflow is a subject who reads as dramatically more expressive, enthusiastic, and healthy on camera — animated engaged eyes, an energetic magnetic presence, vibrant well-rested skin — while remaining unmistakably the same person having the same conversation.",
     "Apply every approved enhancement at its approved intensity wherever the relevant region is visible, and calibrate visibility to that intensity: at 1 the lift is clear but gentle; at 2 it must be strong and unmistakable on its own, with no source needed for comparison; at 3 it is a vivid transformation — the best, most magnetic natural version of this exact person.",
-    "Undershooting an approved intensity is a failure exactly like overshooting it. A result a viewer must squint at to notice has failed this workflow's one job.",
+    "Undershooting an approved intensity is a failure exactly like overshooting it, and the single most common failure of this task is returning the source nearly unchanged: if a viewer could mistake the result for the source at a glance, the task has FAILED no matter how clean the copy.",
+    "Inside an approved region, when enhancement and preservation seem to pull in different directions, the approved enhancement wins; outside the ENHANCE list, preservation is absolute.",
     "Do not improve, restyle, or change anything outside the approved enhancement list.",
   ].join(" "),
   scope: [
@@ -87,6 +88,7 @@ export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     ].join(" "),
   },
   application: [
+    "This is a visible transformation, not a subtle grade: the returned video must be immediately distinguishable from the input in every approved region at the approved intensity, and indistinguishable from it everywhere else.",
     "Apply each approved enhancement uniformly and continuously across the full timeline, tracking the subject through motion, occlusion, and lighting variation.",
     "Expressiveness must read as this person genuinely lit up, not a pasted smile: it lives in the eyes, the brows, the cheeks, and the whole engaged posture of the face, and it still moves naturally with the words being spoken.",
     "Every enhancement is a constant ELEVATION held for the entire duration: a raised baseline plus an amplified response to the source's own expressive beats — when the source smiles, the result smiles fuller; when the source emphasizes a word, the result lights up more; when the source rests, the result rests brighter. The elevation itself never wavers: identical strength in the first second and the last, no bursts, no fades, no snap-backs.",
@@ -110,6 +112,7 @@ export const LAMP_BEAUTIFY_BASE_PROMPT: LampBeautifyBasePrompt = {
     "Do not add text, captions, logos, watermarks, graphics, or visible masks.",
     "Do not change playback speed, duration, frame cadence, event timing, or source audio.",
     "Generation artifacts to exclude entirely: temporal flicker, shimmer, strobing, luminance pumping, boiling or crawling texture, texture reinvention between frames, morphing or warping features, ghosting, double edges, edge halos, over-sharpening ringing, banding in smooth gradients, color drift, chroma blotches, blockiness, moiré, added grain, denoised or waxy patches, AI smoothness, uncanny-valley sheen, smile bursts, expression snap-backs, warmth pulsing, mood oscillation.",
+    "Above all, do not return a near-copy of the source: before returning, self-check against the plan, and if the person does not read clearly more expressive, healthy, and energized than the input at each approved intensity, increase the enhancement amplitude and render again — every lock above constrains WHAT may change, never WHETHER the approved change happens.",
   ],
 };
 
@@ -953,33 +956,33 @@ const CATEGORY_RECIPES: Record<
 > = {
   "expression-warmth": {
     bands: {
-      1: "Clearly warmer and more awake than the source: softly lifted mouth corners, brighter engaged eyes, a steady pleasant energy in every frame.",
-      2: "Strongly expressive and animated: visibly lively eyes, an evident enthusiastic presence that fills the frame, every smile and emphasis the source contains rendered fuller and brighter — a viewer immediately reads this person as lit up, no source needed for comparison.",
-      3: "Vividly magnetic: the most engaging natural version of this person — sparkling animated eyes, unmistakable enthusiasm radiating from the whole face, every expressive beat of the source amplified to its believable maximum, the presence of someone having the best conversation of their week.",
+      1: "A face resting in easy, warm engagement: softly lifted mouth corners, awake interested eyes, a steady pleasant energy in every frame.",
+      2: "Open animated enthusiasm filling the face: visibly lively eyes, live brows, lifted cheeks, every smile and emphasis the source contains rendered fuller and brighter — anyone watching immediately reads a person genuinely enjoying this conversation, no source needed for comparison.",
+      3: "Peak natural charisma — the face of someone completely lit up: sparkling animated eyes, unmistakable enthusiasm radiating from the whole face, every expressive beat of the source amplified to its believable maximum, the presence of someone having the best conversation of their week.",
     },
     keep: "One constant elevation for the entire duration — identical strength in the first second and the last, no smile bursts, no mood swings, no snap-backs to baseline. Amplification rides the source's own beats: same words, same mouth shapes at the same timestamps, frame-accurate lip-sync; never a held grin through speech; no teeth appear that the source does not show at that moment.",
   },
   "skin-evenness": {
     bands: {
-      1: "Visibly healthier: shine calmed, tone evened, the most distracting temporary blemishes cleared.",
-      2: "Unmistakably fresh and healthy on its own: even vibrant tone, redness gone, pores refined, a natural vitality that reads deeply rested and cared for without any side-by-side.",
-      3: "Peak healthy: luminous even skin with a natural glow that comes from health rather than lighting — clear, toned, editorial-grade yet unmistakably real skin.",
+      1: "Freshly healthy skin: shine calmed, tone evened, the most distracting temporary blemishes gone.",
+      2: "Unmistakably fresh, even, vibrant skin: redness cleared, pores refined, the healthy vitality of someone deeply rested and cared for — obvious without any side-by-side.",
+      3: "Peak-health skin: luminous even tone with a natural glow that comes from health rather than lighting — clear, toned, editorial-grade yet unmistakably real.",
     },
     keep: "Real texture and the subject's permanent marks, facial hair, and apparent age remain at every level; glow comes from skin quality, never from changed lighting or exposure; never poreless, waxy, or blurred.",
   },
   "under-eye-softening": {
     bands: {
-      1: "Shadows visibly lightened.",
-      2: "Clearly rested: circles strongly reduced, puffiness eased, the whole eye area reading fresh on its own.",
+      1: "Under-eye shadows visibly lightened.",
+      2: "A clearly rested eye area: circles strongly reduced, puffiness eased, fresh on its own.",
       3: "Completely rested: bright, smooth under-eyes that read as the best sleep of the month.",
     },
     keep: "Natural under-eye contours and believable fine lines remain at every level.",
   },
   "eye-clarity": {
     bands: {
-      1: "Whites cleaner, gaze a touch more awake.",
-      2: "Noticeably alive: bright clear whites and a lively engaged sparkle — eyes that read genuinely enthusiastic without any comparison.",
-      3: "Striking: luminous, energized eyes that light the whole face — the gaze of someone completely captivated by the conversation.",
+      1: "Cleaner whites, a slightly more awake gaze.",
+      2: "Noticeably alive eyes: bright clear whites and a lively engaged sparkle — genuinely enthusiastic without any comparison.",
+      3: "Luminous, energized eyes that light the whole face — the gaze of someone completely captivated by the conversation.",
     },
     keep: "Iris color, eye shape, catchlight positions, and gaze direction remain exactly as in the source.",
   },
@@ -1019,6 +1022,8 @@ export function renderLampBeautifyPlanBlock(plan: LampBeautifyPlan): string {
     "ENHANCE — apply each item at its approved intensity, and nothing else:",
     canonical.enhance.map((item) => `- ${renderEnhanceItem(item)}`).join("\n"),
     "",
+    "DELIVERY BAR: every enhancement above must be plainly visible at its approved band in the returned video on its own — returning the source with token changes is the defined failure of this task. Within an approved region, when unsure between more visible and less visible, render MORE visible.",
+    "",
     "GLOBAL DEFAULT: every category, region, person, and pixel not explicitly listed under ENHANCE is protected.",
   ].join("\n");
 }
@@ -1054,9 +1059,9 @@ export function renderLampBeautifyCorrection(
       return "Restore the source performance timing and trajectories exactly, including gestures, blinks, head motion, body motion, and lip movement; do not retime or reanimate.";
     case "complete-approved-enhancement": {
       const items = findEnhanceItems(canonical, correction);
-      return `Fully and UNIFORMLY apply these approved enhancements at their approved intensity — one constant level across the entire timeline, wherever the region is visible: ${items
-        .map((item) => `[${item.id}] at intensity ${item.intensity}`)
-        .join("; ")}. A near-unchanged result is not compliant, and neither is an enhancement that appears in bursts or drops back to baseline.`;
+      return `The previous attempt left these approved enhancements nearly invisible and failed evaluation as indistinguishable from the source. This is the final attempt: render ${items
+        .map((item) => `[${item.id}] at FULL intensity ${item.intensity}`)
+        .join("; ")} — plainly visible in every frame where the region shows, held at one constant level for the whole duration. Between slightly too strong and too subtle, choose slightly too strong: never caricature, but never again a near-copy.`;
     }
     case "reduce-enhancement-intensity": {
       const items = findEnhanceItems(canonical, correction);

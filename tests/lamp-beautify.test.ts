@@ -415,7 +415,8 @@ test("evaluation artifact enforces completeness and safe corrections", () => {
   );
 
   const rendered = renderLampBeautifyCorrection(plan, corrections[0]!);
-  assert.match(rendered, /\[skin-evenness\] at intensity 2/);
+  assert.match(rendered, /\[skin-evenness\] at FULL intensity 2/);
+  assert.match(rendered, /This is the final attempt/);
 });
 
 test("the final compiler preserves v1 bytes outside the header and corrections", () => {
@@ -685,6 +686,14 @@ test("the warmth rewrite: hair locked, expression-warmth is the headline", () =>
   assert.match(rendered, /One constant elevation for the entire duration/);
   assert.match(rendered, /no smile bursts, no mood swings, no snap-backs/);
   assert.match(rendered, /smile bursts, expression snap-backs, warmth pulsing, mood oscillation/);
+
+  // The transformation-first contract: the edit is the task, the locks bound
+  // it, and a near-copy of the source is the named failure mode.
+  assert.match(rendered, /^=== LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v1 ===\n\n\[TASK\]\nTRANSFORM the primary subject/);
+  assert.match(rendered, /the approved enhancement wins/);
+  assert.match(rendered, /DELIVERY BAR:/);
+  assert.match(rendered, /never WHETHER the approved change happens/);
+  assert.match(rendered, /mistake the result for the source at a glance/);
 
   // A post-freeze plan has no first-generation form — cleanly rejected.
   assert.equal(
@@ -999,11 +1008,14 @@ test("legacy-billed final prompts stay valid through the frozen correction vocab
     flawed
   );
   assert.equal(candidates.length, 3);
-  // Index 0 is the only form new executions may bill with.
+  // Index 0 is the only form new executions may bill with — the escalation
+  // vocabulary, distinct from both frozen forms.
   assert.equal(
     candidates[0]!.rendered,
     compileLampBeautifyFinalPrompt(persisted, plan, flawed).rendered
   );
+  assert.match(candidates[0]!.rendered, /This is the final attempt/);
+  assert.notEqual(candidates[0]!.rendered, candidates[1]!.rendered);
   assert.match(candidates[1]!.rendered, /Fully and UNIFORMLY apply/);
   assert.match(
     candidates[2]!.rendered,
