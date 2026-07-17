@@ -78,6 +78,7 @@ import {
   createMockLampBeautifyPlan,
   hashLampBeautifyPlan,
   lampBeautifyPlanRequiresGeneration,
+  lampBeautifyPlansDifferOnlyByIntensity,
   parseLampBeautifyPlan,
   type LampBeautifyPlan,
 } from "@/lib/lamp-beautify";
@@ -805,17 +806,31 @@ async function readLampBeautifyEvaluationProjection(
   storage: ReturnType<typeof getStorage>,
   runId: string
 ): Promise<LampBeautifyEvaluationProjection> {
-  const [plan, first, final] = await Promise.all([
+  const [run, plan, first, final] = await Promise.all([
+    storage.getRun(runId),
     storage.getPaidOperation(runId, lampBeautifyPlanOperationId()),
     storage.getPaidOperation(runId, lampBeautifyEvaluationOperationId(1)),
     storage.getPaidOperation(runId, lampBeautifyEvaluationOperationId(2)),
   ]);
-  const planHash =
+  // The execution binds the hash of the plan AS APPROVED — the human
+  // intensity dial may legitimately move it away from the journal draft, so
+  // the read-side binding hashes the run's approved copy, and the draft is
+  // compared modulo intensity in lampBeautifyPlanBindingValid.
+  let planHash: string | null = null;
+  if (
     plan?.status === "completed" &&
     isLampBeautifyPlanArtifact(plan.result) &&
     plan.result.status === "ready"
-      ? await hashLampBeautifyPlan(plan.result.plan)
-      : null;
+  ) {
+    try {
+      planHash =
+        run?.beautifyPlan !== undefined
+          ? await hashLampBeautifyPlan(parseLampBeautifyPlan(run.beautifyPlan))
+          : await hashLampBeautifyPlan(plan.result.plan);
+    } catch {
+      planHash = null;
+    }
+  }
   return { plan, planHash, first, final };
 }
 
@@ -833,24 +848,6 @@ function isLampBeautifyExecution(
   execution: RunExecution | null | undefined
 ): boolean {
   return Boolean(execution?.executionId.startsWith("lamp-beautify:"));
-}
-
-function beautifyPlanContentForBinding(plan: LampBeautifyPlan): unknown {
-  return {
-    version: plan.version,
-    id: plan.id,
-    runId: plan.runId,
-    createdAt: plan.createdAt,
-    sourceScope: plan.sourceScope,
-    decision: plan.decision,
-    subjectSummary: plan.subjectSummary,
-    enhance: plan.enhance,
-    declined: plan.declined,
-    uncertain: plan.uncertain,
-    ...(plan.noOpJustification
-      ? { noOpJustification: plan.noOpJustification }
-      : {}),
-  };
 }
 
 function lampBeautifyPlanBindingValid(
@@ -874,9 +871,11 @@ function lampBeautifyPlanBindingValid(
     ) {
       return false;
     }
-    return (
-      JSON.stringify(beautifyPlanContentForBinding(approvedPlan)) ===
-      JSON.stringify(beautifyPlanContentForBinding(planArtifact.plan))
+    // The approved copy may differ from the journal draft only by the human
+    // intensity dial — the same rule the server-side validator enforces.
+    return lampBeautifyPlansDifferOnlyByIntensity(
+      planArtifact.plan,
+      approvedPlan
     );
   } catch {
     return false;
