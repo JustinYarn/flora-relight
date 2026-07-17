@@ -76,7 +76,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 80,
     borderlineThreshold: 65,
     allowedCorrectionActions: ["restore-identity"],
-    rubric: `Compare facial geometry, bone structure, distinctive features, and recognizability throughout the complete source and candidate. This workflow BEAUTIFIES: a flattering, fresher rendering of the same features — including reading a few well-rested years younger — is the product, not a violation, and must not be down-scored. Fail only when the person reads as a DIFFERENT individual, a different life stage, or structurally reshaped (changed bone structure, face shape, eye size, nose, or jaw). Approved expressiveness may read strongly warmer and more animated than the source; caricature, theatrical emotion a real person would not produce, or a pasted grin still fails. Judge the worst moment, especially under head motion and expression changes.`,
+    rubric: `Compare facial geometry, bone structure, distinctive features, and recognizability throughout the complete source and candidate — the same person wearing the exact same clothing (garments, colors, patterns). This workflow BEAUTIFIES: a flattering, fresher rendering of the same features — including reading a few well-rested years younger — is the product, not a violation, and must not be down-scored. Fail only when the person reads as a DIFFERENT individual, a different life stage, structurally reshaped (changed bone structure, face shape, eye size, nose, or jaw), or dressed differently than the source. Approved expressiveness may read strongly warmer and more animated than the source; caricature, theatrical emotion a real person would not produce, or a pasted grin still fails. Judge the worst moment, especially under head motion and expression changes.`,
   },
   {
     id: "enhancement-adherence",
@@ -94,7 +94,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
       "reduce-enhancement-intensity",
       "remove-unapproved-beautification",
     ],
-    rubric: `Treat the approved enhancement plan as the exact edit authorization and judge TARGET MATCHING per item: at intensity 1 the lift may be deniable; at 2 it must be evident at a glance in a side-by-side at normal playback; at 3 it must be unmistakable even without the source. Too weak for the approved intensity is a failure exactly like too strong — report undershoot with correctionAction complete-approved-enhancement and overshoot with reduce-enhancement-intensity. Any beautification outside the approved list — makeup, reshaping, tone shifts, hairstyle changes, or enhancement of unlisted regions — fails regardless of how flattering it looks.`,
+    rubric: `Treat the approved enhancement plan as the exact edit authorization and judge TARGET MATCHING per item: at intensity 1 the lift may be deniable; at 2 it must be evident at a glance in a side-by-side at normal playback; at 3 it must be unmistakable even without the source. Too weak for the approved intensity is a failure exactly like too strong — report undershoot with correctionAction complete-approved-enhancement and overshoot with reduce-enhancement-intensity. Any beautification outside the approved list — makeup, reshaping, tone shifts, or enhancement of unlisted regions — fails regardless of how flattering it looks; changed hair, changed clothing, background blur or added depth-of-field, and any beauty-shot treatment are unapproved beautification and must be reported with correctionAction remove-unapproved-beautification and empty planItemIds.`,
   },
   {
     id: "enhancement-quality",
@@ -136,7 +136,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 85,
     borderlineThreshold: 70,
     allowedCorrectionActions: ["restore-identity"],
-    rubric: `Build an inventory of permanent identity marks — moles, scars, freckles, birthmarks, facial-hair pattern — from the source, and verify each survives in the candidate at every corresponding moment; fading, shrinking, or removing any of them fails even when the overall result looks natural. Hair is fully locked in this workflow: any change to hairstyle, hairline, volume, color, or even stray flyaways fails. Wrinkles are graded differently in this beautifying workflow: fine lines may soften visibly and deep character lines may soften as part of an approved enhancement — fail on wrinkles only when deep character lines VANISH entirely or the face loses its age-consistent structure.`,
+    rubric: `Build an inventory of the locked physical envelope — moles, scars, freckles, birthmarks, facial-hair pattern, hair (style, length, color, hairline), and worn clothing (garments, colors, patterns) — from the source, and verify each survives in the candidate at every corresponding moment; fading, shrinking, or removing any of them fails even when the overall result looks natural. Hair is fully locked in this workflow: any change to hairstyle, hairline, volume, color, or even stray flyaways fails. Wrinkles are graded differently in this beautifying workflow: fine lines may soften visibly and deep character lines may soften as part of an approved enhancement — fail on wrinkles only when deep character lines VANISH entirely or the face loses its age-consistent structure.`,
   },
   {
     id: "motion-lipsync",
@@ -192,7 +192,7 @@ const DEFINITIONS: LampBeautifyEvalDefinition[] = [
     passThreshold: 85,
     borderlineThreshold: 70,
     allowedCorrectionActions: ["restore-untouched-surroundings"],
-    rubric: `Compare exposure, contrast, white balance, saturation, focus, depth of field, noise character, framing, crop, scale, perspective, lens feel, and camera position across the full timeline. The source's grain structure and compression fingerprint must carry through unchanged — global denoising, added grain, sharpening, or upscaling all fail. No beauty lighting, glow, bloom, relighting, color grade, or reframing is authorized. Localized, plausible skin response inside approved enhancement regions is the only permitted difference.`,
+    rubric: `Compare exposure, contrast, white balance, saturation, focus, depth of field, noise character, framing, crop, scale, perspective, lens feel, and camera position across the full timeline. The source's grain structure and compression fingerprint must carry through unchanged — global denoising, added grain, sharpening, or upscaling all fail. No beauty lighting, glow, bloom, relighting, color grade, or reframing is authorized. Localized, plausible skin response inside approved enhancement regions is the only permitted difference. Added depth-of-field, background blur, soft-focus glow, or any portrait-mode separation of subject from room fails; wardrobe and object colors must match the source hue-for-hue.`,
   },
   {
     id: "enhancement-temporal-stability",
