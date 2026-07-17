@@ -17,6 +17,16 @@ import { compileLampBackgroundFinalPrompt } from "@/lib/prompts/lamp-background"
 import {
   validateLampBackgroundPlanBinding,
 } from "@/lib/server/lamp-background-execution";
+import {
+  isLampBeautifyEvaluationArtifact,
+} from "@/lib/lamp-beautify-read";
+import {
+  lampBeautifyEvaluationOperationId,
+} from "@/lib/lamp-beautify-operations";
+import { compileLampBeautifyFinalPrompt } from "@/lib/prompts/lamp-beautify";
+import {
+  validateLampBeautifyPlanBinding,
+} from "@/lib/server/lamp-beautify-execution";
 import { getStorage } from "@/lib/server/storage";
 import { runExecutionInputHash } from "@/lib/server/run-execution-input";
 import { requeueLampExecutionAfterApproval } from "@/lib/server/run-execution-resume";
@@ -24,6 +34,7 @@ import { isGradeableVideoGeneration } from "@/lib/server/run-execution-failure";
 import {
   hasReusableFirstCutApproval,
   hasReusableLampBackgroundApproval,
+  hasReusableLampBeautifyApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
@@ -171,6 +182,56 @@ export async function repairCompletedRunExecution(
         finalEvaluation?.status === "completed" &&
         isLampBackgroundEvaluationArtifact(finalEvaluation.result, 2) &&
         finalEvaluation.result.cleanupPlanId === cleanupPlan.id;
+    } else if (workflowMode === "beautify") {
+      const [planOperation, firstEvaluation, finalEvaluation] =
+        await Promise.all([
+          execution.planOperationId
+            ? storage.getPaidOperation(
+                input.runId,
+                execution.planOperationId
+              )
+            : Promise.resolve(null),
+          storage.getPaidOperation(
+            input.runId,
+            lampBeautifyEvaluationOperationId(1)
+          ),
+          storage.getPaidOperation(
+            input.runId,
+            lampBeautifyEvaluationOperationId(2)
+          ),
+        ]);
+      let beautifyPlan;
+      try {
+        beautifyPlan = await validateLampBeautifyPlanBinding({
+          run,
+          planOperation,
+          planOperationId: execution.planOperationId,
+          approvedPlanHash: execution.approvedPlanHash,
+          renderedPrompt: execution.renderedPrompt,
+        });
+      } catch {
+        return execution;
+      }
+      if (
+        firstEvaluation?.status !== "completed" ||
+        !isLampBeautifyEvaluationArtifact(firstEvaluation.result, 1) ||
+        firstEvaluation.result.planId !== beautifyPlan.id
+      ) {
+        return execution;
+      }
+      try {
+        expectedPrompt = compileLampBeautifyFinalPrompt(
+          input.renderedPrompt,
+          beautifyPlan,
+          firstEvaluation.result
+        ).rendered;
+      } catch {
+        return execution;
+      }
+      finalEvaluationComplete =
+        finalEvaluation?.status === "completed" &&
+        isLampBeautifyEvaluationArtifact(finalEvaluation.result, 2) &&
+        finalEvaluation.result.planId === beautifyPlan.id;
     }
     // The Final holistic evaluation now runs BEFORE the sync gate, so a
     // completed final evaluation no longer implies the gate passed. Any
@@ -380,7 +441,13 @@ export async function enqueueRunExecution(
             input.source,
             input.batchId
           )
-        : hasReusableFirstCutApproval(
+        : workflowMode === "beautify"
+          ? hasReusableLampBeautifyApproval(
+              run,
+              input.source,
+              input.batchId
+            )
+          : hasReusableFirstCutApproval(
             run,
             input.source === "batch" ? "batch" : "single",
             input.batchId

@@ -9,11 +9,15 @@ import {
   estimateFirstCut,
   estimateLampBackgroundPlan,
   estimateLampBackgroundTwoPass,
+  estimateLampBeautifyPlan,
+  estimateLampBeautifyTwoPass,
   estimateLampRun,
   FIRST_CUT_MAX_OUTPUT_SECONDS,
   formatUsd,
   lampBackgroundPlanReservationUsd,
   lampBackgroundTwoPassReservationUsd,
+  lampBeautifyPlanReservationUsd,
+  lampBeautifyTwoPassReservationUsd,
   lampRunReservationUsd,
   omniGenerationReservationUsd,
 } from "@/lib/cost";
@@ -103,6 +107,29 @@ const BACKGROUND_FLOW = [
   },
 ] as const;
 
+const BEAUTIFY_FLOW = [
+  {
+    title: "Approved enhancement plan",
+    description:
+      "Classify the closed touch-up catalog as enhance, declined, or uncertain before generation.",
+  },
+  {
+    title: "Initial + critique",
+    description:
+      "Generate from the source, then evaluate the whole result against the approved plan.",
+  },
+  {
+    title: "Final touch-up",
+    description:
+      "Regenerate once from the source with every actionable correction from the critique.",
+  },
+  {
+    title: "Your grade",
+    description:
+      "Grade Final with the enhancement plan visible and AI scores hidden until after save.",
+  },
+] as const;
+
 const MODE_COPY: Record<
   WorkflowMode,
   { eyebrow: string; title: string; description: string }
@@ -125,12 +152,21 @@ const MODE_COPY: Record<
     description:
       "Lamp Background turns an approved cleanup plan into an Initial and one corrected Final while preserving the person, performance, camera, lighting, and audio.",
   },
+  beautify: {
+    eyebrow: "Focused on-camera touch-up",
+    title: "Look camera-ready. Stay unmistakably you.",
+    description:
+      "Lamp Beautify turns an approved enhancement plan into an Initial and one corrected Final while preserving identity, performance, background, lighting, camera, and audio.",
+  },
 };
 
 function estimateWorkflowRun(mode: WorkflowMode, durationSec: number) {
   if (mode === "lamp") return estimateLampRun(durationSec);
   if (mode === "background") {
     return estimateLampBackgroundTwoPass(durationSec);
+  }
+  if (mode === "beautify") {
+    return estimateLampBeautifyTwoPass(durationSec);
   }
   return estimateFirstCut(durationSec);
 }
@@ -142,6 +178,9 @@ function workflowReservationUsd(
   if (mode === "lamp") return lampRunReservationUsd(durationSec);
   if (mode === "background") {
     return lampBackgroundTwoPassReservationUsd(durationSec);
+  }
+  if (mode === "beautify") {
+    return lampBeautifyTwoPassReservationUsd(durationSec);
   }
   return omniGenerationReservationUsd(durationSec);
 }
@@ -443,6 +482,12 @@ function isResumableSingleRun(
   ) {
     return true;
   }
+  if (
+    run.workflowMode === "beautify" &&
+    run.beautifyPlan?.approval.status === "draft"
+  ) {
+    return true;
+  }
   if (run.iterations.length !== 0) return false;
   if (!run.spendApproval && !run.serverExecution) return true;
   return (
@@ -468,10 +513,14 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
       : undefined;
   const isLampRun = run.workflowMode === "lamp";
   const isTwoPassRun =
-    isLampRun || run.workflowMode === "background";
+    isLampRun ||
+    run.workflowMode === "background" ||
+    run.workflowMode === "beautify";
   const backgroundPlanDraft =
-    run.workflowMode === "background" &&
-    run.backgroundCleanupPlan?.approval.status === "draft";
+    (run.workflowMode === "background" &&
+      run.backgroundCleanupPlan?.approval.status === "draft") ||
+    (run.workflowMode === "beautify" &&
+      run.beautifyPlan?.approval.status === "draft");
   const status = readyToStart
     ? backgroundPlanDraft
       ? { color: "var(--borderline)", label: "plan review" }
@@ -497,7 +546,8 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
             <Badge
               color={
                 run.workflowMode === "lamp" ||
-                run.workflowMode === "background"
+                run.workflowMode === "background" ||
+                run.workflowMode === "beautify"
                   ? "var(--accent)"
                   : "var(--muted)"
               }
@@ -526,9 +576,11 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
             ? "Final ready"
             : run.iterations.length === 1
               ? isTwoPassRun
-                ? run.workflowMode === "background" &&
-                  run.backgroundCleanupPlan?.decision ===
-                    "exceptional-no-op"
+                ? (run.workflowMode === "background" &&
+                    run.backgroundCleanupPlan?.decision ===
+                      "exceptional-no-op") ||
+                  (run.workflowMode === "beautify" &&
+                    run.beautifyPlan?.decision === "exceptional-no-op")
                   ? "Unchanged source ready"
                   : "Initial ready"
                 : "First cut ready"
@@ -969,9 +1021,11 @@ export default function DashboardPage() {
 
   const handleMany = useCallback(
     async (files: File[]) => {
-      if (workflowMode === "background") {
+      if (workflowMode === "background" || workflowMode === "beautify") {
         appendError(
-          "Lamp Background v1 starts one clip at a time because every source needs its own cleanup plan and explicit approval before generation. Select a single video."
+          workflowMode === "background"
+            ? "Lamp Background v1 starts one clip at a time because every source needs its own cleanup plan and explicit approval before generation. Select a single video."
+            : "Lamp Beautify v1 starts one clip at a time because every subject needs its own enhancement plan and explicit approval before generation. Select a single video."
         );
         return;
       }
@@ -1107,11 +1161,13 @@ export default function DashboardPage() {
   );
   const workflowCopy = MODE_COPY[workflowMode];
   const workflowFlow =
-    workflowMode === "background"
-      ? BACKGROUND_FLOW
-      : workflowMode === "lamp"
-        ? LAMP_FLOW
-        : FLORA_FLOW;
+    workflowMode === "beautify"
+      ? BEAUTIFY_FLOW
+      : workflowMode === "background"
+        ? BACKGROUND_FLOW
+        : workflowMode === "lamp"
+          ? LAMP_FLOW
+          : FLORA_FLOW;
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-5 px-6 py-8">
       <div className="grid items-end gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
@@ -1166,7 +1222,9 @@ export default function DashboardPage() {
         {/* New single run or historical Lamp/Flora batch */}
         <Card className="p-5 lg:col-span-2">
           <SectionTitle>
-            {workflowMode === "background" ? "Choose one video" : "Choose videos"}
+            {workflowMode === "background" || workflowMode === "beautify"
+              ? "Choose one video"
+              : "Choose videos"}
           </SectionTitle>
           <div
             role="button"
@@ -1215,13 +1273,16 @@ export default function DashboardPage() {
                   ? "Checking production readiness…"
                   : readiness.phase === "blocked"
                     ? "Uploads paused"
-                    : workflowMode === "background"
+                    : workflowMode === "background" ||
+                        workflowMode === "beautify"
                       ? "Drop one clip, or click to browse"
                       : "Drop one or more clips, or click to browse"}
             </p>
             <p className="max-w-xs text-pretty text-2xs text-faint">
               {workflowMode === "background"
                 ? "video/* · v1 accepts one static-camera clip with at least one visible person — everyone in frame is preserved exactly — so its cleanup plan stays source-specific"
+                : workflowMode === "beautify"
+                ? "video/* · v1 accepts one static-camera clip with at least one visible person — only the primary presenter is enhanced; everyone else is preserved exactly"
                 : mode === "live"
                 ? `video/* · one clip starts a ${workflowModeLabel(workflowMode)} run · multiple clips start a live ${workflowModeLabel(workflowMode)} batch after cost review`
                 : `video/* · one clip starts a demo run · multiple clips start a ${workflowModeLabel(workflowMode)} demo batch`}
@@ -1242,7 +1303,9 @@ export default function DashboardPage() {
             ref={inputRef}
             type="file"
             accept="video/*"
-            multiple={workflowMode !== "background"}
+            multiple={
+              workflowMode !== "background" && workflowMode !== "beautify"
+            }
             disabled={!hydrated || readiness.phase !== "ready"}
             className="hidden"
             onChange={(e) => {
@@ -1278,8 +1341,11 @@ export default function DashboardPage() {
       {!pendingLaunch
         ? resumableSingles.map((resumableSingle) => {
             const backgroundPlanDraft =
-              resumableSingle.workflowMode === "background" &&
-              resumableSingle.backgroundCleanupPlan?.approval.status === "draft";
+              (resumableSingle.workflowMode === "background" &&
+                resumableSingle.backgroundCleanupPlan?.approval.status ===
+                  "draft") ||
+              (resumableSingle.workflowMode === "beautify" &&
+                resumableSingle.beautifyPlan?.approval.status === "draft");
             return (
               <Card
                 key={`resume-${resumableSingle.id}`}
@@ -1316,7 +1382,8 @@ export default function DashboardPage() {
                       "user_action_required";
                     if (
                       approvalResume &&
-                      runWorkflowMode(resumableSingle) === "background"
+                      (runWorkflowMode(resumableSingle) === "background" ||
+                        runWorkflowMode(resumableSingle) === "beautify")
                     ) {
                       router.push(`/runs/${resumableSingle.id}`);
                       return;
@@ -1348,10 +1415,13 @@ export default function DashboardPage() {
                   }}
                 >
                   {backgroundPlanDraft
-                    ? "Review cleanup plan"
+                    ? runWorkflowMode(resumableSingle) === "beautify"
+                      ? "Review enhancement plan"
+                      : "Review cleanup plan"
                     : resumableSingle.serverExecution?.status ===
                         "user_action_required"
-                      ? runWorkflowMode(resumableSingle) === "background"
+                      ? runWorkflowMode(resumableSingle) === "background" ||
+                        runWorkflowMode(resumableSingle) === "beautify"
                         ? "Open and resume"
                         : "Review and resume"
                       : mode === "live"
@@ -1409,7 +1479,9 @@ export default function DashboardPage() {
             hint={
               workflowMode === "background"
                 ? "Choose one clip above to analyze its source-specific background cleanup plan."
-                : `Choose one clip above to start a ${workflowModeLabel(workflowMode)} run, or choose several for a batch.`
+                : workflowMode === "beautify"
+                  ? "Choose one clip above to analyze its source-specific enhancement plan."
+                  : `Choose one clip above to start a ${workflowModeLabel(workflowMode)} run, or choose several for a batch.`
             }
           />
         ) : (
@@ -1454,7 +1526,9 @@ export default function DashboardPage() {
           title={
             pendingLaunch.workflowMode === "background"
               ? "Analyze this video and propose a cleanup plan?"
-              : `Run ${workflowModeLabel(pendingLaunch.workflowMode)} for this video?`
+              : pendingLaunch.workflowMode === "beautify"
+                ? "Analyze this video and propose an enhancement plan?"
+                : `Run ${workflowModeLabel(pendingLaunch.workflowMode)} for this video?`
           }
           lines={
             pendingLaunch.workflowMode === "background"
@@ -1464,6 +1538,15 @@ export default function DashboardPage() {
                   `Spend authorization: the server reserves ${formatReservationUsd(lampBackgroundPlanReservationUsd())} for exactly one Gemini whole-video planning call. No video generation is authorized at this step.`,
                   "The planner must classify scene content as remove, preserve, or uncertain. You review and explicitly approve that source-specific plan before any cleanup begins.",
                   "If cleanup is approved, the separate fixed two-pass generation spend is shown next. A rare exceptional no-op can deliver the exact source without generation.",
+                  ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
+                ]
+              : pendingLaunch.workflowMode === "beautify"
+              ? [
+                  `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
+                  `Estimated planning cost: ${formatUsd(estimateLampBeautifyPlan().totalUsd)}`,
+                  `Spend authorization: the server reserves ${formatReservationUsd(lampBeautifyPlanReservationUsd())} for exactly one Gemini whole-video planning call. No video generation is authorized at this step.`,
+                  "The planner must classify the closed touch-up catalog as enhance, declined, or uncertain, each with an intensity. You review and explicitly approve that source-specific plan before any enhancement begins.",
+                  "If enhancement is approved, the separate fixed two-pass generation spend is shown next. A rare exceptional no-op can deliver the exact source without generation.",
                   ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
                 ]
               : pendingLaunch.workflowMode === "lamp"
@@ -1486,9 +1569,11 @@ export default function DashboardPage() {
           confirmLabel={
             pendingLaunch.workflowMode === "background"
               ? "Analyze cleanup plan"
-              : pendingLaunch.workflowMode === "lamp"
-              ? "Generate Initial + Final"
-              : "Generate Flora cut"
+              : pendingLaunch.workflowMode === "beautify"
+                ? "Analyze enhancement plan"
+                : pendingLaunch.workflowMode === "lamp"
+                  ? "Generate Initial + Final"
+                  : "Generate Flora cut"
           }
           busy={launching === "run"}
           error={launchError}
@@ -1497,15 +1582,12 @@ export default function DashboardPage() {
             setLaunching("run");
             setLaunchError(null);
             try {
+              const planFirst =
+                pendingLaunch.workflowMode === "background" ||
+                pendingLaunch.workflowMode === "beautify";
               const id = await startRun(pendingLaunch.video, {
-                approveLiveSpend:
-                  pendingLaunch.workflowMode === "background"
-                    ? undefined
-                    : true,
-                approvePlanSpend:
-                  pendingLaunch.workflowMode === "background"
-                    ? true
-                    : undefined,
+                approveLiveSpend: planFirst ? undefined : true,
+                approvePlanSpend: planFirst ? true : undefined,
                 workflowMode: pendingLaunch.workflowMode,
               });
               setPendingLaunch(null);

@@ -114,6 +114,90 @@ function gradeDetail(run: Run | undefined): string | undefined {
   return undefined;
 }
 
+
+function deriveBeautifyStageChips(run: Run | undefined): StageChip[] {
+  const planState =
+    run?.beautifyPlan?.approval.status === "draft"
+      ? "running"
+      : groupState(run, ["plan"]);
+  const initial = groupState(run, ["initial"]);
+  const critique = groupState(run, ["critique"]);
+  const final = groupState(run, ["final"]);
+  const review =
+    run?.humanGrade || run?.review
+      ? "pass"
+      : run?.status === "awaiting-review"
+        ? "running"
+        : groupState(run, ["review"]);
+  const initialIteration = run?.iterations.find(
+    (iteration) => iteration.index === 1
+  );
+  const visualIds = new Set(
+    run
+      ? evalDefsForRun(run)
+          .filter((definition) => definition.method !== "deterministic")
+          .map((definition) => definition.id)
+      : []
+  );
+  const critiqueCount =
+    initialIteration?.evalResults.filter((result) =>
+      visualIds.has(result.evalId)
+    ).length ?? 0;
+  const noOp =
+    run?.beautifyPlan?.approval.status === "approved" &&
+    run.beautifyPlan.decision === "exceptional-no-op";
+
+  return [
+    {
+      id: "plan",
+      label: "Enhancement plan",
+      state: planState,
+      symbol: SYMBOL[planState],
+      detail:
+        run?.beautifyPlan?.approval.status === "approved"
+          ? noOp
+            ? "no-op approved"
+            : `${run.beautifyPlan.enhance.length} enhance`
+          : run?.beautifyPlan
+            ? "awaiting approval"
+            : undefined,
+    },
+    {
+      id: "initial",
+      label: "Initial",
+      state: initial,
+      symbol: SYMBOL[initial],
+      detail: initial === "skipped" ? "not generated" : undefined,
+    },
+    {
+      id: "critique",
+      label: "Critique",
+      state: critique,
+      symbol: SYMBOL[critique],
+      detail:
+        critique === "skipped"
+          ? "not run"
+          : critiqueCount > 0
+            ? `${critiqueCount}/${visualIds.size} visual`
+            : undefined,
+    },
+    {
+      id: "final",
+      label: "Final",
+      state: final,
+      symbol: SYMBOL[final],
+      detail: final === "skipped" ? "exact source" : undefined,
+    },
+    {
+      id: "review",
+      label: "Human grade",
+      state: review,
+      symbol: SYMBOL[review],
+      detail: gradeDetail(run),
+    },
+  ];
+}
+
 function deriveBackgroundStageChips(run: Run | undefined): StageChip[] {
   const planState =
     run?.backgroundCleanupPlan?.approval.status === "draft"
@@ -207,6 +291,9 @@ export function deriveStageChips(
 ): StageChip[] {
   // Kept in the public signature for historical callers; Lamp has no score gate.
   void _config;
+  if (workflowMode === "beautify") {
+    return deriveBeautifyStageChips(run);
+  }
   if (workflowMode === "background") {
     return deriveBackgroundStageChips(run);
   }

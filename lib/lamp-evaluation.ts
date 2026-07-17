@@ -4,6 +4,10 @@ import {
   nextMegaPrompt,
 } from "./prompts/mega-prompt.ts";
 import {
+  isLampBeautifyRun,
+  LAMP_BEAUTIFY_UI_EVAL_DEFS,
+} from "./lamp-beautify-read.ts";
+import {
   isLampBackgroundRun,
   LAMP_BACKGROUND_UI_EVAL_DEFS,
 } from "./lamp-background-read.ts";
@@ -131,6 +135,7 @@ export function isLampRun(run: RunEvalScope): boolean {
 }
 
 export function evalDefsForRun(run: RunEvalScope): EvalDefinition[] {
+  if (isLampBeautifyRun(run)) return LAMP_BEAUTIFY_UI_EVAL_DEFS;
   if (isLampBackgroundRun(run)) return LAMP_BACKGROUND_UI_EVAL_DEFS;
   return isLampRun(run) ? LAMP_EVAL_DEFS : EVAL_DEFS;
 }
@@ -150,6 +155,9 @@ export function evalDefForRun(
  */
 export function evalDefForId(evalId: string): EvalDefinition | undefined {
   return (
+    LAMP_BEAUTIFY_UI_EVAL_DEFS.find(
+      (definition) => definition.id === evalId
+    ) ??
     LAMP_BACKGROUND_UI_EVAL_DEFS.find(
       (definition) => definition.id === evalId
     ) ??

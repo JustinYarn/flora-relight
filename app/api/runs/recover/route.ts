@@ -22,6 +22,7 @@ import { reconcileDeadWorkflowExecution } from "@/lib/server/dead-workflow-recov
 import {
   hasReusableFirstCutApproval,
   hasReusableLampBackgroundApproval,
+  hasReusableLampBeautifyApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
 import {
@@ -31,6 +32,13 @@ import {
 } from "@/lib/lamp-background";
 import { lampBackgroundPlanOperationId } from "@/lib/lamp-background-operations";
 import { initialLampBackgroundMegaPrompt } from "@/lib/prompts/lamp-background";
+import {
+  hashLampBeautifyPlan,
+  lampBeautifyPlanRequiresGeneration,
+  parseLampBeautifyPlan,
+} from "@/lib/lamp-beautify";
+import { lampBeautifyPlanOperationId } from "@/lib/lamp-beautify-operations";
+import { initialLampBeautifyMegaPrompt } from "@/lib/prompts/lamp-beautify";
 import {
   runWorkflowMode,
   workflowModeFromExecutionId,
@@ -82,7 +90,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       current.batchId !== undefined ||
       (current.executionId !== `first-cut:${body.runId}` &&
         current.executionId !== `lamp:${body.runId}` &&
-        current.executionId !== `lamp-background:${body.runId}`))
+        current.executionId !== `lamp-background:${body.runId}` &&
+        current.executionId !== `lamp-beautify:${body.runId}`))
   ) {
     return NextResponse.json(
       { error: "This run belongs to a different durable execution." },
@@ -118,9 +127,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const reusableApproval =
     workflowMode === "background"
       ? hasReusableLampBackgroundApproval(run)
-      : workflowMode === "lamp"
-        ? hasReusableLampApproval(run)
-        : hasReusableFirstCutApproval(run, "single");
+      : workflowMode === "beautify"
+        ? hasReusableLampBeautifyApproval(run)
+        : workflowMode === "lamp"
+          ? hasReusableLampApproval(run)
+          : hasReusableFirstCutApproval(run, "single");
   if ((!current || current.status === "queued") && !reusableApproval) {
     return NextResponse.json(
       {
@@ -164,9 +175,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       current?.executionId ??
       (workflowMode === "background"
         ? `lamp-background:${body.runId}`
-        : workflowMode === "lamp"
-          ? `lamp:${body.runId}`
-          : `first-cut:${body.runId}`);
+        : workflowMode === "beautify"
+          ? `lamp-beautify:${body.runId}`
+          : workflowMode === "lamp"
+            ? `lamp:${body.runId}`
+            : `first-cut:${body.runId}`);
     let renderedPrompt = current?.renderedPrompt;
     let planOperationId = current?.planOperationId;
     let approvedPlanHash = current?.approvedPlanHash;
@@ -214,6 +227,46 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       planOperationId = lampBackgroundPlanOperationId();
       approvedPlanHash =
         await hashLampBackgroundCleanupPlan(cleanupPlan);
+    }
+    if (workflowMode === "beautify" && !current) {
+      let beautifyPlan: ReturnType<typeof parseLampBeautifyPlan>;
+      try {
+        beautifyPlan = parseLampBeautifyPlan(run.beautifyPlan);
+      } catch {
+        return NextResponse.json(
+          {
+            error:
+              "Lamp Beautify recovery requires a valid approved enhancement plan for this source.",
+          },
+          {
+            status: 409,
+            headers: {
+              "Cache-Control": "private, no-store, max-age=0",
+            },
+          }
+        );
+      }
+      if (
+        beautifyPlan.approval.status !== "approved" ||
+        beautifyPlan.runId !== run.id ||
+        !lampBeautifyPlanRequiresGeneration(beautifyPlan)
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "Lamp Beautify recovery requires the exact approved enhancement plan for this source.",
+          },
+          {
+            status: 409,
+            headers: {
+              "Cache-Control": "private, no-store, max-age=0",
+            },
+          }
+        );
+      }
+      renderedPrompt = initialLampBeautifyMegaPrompt(beautifyPlan).rendered;
+      planOperationId = lampBeautifyPlanOperationId();
+      approvedPlanHash = await hashLampBeautifyPlan(beautifyPlan);
     }
     const adopted = await enqueueRunExecution({
       runId: body.runId,

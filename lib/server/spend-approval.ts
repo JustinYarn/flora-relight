@@ -17,6 +17,11 @@ import {
   lampBackgroundEvaluationOperationId,
   lampBackgroundPlanOperationId,
 } from "../lamp-background-operations.ts";
+import {
+  LAMP_BEAUTIFY_HOLISTIC_EVAL_ID,
+  lampBeautifyEvaluationOperationId,
+  lampBeautifyPlanOperationId,
+} from "../lamp-beautify-operations.ts";
 import { lampEvaluationOperationId } from "../lamp-evaluation.ts";
 import { LIPSYNC_OPERATION_ID } from "../v2-sync.ts";
 import type {
@@ -79,11 +84,13 @@ export function createSpendApproval(
     throw new Error("Single-run spend approval cannot carry a batch identity.");
   }
   const maxIterations =
-    scope === "background_plan"
+    scope === "background_plan" || scope === "beautify_plan"
       ? 0
       : scope === "first_cut"
         ? 1
-        : scope === "lamp_two_pass" || scope === "background_two_pass"
+        : scope === "lamp_two_pass" ||
+            scope === "background_two_pass" ||
+            scope === "beautify_two_pass"
           ? 2
           : FLORA_WORKFLOW.config.maxIterations;
   return {
@@ -101,9 +108,10 @@ export function createSpendApproval(
         ? microsToUsd(firstCutMaximumMicros())
         : scope === "lamp_two_pass"
           ? microsToUsd(lampMaximumMicros())
-          : scope === "background_plan"
+          : scope === "background_plan" || scope === "beautify_plan"
             ? microsToUsd(lampBackgroundPlanMaximumMicros())
-            : scope === "background_two_pass"
+            : scope === "background_two_pass" ||
+                scope === "beautify_two_pass"
               ? microsToUsd(lampBackgroundMaximumMicros())
               : estimateRun(video.durationSec, maxIterations).totalUsd,
     maxIterations,
@@ -115,9 +123,15 @@ function approvalIterationsAreValid(
   maxIterations: number
 ): boolean {
   if (!Number.isSafeInteger(maxIterations)) return false;
-  if (scope === "background_plan") return maxIterations === 0;
+  if (scope === "background_plan" || scope === "beautify_plan") {
+    return maxIterations === 0;
+  }
   if (scope === "first_cut") return maxIterations === 1;
-  if (scope === "lamp_two_pass" || scope === "background_two_pass") {
+  if (
+    scope === "lamp_two_pass" ||
+    scope === "background_two_pass" ||
+    scope === "beautify_two_pass"
+  ) {
     return maxIterations === 2;
   }
   return maxIterations >= 1 && maxIterations <= LEGACY_MAX_ITERATIONS;
@@ -154,7 +168,9 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
       approval.scope !== "first_cut" &&
       approval.scope !== "lamp_two_pass" &&
       approval.scope !== "background_plan" &&
-      approval.scope !== "background_two_pass") ||
+      approval.scope !== "background_two_pass" &&
+      approval.scope !== "beautify_plan" &&
+      approval.scope !== "beautify_two_pass") ||
     !approvalIterationsAreValid(approval.scope, approval.maxIterations)
   ) {
     throw new Error("Live spend approval is invalid.");
@@ -167,9 +183,11 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
       ? microsToUsd(firstCutMaximumMicros())
       : approval.scope === "lamp_two_pass"
         ? microsToUsd(lampMaximumMicros())
-        : approval.scope === "background_plan"
+        : approval.scope === "background_plan" ||
+            approval.scope === "beautify_plan"
           ? microsToUsd(lampBackgroundPlanMaximumMicros())
-          : approval.scope === "background_two_pass"
+          : approval.scope === "background_two_pass" ||
+              approval.scope === "beautify_two_pass"
             ? microsToUsd(lampBackgroundMaximumMicros())
             : estimateRun(
                 run.originalVideo.durationSec,
@@ -180,9 +198,11 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
       ? firstCutMaximumMicros()
       : approval.scope === "lamp_two_pass"
         ? lampMaximumMicros()
-        : approval.scope === "background_plan"
+        : approval.scope === "background_plan" ||
+            approval.scope === "beautify_plan"
           ? lampBackgroundPlanMaximumMicros()
-          : approval.scope === "background_two_pass"
+          : approval.scope === "background_two_pass" ||
+              approval.scope === "beautify_two_pass"
             ? lampBackgroundMaximumMicros()
             : null;
   if (
@@ -291,6 +311,46 @@ export function hasReusableLampBackgroundTwoPassApproval(
   return hasReusableLampBackgroundApproval(run, source, batchId, now);
 }
 
+/** Reuse only the exact one-call planner grant bound to this source owner. */
+export function hasReusableLampBeautifyPlanApproval(
+  run: Run,
+  source: SpendApproval["source"] = "single",
+  batchId?: string,
+  now = Date.now()
+): boolean {
+  try {
+    const approval = assertApprovalCoversRun(run, now);
+    return (
+      approval.scope === "beautify_plan" &&
+      approval.source === source &&
+      approval.batchId === batchId &&
+      approval.maxIterations === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Reuse only the execution-only touch-up grant; planner spend is excluded. */
+export function hasReusableLampBeautifyApproval(
+  run: Run,
+  source: SpendApproval["source"] = "single",
+  batchId?: string,
+  now = Date.now()
+): boolean {
+  try {
+    const approval = assertApprovalCoversRun(run, now);
+    return (
+      approval.scope === "beautify_two_pass" &&
+      approval.source === source &&
+      approval.batchId === batchId &&
+      approval.maxIterations === 2
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Authorize a new synchronous paid operation. Cache reads and reconciliation
  * never call this because they cannot incur new provider spend.
@@ -359,9 +419,40 @@ export function assertPaidOperationAuthorized(
     }
     return;
   }
+  if (approval.scope === "beautify_plan") {
+    const exactPlanOperation =
+      kind === "plan" &&
+      iteration === undefined &&
+      evalId === undefined &&
+      operationId === lampBeautifyPlanOperationId();
+    if (!exactPlanOperation) {
+      throw new Error(
+        "Lamp Beautify planning authorizes exactly one enhancement-plan operation and no generation or evaluation spend."
+      );
+    }
+    return;
+  }
+  if (approval.scope === "beautify_two_pass") {
+    const holisticEvaluation =
+      kind === "judge" &&
+      evalId === LAMP_BEAUTIFY_HOLISTIC_EVAL_ID &&
+      operationId === lampBeautifyEvaluationOperationId(iteration ?? 0) &&
+      (iteration === 1 || iteration === 2);
+    const finalLipsyncRepair =
+      kind === "lipsync" &&
+      iteration === 2 &&
+      evalId === undefined &&
+      operationId === LIPSYNC_OPERATION_ID;
+    if (!holisticEvaluation && !finalLipsyncRepair) {
+      throw new Error(
+        "Lamp Beautify execution authorizes its two holistic evaluations and at most one Lipsync-2-Pro repair for Final; planning requires a separate approval."
+      );
+    }
+    return;
+  }
   if (kind === "plan") {
     throw new Error(
-      "Legacy Flora approvals do not authorize Lamp Background planning."
+      "Legacy Flora approvals do not authorize plan-first workflows."
     );
   }
   if (kind === "manifest") {

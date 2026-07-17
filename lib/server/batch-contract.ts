@@ -65,6 +65,7 @@ export function batchApprovalScope(
   mode: WorkflowMode
 ): NonNullable<SpendApproval["scope"]> {
   if (mode === "background") return "background_two_pass";
+  if (mode === "beautify") return "beautify_two_pass";
   return mode === "lamp" ? "lamp_two_pass" : "first_cut";
 }
 

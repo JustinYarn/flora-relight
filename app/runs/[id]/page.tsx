@@ -26,6 +26,7 @@ import { LostGenerationRecovery } from "@/components/review/LostGenerationRecove
 import { WorkflowRail } from "@/components/review/WorkflowRail";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
+import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
 
 const STATUS_COLOR: Record<RunStatus, string> = {
   running: "var(--running)",
@@ -158,6 +159,7 @@ export default function RunReviewPage() {
       <div className="xl:flex xl:items-start xl:gap-10">
         <div className="min-w-0 xl:flex-1">
           <BackgroundPlanReview run={run} />
+          <BeautifyPlanReview run={run} />
 
           {/* HERO — original next to relit, one shared transport. While the
           selected attempt is still generating, the relit slot becomes the

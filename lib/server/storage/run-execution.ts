@@ -165,13 +165,15 @@ export function assertRunExecution(execution: unknown): RunExecution {
   }
   assertOptionalText(candidate.error, "error", MAX_ERROR_LENGTH);
 
-  const background = candidate.executionId.startsWith("lamp-background:");
+  const planFirst =
+    candidate.executionId.startsWith("lamp-background:") ||
+    candidate.executionId.startsWith("lamp-beautify:");
   if (
-    background !==
+    planFirst !==
     Boolean(candidate.planOperationId && candidate.approvedPlanHash)
   ) {
     throw new Error(
-      "Lamp Background execution identity requires an approved planner operation and plan hash"
+      "A plan-first execution identity requires an approved planner operation and plan hash"
     );
   }
 

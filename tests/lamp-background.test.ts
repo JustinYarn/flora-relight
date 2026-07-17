@@ -674,7 +674,9 @@ test("run-scoped display definitions never resolve Lamp Background checks throug
     evalDefForId("cleanup-plan-adherence")?.name,
     "Approved plan followed"
   );
-  assert.equal(evalDefsForRuns([]).length, 10);
+  // An empty Grade set defaults to this branch's method — Lamp Beautify's
+  // ten visual rows plus deterministic audio.
+  assert.equal(evalDefsForRuns([]).length, 11);
 });
 
 test("background stage chips preserve the five-stage method and skip generation for an approved no-op", () => {

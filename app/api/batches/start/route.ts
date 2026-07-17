@@ -94,9 +94,10 @@ function validateBody(body: StartBody): string | null {
     body.workflowMode !== undefined &&
     body.workflowMode !== "flora" &&
     body.workflowMode !== "lamp" &&
-    body.workflowMode !== "background"
+    body.workflowMode !== "background" &&
+    body.workflowMode !== "beautify"
   ) {
-    return 'workflowMode must be "flora", "lamp", or "background".';
+    return 'workflowMode must be "flora", "lamp", "background", or "beautify".';
   }
   return null;
 }
@@ -325,6 +326,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       {
         error:
           "Lamp Background v1 supports one clip at a time because every source needs its own approved cleanup plan. Background batches are not started.",
+      },
+      { status: 409 }
+    );
+  }
+  if (body.workflowMode === "beautify") {
+    return NextResponse.json(
+      {
+        error:
+          "Lamp Beautify v1 supports one clip at a time because every subject needs its own approved enhancement plan. Beautify batches are not started.",
       },
       { status: 409 }
     );

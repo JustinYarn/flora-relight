@@ -28,12 +28,13 @@ test("workflow mode accepts the current mode plus both historical product modes"
   assert.equal(parseWorkflowMode(undefined), null);
 });
 
-test("new browser selections default to Lamp Background and retain historical labels", () => {
-  assert.equal(DEFAULT_WORKFLOW_MODE, "background");
-  assert.equal(RELIGHT_WORKFLOW.id, workflowForMode("background").id);
+test("new browser selections default to Lamp Beautify and retain historical labels", () => {
+  assert.equal(DEFAULT_WORKFLOW_MODE, "beautify");
+  assert.equal(RELIGHT_WORKFLOW.id, workflowForMode("beautify").id);
   assert.equal(workflowModeLabel("flora"), "Flora");
   assert.equal(workflowModeLabel("lamp"), "Lamp");
   assert.equal(workflowModeLabel("background"), "Lamp Background");
+  assert.equal(workflowModeLabel("beautify"), "Lamp Beautify");
 });
 
 test("Lamp Background graph is the approved plan-to-blind-grade sequence", () => {

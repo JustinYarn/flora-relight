@@ -80,14 +80,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (
     !isTwoPassExecutionId(execution.executionId) ||
     (execution.executionId !== `lamp:${body.runId}` &&
-      execution.executionId !== `lamp-background:${body.runId}`) ||
+      execution.executionId !== `lamp-background:${body.runId}` &&
+      execution.executionId !== `lamp-beautify:${body.runId}`) ||
     execution.source !== "single" ||
     execution.batchId !== undefined
   ) {
     return NextResponse.json(
       {
         error:
-          "Only a single-run Lamp or Lamp Background execution can acknowledge a lost generation here.",
+          "Only a single-run Lamp, Lamp Background, or Lamp Beautify execution can acknowledge a lost generation here.",
       },
       { status: 409, headers: NO_STORE }
     );
