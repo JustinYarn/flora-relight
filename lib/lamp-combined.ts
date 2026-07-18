@@ -44,6 +44,13 @@ export interface LampCombinedControls {
   eyeContact: boolean;
 }
 
+/** Conservative new-run defaults: normal cleanup, no optional face edits. */
+export const DEFAULT_LAMP_COMBINED_CONTROLS = {
+  beautifyLevel: 0,
+  cleanlinessLevel: 2,
+  eyeContact: false,
+} as const satisfies LampCombinedControls;
+
 export const LAMP_COMBINED_CLEANLINESS_PROFILES = {
   1: {
     label: "Tidy",
@@ -717,7 +724,11 @@ export function selectLampCombinedCorrections(
   }
   for (const candidate of ranked) add(candidate);
 
-  return selected.map(({ index: _index, ...candidate }) => candidate);
+  return selected.map((candidate) => {
+    const correction = { ...candidate };
+    Reflect.deleteProperty(correction, "index");
+    return correction;
+  });
 }
 
 export type LampCombinedIteration = 1 | 2;

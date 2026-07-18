@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui";
-import type { Run, VideoAsset } from "@/lib/types";
+import type { Run } from "@/lib/types";
+import { isApprovedPlanNoOp } from "@/lib/workflow-mode";
+import { sideBySideExportVersion } from "@/components/review/export-selection";
 
 /**
  * "Download side-by-side" — asks the server to compose original + relit into
@@ -15,28 +17,6 @@ import type { Run, VideoAsset } from "@/lib/types";
  * appears underneath on failure.
  */
 
-/** Real relit files live under /api/media; simulated attempts don't. */
-function isRealVideo(v: VideoAsset | undefined): v is VideoAsset {
-  return Boolean(v && !v.simulatedFilter && v.url.startsWith("/api/media/"));
-}
-
-/**
- * Which cut to export: "final" when a real final video exists, else the
- * attempt number of the newest real generated video. The number comes from
- * the relit-v<N>.mp4 filename when possible (version numbers are whatever
- * the files say — salvaged runs included), falling back to the attempt index.
- */
-function exportVersion(run: Run): number | "final" | null {
-  if (isRealVideo(run.finalVideo)) return "final";
-  for (let i = run.iterations.length - 1; i >= 0; i--) {
-    const video = run.iterations[i].generatedVideo;
-    if (!isRealVideo(video)) continue;
-    const m = /relit-v(\d+)\.mp4$/.exec(video.url);
-    return m ? Number(m[1]) : run.iterations[i].index;
-  }
-  return null;
-}
-
 export function DownloadSideBySide({
   run,
   variant = "default",
@@ -48,7 +28,10 @@ export function DownloadSideBySide({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const version = exportVersion(run);
+  const version = sideBySideExportVersion(run);
+  const unavailableReason = isApprovedPlanNoOp(run)
+    ? "This approved no-op has no generated after-video to compose."
+    : "No delivered generated video is available yet.";
 
   const download = async () => {
     if (busy || version === null) return;
@@ -94,7 +77,7 @@ export function DownloadSideBySide({
         aria-label="Download side-by-side video"
         title={
           version === null
-            ? "no generated video to download — simulated attempts have no file"
+            ? unavailableReason
             : (error ?? "Download side-by-side video")
         }
         className={`min-h-10 min-w-10 rounded-md border border-edge px-2 py-1 text-xs transition-[transform,color,border-color] duration-150 ease-out hover:border-faint active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100 ${
@@ -111,7 +94,7 @@ export function DownloadSideBySide({
       <Button
         variant="ghost"
         disabled={busy || version === null}
-        title={version === null ? "no generated video yet" : undefined}
+        title={version === null ? unavailableReason : undefined}
         onClick={() => void download()}
       >
         {busy ? "Preparing video…" : "Download side-by-side"}

@@ -12,6 +12,10 @@ import {
   lampIrisPlansDifferOnlyByIntensity,
   parseLampIrisPlan,
 } from "./lamp-iris.ts";
+import {
+  hashLampCombinedPlan,
+  parseLampCombinedPlan,
+} from "./lamp-combined.ts";
 
 type MockApprovalInput = {
   currentPlan: unknown;
@@ -95,6 +99,27 @@ export async function canAcceptMockIrisPlanApproval({
       candidate.decision !== "correct" ||
       new Set(candidate.correct.map((item) => item.intensity)).size === 1;
     return exactPlan || oneGlobalOverride;
+  } catch {
+    return false;
+  }
+}
+
+/** Combined's one click must approve the exact aggregate and all enabled subplans. */
+export async function canAcceptMockCombinedPlanApproval({
+  currentPlan,
+  candidatePlan,
+  hasSpendApproval,
+}: MockApprovalInput): Promise<boolean> {
+  if (hasSpendApproval) return false;
+  try {
+    const current = parseLampCombinedPlan(currentPlan);
+    const candidate = parseLampCombinedPlan(candidatePlan);
+    return (
+      current.approval.status === "draft" &&
+      candidate.approval.status === "approved" &&
+      (await hashLampCombinedPlan(current)) ===
+        (await hashLampCombinedPlan(candidate))
+    );
   } catch {
     return false;
   }

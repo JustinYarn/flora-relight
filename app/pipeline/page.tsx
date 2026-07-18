@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAppStore } from "@/lib/store";
-import type { RunStatus } from "@/lib/types";
+import type { RunStatus, WorkflowMode } from "@/lib/types";
 import { Badge, Button, EmptyState } from "@/components/ui";
 import { PipelineCanvas } from "@/components/canvas/PipelineCanvas";
 import { NodeInspector } from "@/components/canvas/NodeInspector";
@@ -15,6 +15,14 @@ import {
   workflowModeLabel,
 } from "@/lib/workflow-mode";
 import { workflowForMode } from "@/lib/workflow-def";
+
+function iterationLabel(workflowMode: WorkflowMode, index: number) {
+  if (workflowMode === "combined") return `Take ${index}`;
+  if (workflowMode === "flora") return `Attempt ${index}`;
+  if (index === 1) return "Initial";
+  if (index === 2) return "Final";
+  return `v${index}`;
+}
 
 /**
  * Minimal structural view of the Batch contract (lib/types.ts gains the full
@@ -117,6 +125,9 @@ export default function PipelinePage() {
     activeRun && activeRun.iterations.length > 0
       ? activeRun.iterations[activeRun.iterations.length - 1]
       : undefined;
+  const latestIterationLabel = latestIteration
+    ? iterationLabel(displayedWorkflowMode, latestIteration.index)
+    : undefined;
 
   return (
     <div className="flex h-[calc(100vh-56px)] min-h-0 flex-col">
@@ -136,9 +147,9 @@ export default function PipelinePage() {
         {latestIteration ? (
           <span
             className="hidden text-2xs tabular-nums text-muted md:inline"
-            title={`${latestIteration.index === 1 ? "Initial" : "Final"} video · mega prompt v${latestIteration.megaPrompt.version}`}
+            title={`${latestIterationLabel} video · mega prompt v${latestIteration.megaPrompt.version}`}
           >
-            {latestIteration.index === 1 ? "Initial" : "Final"} · mega prompt v
+            {latestIterationLabel} · mega prompt v
             {latestIteration.megaPrompt.version}
           </span>
         ) : null}
@@ -154,7 +165,11 @@ export default function PipelinePage() {
 
         {/* Lane-oriented legend: stage names, not raw kind colors. */}
         <div className="ml-auto hidden items-center gap-2.5 xl:flex">
-          {(isPlanWorkflowMode(displayedWorkflowMode) ? [] : STAGE_LANES).map((lane) => (
+          {(isPlanWorkflowMode(displayedWorkflowMode) ||
+          displayedWorkflowMode === "combined"
+            ? []
+            : STAGE_LANES
+          ).map((lane) => (
             <span
               key={lane.id}
               className="flex items-center gap-1 text-2xs text-faint"
@@ -207,8 +222,11 @@ export default function PipelinePage() {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge bg-canvas px-4 py-2">
         <Badge color="var(--accent)">prompt map</Badge>
         <p className="text-pretty text-xs text-muted">
-          Open a labeled node to trace the mega prompt, each whole-video rubric,
-          its result, and the one correction set that creates Final.
+          {displayedWorkflowMode === "combined"
+            ? "Open a node to inspect the saved aggregate scope, each source-rooted Take prompt, recorded qualification receipts, and the human winner when one exists."
+            : displayedWorkflowMode === "flora"
+              ? "Open a labeled node to trace each historical attempt, its whole-video checks, and the saved corrections that feed the next attempt."
+              : "Open a labeled node to trace the mega prompt, each whole-video rubric, its result, and the one correction set that creates Final."}
         </p>
         <Link
           href="/prompts"

@@ -19,6 +19,11 @@
 
 import { EVAL_DEFS } from "./prompts/eval-defs.ts";
 import { FLORA_WORKFLOW } from "./flora-workflow-def.ts";
+import {
+  lampCombinedRequiredPlanners,
+  parseLampCombinedControls,
+  type LampCombinedControls,
+} from "./lamp-combined.ts";
 import type {
   GeminiProUsageSnapshot,
   JudgeId,
@@ -45,6 +50,9 @@ export const LAMP_BACKGROUND_PLAN_COUNT = 1;
 export const LAMP_BACKGROUND_GENERATION_COUNT = 2;
 export const LAMP_BACKGROUND_EVALUATION_COUNT = 2;
 export const LAMP_BACKGROUND_GEMINI_MAX_OUTPUT_TOKENS = 65_536;
+/** Combined pays only for enabled planners, then retains the fixed two-pass shape. */
+export const LAMP_COMBINED_GENERATION_COUNT = 2;
+export const LAMP_COMBINED_EVALUATION_COUNT = 2;
 
 // These figures drive the estimate shown before a call. Settled spend always
 // comes from the provider usage snapshots below.
@@ -394,6 +402,24 @@ export function lampIrisTwoPassReservationUsd(
   return lampBackgroundTwoPassReservationUsd(durationSec);
 }
 
+/** Conservative planner reservation for Background plus only enabled optional concerns. */
+export function lampCombinedPlanReservationUsd(
+  controls: LampCombinedControls
+): number {
+  const canonical = parseLampCombinedControls(controls);
+  return (
+    lampBackgroundPlanReservationUsd() *
+    lampCombinedRequiredPlanners(canonical).length
+  );
+}
+
+/** Combined generation/evaluation has the same fixed provider shape as the plan modes. */
+export function lampCombinedTwoPassReservationUsd(
+  durationSec: number
+): number {
+  return lampBackgroundTwoPassReservationUsd(durationSec);
+}
+
 /** Price a completed Lipsync-2-Pro repair from its actual output duration. */
 export function lipsync2ProCostFromDuration(durationSec: number): number {
   if (!Number.isFinite(durationSec) || durationSec <= 0) {
@@ -733,6 +759,50 @@ export function estimateLampIrisTwoPass(
   durationSec: number
 ): CostEstimate {
   return estimateLampBackgroundTwoPass(durationSec);
+}
+
+/** Show one explicit planner row-pair per concern that will actually be billed. */
+export function estimateLampCombinedPlan(
+  controls: LampCombinedControls
+): CostEstimate {
+  const canonical = parseLampCombinedControls(controls);
+  const labels = {
+    background: {
+      concern: "Background",
+      plan: "Cleanup-plan",
+    },
+    beautify: {
+      concern: "Beautify",
+      plan: "Enhancement-plan",
+    },
+    iris: {
+      concern: "Eye contact",
+      plan: "Gaze-plan",
+    },
+  } as const;
+  return total(
+    lampCombinedRequiredPlanners(canonical).flatMap((concern) =>
+      estimateLampBackgroundPlan().items.map((item) => ({
+        ...item,
+        label: `Combined ${labels[concern].concern} planner — ${item.label.replace("Cleanup-plan", labels[concern].plan)}`,
+      }))
+    )
+  );
+}
+
+/** Combined execution: two generations, two holistic evals, one possible repair. */
+export function estimateLampCombinedTwoPass(
+  durationSec: number
+): CostEstimate {
+  return total(
+    estimateLampBackgroundTwoPass(durationSec).items.map((item) => ({
+      ...item,
+      label: item.label
+        .replace(/background-cleanup/gi, "Combined")
+        .replace(/cleanup/gi, "Combined")
+        .replace(/Final/gi, "Take 2"),
+    }))
+  );
 }
 
 /**

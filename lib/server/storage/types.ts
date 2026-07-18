@@ -43,6 +43,7 @@ import type {
   SpendApproval,
   VideoAsset,
 } from "@/lib/types";
+import type { LampCombinedPlan } from "@/lib/lamp-combined";
 
 /** Size + mtime of a stored media file (mtime = upload time on remote drivers). */
 export interface MediaStat {
@@ -123,6 +124,10 @@ export type HumanGradeWriteResult =
   | { ok: true; run: Run }
   | { ok: false; current: Run | null };
 
+export type LampCombinedApprovalWriteResult =
+  | { ok: true; run: Run }
+  | { ok: false; current: Run | null };
+
 /** Winner/loser result for a revision-checked batch status transition. */
 export type BatchAdvanceResult =
   | { advanced: true; batch: Batch }
@@ -182,6 +187,21 @@ export interface StorageDriver {
 
   /** Upsert one run's JSON (and any driver-side index bookkeeping). */
   putRun(run: Run): Promise<void>;
+
+  /**
+   * Atomically replace one exact Combined draft with its approved aggregate
+   * and exact two-pass spend grant. A stale planner/controls/source snapshot
+   * receives the current Run and changes nothing.
+   */
+  approveLampCombinedRun(
+    runId: string,
+    input: {
+      expectedPlanHash: string;
+      expectedDraftPlan: LampCombinedPlan;
+      approvedPlan: LampCombinedPlan;
+      spendApproval: SpendApproval;
+    }
+  ): Promise<LampCombinedApprovalWriteResult>;
 
   /** Server-only durable coordinator state, separate from browser Run JSON. */
   getRunExecution(runId: string): Promise<RunExecution | null>;

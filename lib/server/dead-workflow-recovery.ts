@@ -11,6 +11,8 @@
  * This module is that recover path's dead-workflow adopter. It never starts
  * provider work and never re-bills: its only writes are the same sealed
  * reconcile_required records the workflow itself would have written.
+ * Lamp Combined additionally uses it to repair a settlement-only checkpoint
+ * after Workflow is terminal `completed`; exact candidate proof is mandatory.
  *
  * When the stopped iteration's journal holds an unresolved provider handle,
  * one direct interactions.get probe classifies the outcome honestly:
@@ -30,10 +32,16 @@ import {
   writeVideoGenerationOperation,
 } from "@/lib/server/videogen-operation";
 import {
+  classifyWorkflowRunLiveness,
   deadWorkflowExecutionError,
   deadWorkflowSealMessage,
-  type DeadWorkflowState,
+  type WorkflowRunLiveness,
 } from "./dead-workflow-messages";
+import {
+  recoverCompletedCombinedEvidence,
+  type CompletedCombinedRecoveryDependencies,
+  type CompletedCombinedRecoveryResult,
+} from "./completed-workflow-recovery";
 
 /**
  * Per-process throttle: the recover route polls every ~4s per open tab, and a
@@ -51,29 +59,55 @@ const livenessCheckedAt = new Map<string, number>();
  */
 export async function workflowRunLiveness(
   workflowRunId: string
-): Promise<DeadWorkflowState | "alive" | "unknown"> {
+): Promise<WorkflowRunLiveness> {
   try {
     const workflowRun = getWorkflowRun(workflowRunId);
-    if (!(await workflowRun.exists)) return "missing";
+    const exists = await workflowRun.exists;
+    if (!exists) return "missing";
     const status = await workflowRun.status;
-    if (status === "failed") return "failed";
-    if (status === "cancelled") return "cancelled";
-    return "alive";
+    return classifyWorkflowRunLiveness(exists, status);
   } catch {
     // Observability hiccups must never seal anything. Fail open.
     return "unknown";
   }
 }
 
+export interface WorkflowExecutionRecoveryOptions {
+  /** Exact-proof, storage-only settlement for terminal Lamp Combined runs. */
+  repairCompletedCombined?: CompletedCombinedRecoveryDependencies["repairSettlement"];
+}
+
+export type WorkflowExecutionRecoveryResult =
+  | CompletedCombinedRecoveryResult
+  | {
+      outcome: "dead_reconciled";
+      execution: RunExecution;
+      enqueued: false;
+    };
+
 /**
- * Reconcile one "running" execution whose workflow run is provably dead.
- * Returns the advanced execution, or null when nothing was (or could be)
- * changed — alive workflow, unknown state, or a lost CAS race.
+ * Preserve the legacy dead-workflow adopter API for non-Combined callers.
+ * A normally completed Workflow remains a no-op here; the richer HTTP path
+ * below must explicitly provide the Combined exact-settlement capability.
  */
 export async function reconcileDeadWorkflowExecution(
   execution: RunExecution,
   preloadedRun?: Run | null
 ): Promise<RunExecution | null> {
+  const result = await recoverStoppedWorkflowExecution(execution, preloadedRun);
+  return result?.execution ?? null;
+}
+
+/**
+ * Rich recovery result for the HTTP adopter. Non-Combined callers omit the
+ * settlement option and retain the prior behavior: a completed Workflow is
+ * terminal but does not mutate its execution here.
+ */
+export async function recoverStoppedWorkflowExecution(
+  execution: RunExecution,
+  preloadedRun?: Run | null,
+  options: WorkflowExecutionRecoveryOptions = {}
+): Promise<WorkflowExecutionRecoveryResult | null> {
   if (execution.status !== "running" || !execution.workflowRunId) return null;
   const now = Date.now();
   const lastCheck = livenessCheckedAt.get(execution.runId) ?? 0;
@@ -83,6 +117,26 @@ export async function reconcileDeadWorkflowExecution(
   if (state === "alive" || state === "unknown") return null;
 
   const storage = getStorage();
+  if (state === "completed") {
+    if (!options.repairCompletedCombined) return null;
+    return recoverCompletedCombinedEvidence(execution, {
+      repairSettlement: options.repairCompletedCombined,
+      sealIncompleteEvidence: async (current, error) => {
+        const advanced = await storage.advanceRunExecution(
+          {
+            ...current,
+            status: "reconcile_required",
+            revision: current.revision + 1,
+            updatedAt: Math.max(Date.now(), current.updatedAt),
+            error: error.slice(0, 2_000),
+          },
+          current.revision
+        );
+        return advanced.execution ?? null;
+      },
+    });
+  }
+
   let stopReason = deadWorkflowExecutionError(state);
 
   const iteration = execution.iteration;
@@ -140,5 +194,11 @@ export async function reconcileDeadWorkflowExecution(
     },
     execution.revision
   );
-  return advanced.advanced ? advanced.execution : null;
+  return advanced.advanced && advanced.execution
+    ? {
+        outcome: "dead_reconciled",
+        execution: advanced.execution,
+        enqueued: false,
+      }
+    : null;
 }

@@ -1,8 +1,8 @@
 /**
  * COMBINED_WORKFLOW — one region-owned prompt, two generations, one choice.
  *
- * Initial and Final both condition on the immutable source. Final is never a
- * generation from Initial's pixels; only the consolidated critique carries
+ * Take 1 and Take 2 both condition on the immutable source. Take 2 is never a
+ * generation from Take 1's pixels; only the consolidated critique carries
  * forward.
  */
 
@@ -27,7 +27,7 @@ const nodes: PipelineNode[] = [
   {
     id: "initial",
     kind: "generate",
-    label: "Generate v1",
+    label: "Generate Take 1",
     description:
       "Creates the first combined take directly from the immutable source using the unified region-ownership prompt and separately stored relight intensity.",
     providerId: "omni",
@@ -44,7 +44,7 @@ const nodes: PipelineNode[] = [
   {
     id: "final",
     kind: "generate",
-    label: "Generate v2",
+    label: "Generate Take 2",
     description:
       "Creates v2 directly from the same immutable source plus the approved combined plan and consolidated correction ledger; it never chains from v1 pixels.",
     providerId: "omni",
@@ -55,7 +55,7 @@ const nodes: PipelineNode[] = [
     kind: "output",
     label: "Pick winner + blind grade",
     description:
-      "Shows both eligible takes, records one human winner, and grades only that chosen take before revealing its saved AI evaluation.",
+      "Shows both candidates and their qualification status, records one eligible human winner, and grades only that chosen take before revealing its saved AI evaluation.",
     position: { x: STEP * 4, y: MID },
   },
 ];
@@ -81,7 +81,7 @@ export const COMBINED_WORKFLOW: WorkflowDefinition = {
   id: "lamp-combined-v1",
   name: "Lamp Combined",
   description:
-    "Approve one combined plan, generate v1 from the source, critique it once, generate v2 from the source plus capped corrections, then choose one eligible winner and grade only that take.",
+    "Approve one Combined plan, generate Take 1 from the source, critique it once, generate Take 2 from the source plus capped corrections, then choose among eligible takes and grade only that winner.",
   nodes,
   edges,
   config: {

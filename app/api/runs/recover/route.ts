@@ -17,8 +17,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isValidRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
-import { enqueueRunExecution } from "@/lib/server/run-execution-coordinator";
-import { reconcileDeadWorkflowExecution } from "@/lib/server/dead-workflow-recovery";
+import {
+  enqueueRunExecution,
+  repairCompletedRunExecution,
+} from "@/lib/server/run-execution-coordinator";
+import { recoverStoppedWorkflowExecution } from "@/lib/server/dead-workflow-recovery";
+import { COMBINED_COMPLETED_EVIDENCE_INCOMPLETE } from "@/lib/server/completed-workflow-recovery";
 import {
   hasReusableFirstCutApproval,
   hasReusableLampBackgroundApproval,
@@ -100,26 +104,75 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         current.executionId !== `lamp:${body.runId}` &&
         current.executionId !== `lamp-background:${body.runId}` &&
         current.executionId !== `lamp-beautify:${body.runId}` &&
-        current.executionId !== `lamp-iris:${body.runId}`))
+        current.executionId !== `lamp-iris:${body.runId}` &&
+        current.executionId !== `lamp-combined:${body.runId}`))
   ) {
     return NextResponse.json(
       { error: "This run belongs to a different durable execution." },
       { status: 409 }
     );
   }
-  // A "running" record whose Workflow run died from outside (operator
-  // cancellation, engine loss) can never advance itself: recordExecutionFailure
-  // only runs inside the workflow. Reconcile it here before the outbox logic,
-  // which otherwise returns it unchanged forever.
+  const workflowMode = current
+    ? workflowModeFromExecutionId(current.executionId)
+    : runWorkflowMode(run);
+  // A "running" record whose Workflow is terminal can never advance itself:
+  // external death uses the existing fail-closed reconciler, while terminal
+  // Combined completion gets one exact-proof settlement-only repair. Do this
+  // before the outbox logic, which would otherwise leave it unchanged forever.
   if (current?.status === "running") {
+    const running = current;
     try {
-      const reconciled = await reconcileDeadWorkflowExecution(current, run);
-      if (reconciled) {
+      const recovered = await recoverStoppedWorkflowExecution(
+        running,
+        run,
+        workflowMode === "combined"
+          ? {
+              repairCompletedCombined: () =>
+                repairCompletedRunExecution({
+                  runId: running.runId,
+                  executionId: running.executionId,
+                  source: running.source,
+                  renderedPrompt: running.renderedPrompt,
+                  ...(running.combinedPlanOperationIds
+                    ? {
+                        combinedPlanOperationIds:
+                          running.combinedPlanOperationIds,
+                      }
+                    : {}),
+                  ...(running.approvedPlanHash
+                    ? { approvedPlanHash: running.approvedPlanHash }
+                    : {}),
+                }),
+            }
+          : undefined
+      );
+      if (recovered?.outcome === "evidence_incomplete") {
         return NextResponse.json(
-          { ok: true, execution: reconciled, enqueued: false },
+          {
+            code: "COMBINED_SETTLEMENT_EVIDENCE_INCOMPLETE",
+            error:
+              recovered.execution?.error ??
+              COMBINED_COMPLETED_EVIDENCE_INCOMPLETE,
+            execution: recovered.execution,
+            enqueued: false,
+          },
+          {
+            status: 409,
+            headers: { "Cache-Control": "private, no-store, max-age=0" },
+          }
+        );
+      }
+      if (recovered && recovered.outcome !== "changed") {
+        return NextResponse.json(
+          {
+            ok: true,
+            execution: recovered.execution,
+            enqueued: false,
+          },
           { headers: { "Cache-Control": "private, no-store, max-age=0" } }
         );
       }
+      if (recovered?.execution) current = recovered.execution;
     } catch (error) {
       // Best-effort adoption: a storage/API hiccup here must not break the
       // normal outbox path below. The next poll retries after the lease.
@@ -129,10 +182,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
   }
+  if (workflowMode === "combined") {
+    return NextResponse.json(
+      {
+        code: "COMBINED_RECOVERY_UNSUPPORTED",
+        error:
+          "Lamp Combined automatic replay is paused because safe adoption must reconstruct the exact aggregate plan, enabled planner journals, and source-rooted prompts together. Liveness was checked, the saved run was left intact, and no provider work was restarted.",
+      },
+      {
+        status: 409,
+        headers: { "Cache-Control": "private, no-store, max-age=0" },
+      }
+    );
+  }
 
-  const workflowMode = current
-    ? workflowModeFromExecutionId(current.executionId)
-    : runWorkflowMode(run);
   const reusableApproval =
     workflowMode === "background"
       ? hasReusableLampBackgroundApproval(run)

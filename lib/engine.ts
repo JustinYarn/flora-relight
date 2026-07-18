@@ -24,6 +24,8 @@ import { workflowForMode } from "@/lib/workflow-def";
 import {
   estimateLampBackgroundPlan,
   estimateLampBackgroundTwoPass,
+  estimateLampCombinedPlan,
+  estimateLampCombinedTwoPass,
   estimateLampRun,
   estimateRun,
   formatUsd,
@@ -108,6 +110,22 @@ import {
   estimateLampIrisPlan,
   estimateLampIrisTwoPass,
 } from "@/lib/cost";
+import {
+  assertLampCombinedPlanBinding,
+  parseLampCombinedPlan,
+  type LampCombinedPlan,
+} from "@/lib/lamp-combined";
+import {
+  buildLampCombinedEvaluationArtifact,
+  lampCombinedEvalDefinitions,
+  LAMP_COMBINED_VISUAL_EVAL_IDS,
+  type LampCombinedEvaluationArtifact,
+} from "@/lib/lamp-combined-evaluation";
+import {
+  compileLampCombinedFinalPrompt,
+  initialLampCombinedMegaPrompt,
+  type LampCombinedMegaPrompt,
+} from "@/lib/prompts/lamp-combined";
 import { initialMegaPrompt, nextMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { runWorkflowMode } from "@/lib/workflow-mode";
 import { normalizeRelightIntensity } from "@/lib/relight-intensity";
@@ -1648,6 +1666,372 @@ async function runLampIrisMockWorkflow(input: {
   );
 }
 
+function lampCombinedPromptForRun(prompt: LampCombinedMegaPrompt): MegaPrompt {
+  const presentation = initialMegaPrompt("lamp", prompt.relightIntensity);
+  return {
+    ...presentation,
+    version: prompt.iteration,
+    corrections: prompt.corrections.map((correction) => ({
+      id: correction.id,
+      sourceEvalId: correction.sourceEvalId,
+      severity: correction.severity,
+      instruction: correction.instruction,
+      addedAtIteration: 2,
+      resolved: false,
+    })),
+    rendered: prompt.rendered,
+  };
+}
+
+function lampCombinedArtifactResultsForRun(
+  artifact: LampCombinedEvaluationArtifact
+): EvalResult[] {
+  return artifact.evalResults.map((result) => {
+    const violations: Violation[] = result.violations.map((violation) => ({
+      aspect: violation.aspect,
+      severity: violation.severity,
+      description: violation.description,
+      ...(violation.frameTimestampSec !== undefined
+        ? { frameTimestampSec: violation.frameTimestampSec }
+        : {}),
+      correction: violation.correction
+        ? `${violation.correction.action}${
+            violation.correction.planItemIds.length > 0
+              ? `: ${violation.correction.planItemIds.join(", ")}`
+              : ""
+          }`
+        : "Restore the corresponding source-faithful state.",
+    }));
+    return {
+      evalId: result.evalId,
+      iteration: result.iteration,
+      verdicts:
+        result.evalId === "audio-integrity"
+          ? []
+          : [
+              {
+                judge: "gemini" as const,
+                score: result.score,
+                verdict: result.verdict,
+                violations,
+                reasoning: result.reasoning,
+              },
+            ],
+      score: result.score,
+      confidence: result.confidence,
+      verdict: result.verdict,
+      violations,
+      ...(result.deltaFromPrevious !== undefined
+        ? { deltaFromPrevious: result.deltaFromPrevious }
+        : {}),
+    };
+  });
+}
+
+function lampCombinedCompositeForResults(
+  plan: LampCombinedPlan,
+  results: EvalResult[]
+): Iteration["composite"] {
+  const definitions = lampCombinedEvalDefinitions(plan);
+  const byId = new Map(results.map((result) => [result.evalId, result]));
+  let weighted = 0;
+  let totalWeight = 0;
+  const hardGateFailures: string[] = [];
+  for (const definition of definitions) {
+    const result = byId.get(definition.id);
+    if (!result) continue;
+    weighted += result.score * definition.weight;
+    totalWeight += definition.weight;
+    if (definition.hardGate && result.verdict !== "pass") {
+      hardGateFailures.push(definition.id);
+    }
+  }
+  const score = round1(totalWeight > 0 ? weighted / totalWeight : 0);
+  return {
+    score,
+    hardGateFailures,
+    passed: score >= 75 && hardGateFailures.length === 0,
+  };
+}
+
+async function mockLampCombinedEvaluation(
+  plan: LampCombinedPlan,
+  iteration: 1 | 2,
+  previousArtifact?: LampCombinedEvaluationArtifact
+): Promise<LampCombinedEvaluationArtifact> {
+  const removalIds = plan.backgroundPlan.remove.map((item) => item.id);
+  const beautifyIds =
+    plan.beautify.state === "enabled"
+      ? plan.beautify.plan.enhance.map((item) => item.id)
+      : [];
+  const irisIds =
+    plan.iris.state === "enabled"
+      ? plan.iris.plan.correct.map((item) => item.id)
+      : [];
+
+  const results = LAMP_COMBINED_VISUAL_EVAL_IDS.map((evalId) => {
+    const violations: Array<{
+      aspect: string;
+      severity: "critical" | "major" | "minor";
+      description: string;
+      correctionAction: string | null;
+      planItemIds: string[];
+    }> = [];
+    let score = iteration === 1 ? 94 : 97;
+
+    if (iteration === 1 && evalId === "lighting-target") {
+      score = 69;
+      violations.push({
+        aspect: "lighting-target-undershoot",
+        severity: "major",
+        description:
+          "The simulated Initial has not yet reached the complete run-bound lighting target.",
+        correctionAction: "match-lighting-target",
+        planItemIds: [],
+      });
+    }
+    if (
+      iteration === 1 &&
+      evalId === "background-cleanliness" &&
+      removalIds.length > 0
+    ) {
+      score = 72;
+      violations.push({
+        aspect: "approved-background-removal-incomplete",
+        severity: "major",
+        description:
+          "The simulated Initial leaves part of an approved cleanup target visible.",
+        correctionAction: "complete-approved-background-removal",
+        planItemIds: removalIds,
+      });
+    }
+    if (
+      iteration === 1 &&
+      evalId === "beautify-target" &&
+      beautifyIds.length > 0
+    ) {
+      score = 74;
+      violations.push({
+        aspect: "approved-beautify-target-incomplete",
+        severity: "major",
+        description:
+          "The simulated Initial undershoots the approved presentation target.",
+        correctionAction: "complete-approved-beautify",
+        planItemIds: beautifyIds,
+      });
+    }
+    if (
+      iteration === 1 &&
+      evalId === "eye-contact" &&
+      irisIds.length > 0
+    ) {
+      score = 73;
+      violations.push({
+        aspect: "approved-eye-contact-target-incomplete",
+        severity: "major",
+        description:
+          "The simulated Initial has not yet reached the approved Presenter contact target.",
+        correctionAction: "complete-approved-eye-contact",
+        planItemIds: irisIds,
+      });
+    }
+
+    return {
+      evalId,
+      score,
+      confidence: 0.9,
+      violations,
+      reasoning:
+        iteration === 1
+          ? `Simulated Initial whole-video evidence for ${evalId}; no evaluation provider was called.`
+          : `Simulated Final whole-video evidence for ${evalId}; no evaluation provider was called.`,
+    };
+  });
+
+  return buildLampCombinedEvaluationArtifact({
+    raw: { results },
+    plan,
+    iteration,
+    audioVerified: true,
+    previousArtifact,
+    costUsd: 0,
+  });
+}
+
+/** Provider-free Combined rehearsal using the production plan/prompt/eval contracts. */
+async function runLampCombinedMockWorkflow(input: {
+  runId: string;
+  original: VideoAsset;
+  combinedPlan: LampCombinedPlan;
+  combinedControls: NonNullable<Run["combinedControls"]>;
+  relightIntensity: number;
+  instant: boolean;
+  pace: (minMs?: number, maxMs?: number) => Promise<void>;
+}): Promise<void> {
+  const {
+    runId,
+    original,
+    combinedPlan,
+    combinedControls,
+    relightIntensity,
+    instant,
+    pace,
+  } = input;
+  const plan = parseLampCombinedPlan(combinedPlan);
+  if (plan.approval.status !== "approved") {
+    throw new Error(
+      "Lamp Combined mock execution requires one approved aggregate plan."
+    );
+  }
+  assertLampCombinedPlanBinding(plan, {
+    runId,
+    controls: combinedControls,
+    relightIntensity,
+  });
+
+  const providers = getProviders("mock", { instant });
+  const planningEstimate = estimateLampCombinedPlan(combinedControls);
+  const twoPassEstimate = estimateLampCombinedTwoPass(original.durationSec);
+  const estimate = {
+    totalUsd: planningEstimate.totalUsd + twoPassEstimate.totalUsd,
+    items: [...planningEstimate.items, ...twoPassEstimate.items],
+  };
+  const encode = (iteration: number) =>
+    encodeScenarioIteration(original.id, iteration);
+
+  mutateRun(runId, (run) => {
+    run.live = false;
+    run.combinedControls = combinedControls;
+    run.combinedPlan = plan;
+    run.iterations = [];
+    run.cost = {
+      estimatedUsd: estimate.totalUsd,
+      actualUsd: 0,
+      items: estimate.items.map((item) => ({
+        label: item.label,
+        usd: item.usd,
+        estimated: true,
+      })),
+    };
+    delete run.bestIterationIndex;
+    delete run.finalVideo;
+    delete run.fallback;
+  });
+
+  setNode(runId, "plan", "running");
+  await pace(80, 180);
+  setNode(runId, "plan", "succeeded", "one aggregate plan locked");
+
+  setNode(runId, "initial", "running", "source-rooted generation 1 of 2");
+  const initialPrompt = await initialLampCombinedMegaPrompt(
+    plan,
+    relightIntensity
+  );
+  const initialPresentationPrompt = lampCombinedPromptForRun(initialPrompt);
+  mutateRun(runId, (run) => {
+    run.iterations.push({
+      index: 1,
+      megaPrompt: initialPresentationPrompt,
+      beforeFrames: [],
+      afterFrames: [],
+      evalResults: [],
+      status: "running",
+    });
+  });
+  const initialGenerated = await providers.videoGen.generate({
+    originalVideo: original,
+    megaPrompt: initialPresentationPrompt,
+    seed: 133742,
+    iteration: encode(1),
+  });
+  const initialVideo: VideoAsset = {
+    ...initialGenerated.video,
+    url: original.url,
+    hasAudio: original.hasAudio,
+    label: "Lamp Combined Initial — simulated take",
+    simulatedFilter: "brightness(1.06) contrast(1.02)",
+  };
+  patchIteration(runId, 1, (candidate) => {
+    candidate.generatedVideo = initialVideo;
+  });
+  setNode(runId, "initial", "succeeded", "simulated Initial qualified");
+
+  setNode(runId, "critique", "running", "one holistic evaluation");
+  await pace(180, 340);
+  const initialArtifact = await mockLampCombinedEvaluation(plan, 1);
+  const initialResults = lampCombinedArtifactResultsForRun(initialArtifact);
+  patchIteration(runId, 1, (candidate) => {
+    candidate.evalResults = initialResults;
+    candidate.composite = lampCombinedCompositeForResults(plan, initialResults);
+    candidate.status = "ungraded";
+  });
+  const correctionCount = initialArtifact.evalResults.flatMap((result) =>
+    result.violations.filter((violation) => violation.correction)
+  ).length;
+  setNode(
+    runId,
+    "critique",
+    "succeeded",
+    `${correctionCount} bounded corrections compiled`
+  );
+
+  setNode(runId, "final", "running", "source-rooted generation 2 of 2");
+  const finalPrompt = await compileLampCombinedFinalPrompt(
+    initialPrompt.rendered,
+    plan,
+    relightIntensity,
+    initialArtifact
+  );
+  const finalPresentationPrompt = lampCombinedPromptForRun(finalPrompt);
+  mutateRun(runId, (run) => {
+    run.iterations.push({
+      index: 2,
+      megaPrompt: finalPresentationPrompt,
+      beforeFrames: [],
+      afterFrames: [],
+      evalResults: [],
+      status: "running",
+    });
+  });
+  const finalGenerated = await providers.videoGen.generate({
+    originalVideo: original,
+    megaPrompt: finalPresentationPrompt,
+    seed: 133742,
+    iteration: encode(2),
+  });
+  const finalVideo: VideoAsset = {
+    ...finalGenerated.video,
+    url: original.url,
+    hasAudio: original.hasAudio,
+    label: "Lamp Combined Final — simulated take",
+    simulatedFilter: "brightness(1.09) contrast(1.04) saturate(1.02)",
+  };
+  const finalArtifact = await mockLampCombinedEvaluation(
+    plan,
+    2,
+    initialArtifact
+  );
+  const finalResults = lampCombinedArtifactResultsForRun(finalArtifact);
+  patchIteration(runId, 2, (candidate) => {
+    candidate.generatedVideo = finalVideo;
+    candidate.evalResults = finalResults;
+    candidate.composite = lampCombinedCompositeForResults(plan, finalResults);
+    candidate.status = "ungraded";
+  });
+  setNode(runId, "final", "succeeded", "simulated Final qualified");
+
+  setNode(runId, "review", "running", "choose one take, then blind grade");
+  mutateRun(runId, (run) => {
+    run.status = "awaiting-review";
+  });
+  log(
+    runId,
+    "info",
+    "Lamp Combined demo complete: two independently source-rooted candidates are ready for your winner choice. Actual provider spend: $0.00.",
+    "review"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The engine
 // ---------------------------------------------------------------------------
@@ -1675,6 +2059,34 @@ export async function runWorkflow(
     throw new Error(
       "Live browser execution is disabled. Durable server Workflows own all provider dispatch."
     );
+  }
+  if (workflowMode === "combined") {
+    try {
+      if (!run0.combinedPlan || !run0.combinedControls) {
+        throw new Error(
+          "Lamp Combined mock execution cannot start without its aggregate plan and bound controls."
+        );
+      }
+      await runLampCombinedMockWorkflow({
+        runId,
+        original,
+        combinedPlan: run0.combinedPlan,
+        combinedControls: run0.combinedControls,
+        relightIntensity,
+        instant,
+        pace,
+      });
+    } catch (error) {
+      log(runId, "error", `Lamp Combined demo error: ${errText(error)}`);
+      mutateRun(runId, (run) => {
+        run.status = "failed";
+        for (const state of Object.values(run.nodeStates)) {
+          if (state.status === "running") state.status = "failed";
+          if (state.status === "queued") state.status = "idle";
+        }
+      });
+    }
+    return;
   }
   if (workflowMode === "iris") {
     try {

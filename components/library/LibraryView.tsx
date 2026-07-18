@@ -251,7 +251,7 @@ export function LibraryView() {
 
       {/* HEADER STRIP — flat one-line stats, no cards */}
       <div className="flex flex-wrap items-end gap-x-10 gap-y-4 border-b border-edge pb-5">
-        <Stat value={String(scoped.length)} label="generations" />
+        <Stat value={String(scoped.length)} label="runs" />
         <Stat
           value={String(counts.approved)}
           label="approved"
@@ -269,8 +269,8 @@ export function LibraryView() {
         />
         <Stat
           value={avgScore !== undefined ? avgScore.toFixed(1) : "—"}
-          label="avg Final AI score"
-          title="mean overall score of each run's delivered Final or shipped cut"
+          label="avg shipped AI score"
+          title="mean overall AI score of each run's shipped cut or human-chosen Combined winner"
         />
         <Stat
           value={formatUsd(spend.actual)}

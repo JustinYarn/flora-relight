@@ -6,6 +6,7 @@ import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { isLampBackgroundRun } from "@/lib/lamp-background-read";
 import { isLampBeautifyRun } from "@/lib/lamp-beautify-read";
 import { isLampIrisRun } from "@/lib/lamp-iris-read";
+import { isLampCombinedRun } from "@/lib/lamp-combined-read";
 
 type StageState = "idle" | "active" | "done" | "failed" | "skipped";
 
@@ -40,6 +41,14 @@ const IRIS_STAGES = [
   { id: "grade", label: "Your grade" },
 ] as const;
 
+const COMBINED_STAGES = [
+  { id: "plan", label: "Combined plan" },
+  { id: "initial", label: "Take 1" },
+  { id: "critique", label: "Take 1 quality check" },
+  { id: "final", label: "Take 2" },
+  { id: "grade", label: "Pick + grade winner" },
+] as const;
+
 const DOT_COLOR: Record<StageState, string> = {
   idle: "var(--edge)",
   active: "var(--running)",
@@ -70,7 +79,8 @@ function stateForPlanNode(
   const status = run.nodeStates[nodeId]?.status ?? "idle";
   if (
     nodeId === "plan" &&
-    (run.backgroundCleanupPlan?.approval.status === "draft" ||
+    (run.combinedPlan?.approval.status === "draft" ||
+      run.backgroundCleanupPlan?.approval.status === "draft" ||
       run.beautifyPlan?.approval.status === "draft" ||
       run.irisPlan?.approval.status === "draft")
   ) {
@@ -84,6 +94,17 @@ function stateForPlanNode(
 }
 
 function planSummary(run: Run): string | null {
+  if (run.combinedPlan) {
+    const plan = run.combinedPlan;
+    if (plan.approval.status !== "approved") return "awaiting your approval";
+    const optionalScopes = [
+      ...(plan.beautify.state === "enabled" ? ["beautify"] : []),
+      ...(plan.iris.state === "enabled" ? ["eye contact"] : []),
+    ];
+    return optionalScopes.length > 0
+      ? `background + ${optionalScopes.join(" + ")} approved`
+      : "background approved; optional edits locked off";
+  }
   if (run.backgroundCleanupPlan) {
     const plan = run.backgroundCleanupPlan;
     if (plan.approval.status !== "approved") return "awaiting your approval";
@@ -122,16 +143,20 @@ function planSummary(run: Run): string | null {
  * not every engine node: v1, one holistic critique, v2, then human grade.
  */
 export function WorkflowRail({ run }: { run: Run }) {
+  const combined = isLampCombinedRun(run);
   const iris = isLampIrisRun(run);
   const beautify = isLampBeautifyRun(run);
   const background = isLampBackgroundRun(run) || beautify || iris;
-  const stages = iris
-    ? IRIS_STAGES
-    : beautify
-      ? BEAUTIFY_STAGES
-      : background
-        ? BACKGROUND_STAGES
-        : LAMP_STAGES;
+  const planFirst = combined || background;
+  const stages = combined
+    ? COMBINED_STAGES
+    : iris
+      ? IRIS_STAGES
+      : beautify
+        ? BEAUTIFY_STAGES
+        : background
+          ? BACKGROUND_STAGES
+          : LAMP_STAGES;
   const initial =
     run.iterations.find((iteration) => iteration.index === 1) ?? run.iterations[0];
   const final =
@@ -146,7 +171,7 @@ export function WorkflowRail({ run }: { run: Run }) {
     : run.status === "awaiting-review" || Boolean(run.finalVideo)
       ? "active"
       : "idle";
-  const states: StageState[] = background
+  const states: StageState[] = planFirst
     ? [
         stateForPlanNode(run, "plan"),
         stateForPlanNode(run, "initial"),
@@ -185,13 +210,15 @@ export function WorkflowRail({ run }: { run: Run }) {
   return (
     <nav
       aria-label={`${
-        iris
-          ? "Lamp Iris"
-          : beautify
-            ? "Lamp Beautify"
-            : background
-              ? "Lamp Background"
-              : "Lamp"
+        combined
+          ? "Lamp Combined"
+          : iris
+            ? "Lamp Iris"
+            : beautify
+              ? "Lamp Beautify"
+              : background
+                ? "Lamp Background"
+                : "Lamp"
       } progress`}
     >
       <p className="text-2xs tabular-nums text-faint">
@@ -238,7 +265,7 @@ export function WorkflowRail({ run }: { run: Run }) {
                 ) : null}
                 {stage.id === "final" && finalEvalCount > 0 ? (
                   <span className="mt-1 block text-2xs tabular-nums text-faint">
-                    {finalEvalCount} final results available
+                    {finalEvalCount} {combined ? "Take 2" : "final"} results available
                   </span>
                 ) : null}
                 {background && state === "skipped" ? (

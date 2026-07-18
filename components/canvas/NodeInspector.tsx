@@ -20,6 +20,19 @@ import { LAMP_BACKGROUND_UI_EVAL_DEFS } from "@/lib/lamp-background-read";
 import { LAMP_BEAUTIFY_UI_EVAL_DEFS } from "@/lib/lamp-beautify-read";
 import { LAMP_IRIS_UI_EVAL_DEFS } from "@/lib/lamp-iris-read";
 import {
+  lampCombinedDefinitionPrompt,
+  lampCombinedUiEvalDefs,
+} from "@/lib/lamp-combined-read";
+import {
+  LAMP_COMBINED_CLEANLINESS_PROFILES,
+  lampCombinedCandidateIneligibility,
+} from "@/lib/lamp-combined";
+import type { LampCombinedCandidateQualificationReceipt } from "@/lib/lamp-combined-candidate";
+import {
+  lampCombinedCandidateReceiptEligible,
+  lampCombinedCandidateReceiptToDeliveryCandidate,
+} from "@/lib/lamp-combined-candidate-read";
+import {
   lampBackgroundDisplayPrompt,
   sampleApprovedLampBackgroundPlan,
 } from "@/lib/lamp-background-display";
@@ -50,6 +63,14 @@ import { runWorkflowMode, workflowModeLabel } from "@/lib/workflow-mode";
 type Mode = "mock" | "live";
 type Iteration = Run["iterations"][number];
 
+function attemptLabel(workflowMode: WorkflowMode, iteration: number): string {
+  if (workflowMode === "combined") return `Take ${iteration}`;
+  if (workflowMode === "flora") return `Attempt ${iteration}`;
+  if (iteration === 1) return "Initial";
+  if (iteration === 2) return "Final";
+  return `v${iteration}`;
+}
+
 function severityColor(severity: ViolationSeverity): string {
   return severity === "critical"
     ? "var(--fail)"
@@ -65,6 +86,7 @@ function evalName(id: string): string {
     LAMP_BEAUTIFY_UI_EVAL_DEFS.find((definition) => definition.id === id)
       ?.name ??
     LAMP_IRIS_UI_EVAL_DEFS.find((definition) => definition.id === id)?.name ??
+    lampCombinedUiEvalDefs().find((definition) => definition.id === id)?.name ??
     LAMP_EVAL_DEFS.find((definition) => definition.id === id)?.name ??
     EVAL_DEFS.find((definition) => definition.id === id)?.name ??
     id
@@ -76,6 +98,7 @@ function evalDefinitionsForMode(workflowMode: WorkflowMode) {
   if (workflowMode === "background") return LAMP_BACKGROUND_UI_EVAL_DEFS;
   if (workflowMode === "beautify") return LAMP_BEAUTIFY_UI_EVAL_DEFS;
   if (workflowMode === "iris") return LAMP_IRIS_UI_EVAL_DEFS;
+  if (workflowMode === "combined") return lampCombinedUiEvalDefs();
   return EVAL_DEFS;
 }
 
@@ -248,10 +271,12 @@ function latestResultFor(run: Run | undefined, evalId: string): EvalResult | nul
 function AttemptPicker({
   attempts,
   selectedIteration,
+  workflowMode,
   onSelect,
 }: {
   attempts: Array<{ iteration: Iteration; result: EvalResult }>;
   selectedIteration: number;
+  workflowMode: WorkflowMode;
   onSelect: (iteration: number) => void;
 }) {
   if (attempts.length === 0) return null;
@@ -264,7 +289,13 @@ function AttemptPicker({
         <span className="text-2xs font-semibold uppercase tracking-[0.12em] text-faint">
           Result in view
         </span>
-        <span className="text-2xs text-faint">Select Initial or Final to trace it</span>
+        <span className="text-2xs text-faint">
+          {workflowMode === "combined"
+            ? "Select a take to trace it"
+            : workflowMode === "flora"
+              ? "Select an attempt to trace it"
+              : "Select Initial or Final to trace it"}
+        </span>
       </div>
       <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
         {attempts.map(({ iteration, result }) => (
@@ -277,11 +308,7 @@ function AttemptPicker({
           >
             <div>
               <span className="block text-2xs font-semibold uppercase tracking-[0.1em] text-faint">
-                {iteration.index === 1
-                  ? "Initial"
-                  : iteration.index === 2
-                    ? "Final"
-                    : `v${iteration.index}`}
+                {attemptLabel(workflowMode, iteration.index)}
               </span>
               <span className="mt-0.5 block text-sm font-semibold tabular-nums text-ink">
                 {Math.round(result.score)}
@@ -304,8 +331,12 @@ function correctionId(evalId: string, aspect: string): string {
   return `corr:${evalId}:${aspect.trim().toLowerCase().replace(/\s+/g, "-")}`;
 }
 
-function runPromptSource(iteration: number): string {
-  return `run.iterations · ${iteration === 1 ? "Initial" : iteration === 2 ? "Final" : `v${iteration}`} · megaPrompt.rendered`;
+function runPromptSource(
+  iteration: number,
+  workflowMode: WorkflowMode
+): string {
+  const label = attemptLabel(workflowMode, iteration);
+  return `run.iterations · ${label} · megaPrompt.rendered`;
 }
 
 function codeCheckSpecificationNote(
@@ -313,7 +344,7 @@ function codeCheckSpecificationNote(
   workflowMode: WorkflowMode
 ): string {
   if (evalId === "audio-integrity") {
-    if (isVersionAPlanMode(workflowMode)) {
+    if (isVersionAPlanMode(workflowMode) || workflowMode === "combined") {
       return `No model prompt. ${workflowModeLabel(workflowMode)} verifies source-audio restoration and complete timeline agreement deterministically after generation; Audio Integrity is not included in the visual evaluator call.`;
     }
     return "No model prompt. Lamp verifies audio presence, complete source/generated/remuxed timeline agreement, and the restored source-audio fingerprint. Any mismatch fails closed before visual evaluation.";
@@ -340,9 +371,12 @@ function promptViewFor(
   const planModeView = isVersionAPlanMode(workflowMode)
     ? planModeDisplayPrompt(workflowMode, run, iteration)
     : undefined;
-  const definitionPrompt = planModeView
-    ? planModeView.prompt
-    : initialMegaPrompt(workflowMode);
+  const definitionPrompt =
+    workflowMode === "combined"
+      ? lampCombinedDefinitionPrompt(run?.relightIntensity)
+      : planModeView
+        ? planModeView.prompt
+        : initialMegaPrompt(workflowMode);
   const attempt = iteration?.index ?? Math.max(1, run?.serverExecution?.iteration ?? 1);
   const operation = run?.providerOperations?.find(
     (item) =>
@@ -384,7 +418,7 @@ function promptViewFor(
       attempt: iteration.index,
       runBound: true,
       consumed: Boolean(iteration.generatedVideo),
-      source: runPromptSource(iteration.index),
+      source: runPromptSource(iteration.index, workflowMode),
     };
   }
   const prompt = {
@@ -421,12 +455,18 @@ function generationBriefNote(
   workflowMode: WorkflowMode
 ): string {
   if (!runBound) {
+    if (workflowMode === "combined") {
+      return "Definition-only Combined overview. Exact provider bytes exist only after one source-specific aggregate plan is approved and frozen.";
+    }
     if (isVersionAPlanMode(workflowMode)) {
       return `Definition-only ${workflowModeLabel(workflowMode)} brief compiled from a clearly labeled synthetic approved plan. It is not attached to a real video.`;
     }
     return "This is the current baseline render before a run adds any eval-driven fixes. It is an example, not a historical request.";
   }
   if (!consumed) {
+    if (workflowMode === "combined") {
+      return "These exact Lamp Combined prompt bytes are bound to the selected run and approved aggregate plan. Provider consumption is not confirmed yet.";
+    }
     if (isVersionAPlanMode(workflowMode)) {
       return `These exact ${workflowModeLabel(workflowMode)} prompt bytes are bound to the selected run or its approved plan. Provider consumption is not confirmed yet.`;
     }
@@ -452,8 +492,8 @@ function EvalSection({
 }) {
   const effectiveMode = run ? runWorkflowMode(run) : workflowMode;
   const lamp = effectiveMode === "lamp";
-  const background = effectiveMode === "background";
-  const planMode = isVersionAPlanMode(effectiveMode);
+  const planMode =
+    isVersionAPlanMode(effectiveMode) || effectiveMode === "combined";
   const definitions = run
     ? evalDefsForRun(run)
     : evalDefinitionsForMode(effectiveMode);
@@ -515,8 +555,8 @@ function EvalSection({
     isAudio &&
     (liveAudioStatus === "succeeded" || liveAudioStatus === "failed");
   const checkExecuted = Boolean(focusResult) || operationalAudioResult;
-  const focusVideoLabel =
-    (focusResult?.iteration ?? promptView.attempt) === 1 ? "Initial" : "Final";
+  const focusAttempt = focusResult?.iteration ?? promptView.attempt;
+  const focusVideoLabel = attemptLabel(effectiveMode, focusAttempt);
   const transitionParts = [
     nextActiveCorrections.length > 0
       ? `${nextActiveCorrections.length} added or carried`
@@ -546,7 +586,7 @@ function EvalSection({
         : !nextIteration
           ? focusResult.violations.length > 0
             ? "Finding recorded · no later brief compiled"
-            : "Final result · no later brief compiled"
+            : `${attemptLabel(effectiveMode, focusResult.iteration)} result · no later brief compiled`
           : transitionParts.length > 0
             ? `${transitionParts.join(" · ")} in brief v${nextIteration.megaPrompt.version}`
             : focusResult.verdict === "pass"
@@ -555,7 +595,8 @@ function EvalSection({
 
   const decisionValue: ReactNode = focusResult ? (
     <span className="inline-flex items-center gap-2">
-      {focusResult.iteration === 1 ? "Initial" : "Final"} · {Math.round(focusResult.score)}
+      {attemptLabel(effectiveMode, focusResult.iteration)} ·{" "}
+      {Math.round(focusResult.score)}
       <VerdictBadge verdict={focusResult.verdict} />
     </span>
   ) : liveVisualSkipped ? (
@@ -589,6 +630,7 @@ function EvalSection({
             <AttemptPicker
               attempts={attempts}
               selectedIteration={focusResult.iteration}
+              workflowMode={effectiveMode}
               onSelect={setSelectedAttempt}
             />
           </div>
@@ -608,7 +650,7 @@ function EvalSection({
               value: isAudio
                 ? "Original audio remux"
                 : promptView.runBound
-                  ? `Generation brief v${brief.version} · ${promptView.attempt === 1 ? "Initial" : "Final"}`
+                  ? `Generation brief v${brief.version} · ${attemptLabel(effectiveMode, promptView.attempt)}`
                   : "Current baseline generation brief",
               color: "var(--accent)",
             },
@@ -709,7 +751,7 @@ function EvalSection({
               ? `Video brief v${brief.version} before source-audio finalization`
               : `Baseline video brief v${brief.version} · no audio run selected`
             : promptView.runBound
-              ? `Generation brief v${brief.version} for ${promptView.attempt === 1 ? "Initial" : "Final"}`
+              ? `Generation brief v${brief.version} for ${attemptLabel(effectiveMode, promptView.attempt)}`
               : `Baseline generation brief v${brief.version}`
         }
         text={brief.rendered}
@@ -755,6 +797,8 @@ function EvalSection({
               ? "lib/lamp-beautify-evaluation.ts"
               : effectiveMode === "iris"
                 ? "lib/lamp-iris-evaluation.ts"
+                : effectiveMode === "combined"
+                  ? "lib/lamp-combined-evaluation.ts"
             : lamp && evalId === "skin-texture-age"
               ? "lib/lamp-evaluation.ts"
               : "lib/prompts/eval-defs.ts"
@@ -784,8 +828,13 @@ function EvalSection({
           </p>
         ) : audioSkipped ? (
           <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-            Audio Integrity was skipped because no verified Final delivery was
-            available. No mega-prompt change was produced.
+            Audio Integrity was skipped because no verified{" "}
+            {effectiveMode === "combined"
+              ? "take"
+              : effectiveMode === "flora"
+                ? "attempt"
+                : "Final delivery"}{" "}
+            was available. No mega-prompt change was produced.
           </p>
         ) : isAudio && !focusResult ? (
           <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
@@ -799,7 +848,7 @@ function EvalSection({
         ) : !focusResult ? (
           <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
             No result means no correction from this check. Open a completed demo
-            video to see Initial findings turn into the Final generation brief.
+            video to see one set of findings feed the next generation brief.
           </p>
         ) : isAudio && focusResult.violations.length === 0 ? (
           <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
@@ -1352,7 +1401,8 @@ function GenerateSection({
   workflowMode: WorkflowMode;
   onSelectNode: (nodeId: string) => void;
 }) {
-  const planMode = isVersionAPlanMode(workflowMode);
+  const planMode =
+    isVersionAPlanMode(workflowMode) || workflowMode === "combined";
   const requestedPlanAttempt =
     node.id === "initial" ? 1 : node.id === "final" ? 2 : undefined;
   const iteration =
@@ -1377,13 +1427,10 @@ function GenerateSection({
   const videoLabel =
     exceptionalNoOp
       ? "Exceptional no-op"
-      : planMode && requestedPlanAttempt
-      ? requestedPlanAttempt === 1
-        ? "Initial"
-        : "Final"
-      : promptView.attempt === 1
-        ? "Initial"
-        : "Final";
+      : attemptLabel(
+          workflowMode,
+          requestedPlanAttempt ?? promptView.attempt
+        );
   const requestedPromptMissing =
     planMode &&
     Boolean(run) &&
@@ -1394,8 +1441,10 @@ function GenerateSection({
       ? "background-cleanup"
       : workflowMode === "beautify"
         ? "touch-up"
-        : workflowMode === "iris"
+      : workflowMode === "iris"
           ? "eye-contact"
+          : workflowMode === "combined"
+            ? "combined"
           : "relit";
 
   return (
@@ -1446,11 +1495,21 @@ function GenerateSection({
               value:
                 exceptionalNoOp
                   ? "None · the approved plan bypasses generation"
+                  : videoLabel === "Take 1"
+                    ? "None · this is the first source-rooted take"
+                  : workflowMode === "flora" && promptView.attempt === 1
+                    ? "None · this is the first historical attempt"
+                  : workflowMode === "flora"
+                    ? `Every actionable finding from ${attemptLabel(workflowMode, Math.max(1, promptView.attempt - 1))}`
                   : videoLabel === "Initial"
                   ? "None · this is the Initial generation"
                   : requestedPromptMissing
-                    ? "Waiting · the Initial critique has not compiled Final yet"
-                    : "Every actionable finding from the Initial critique",
+                    ? workflowMode === "combined"
+                      ? "Waiting · the Take 1 evaluation has not compiled Take 2 yet"
+                      : "Waiting · the Initial critique has not compiled Final yet"
+                    : workflowMode === "combined"
+                      ? "The bounded, severity-ordered findings from Take 1"
+                      : "Every actionable finding from the Initial critique",
               color: "var(--running)",
             },
             {
@@ -1469,10 +1528,10 @@ function GenerateSection({
           exceptionalNoOp
             ? "Approved exact-source delivery instruction"
             : requestedPromptMissing
-            ? `Latest available ${workflowModeLabel(workflowMode)} brief · Final not compiled yet`
+            ? `Latest available ${workflowModeLabel(workflowMode)} brief · ${workflowMode === "combined" ? "Take 2" : "Final"} not compiled yet`
             : promptView.runBound
             ? `${promptView.consumed ? "Prompt consumed" : "Prompt bound"} for ${videoLabel}`
-            : "Mega prompt for Initial"
+            : `Mega prompt for ${attemptLabel(workflowMode, promptView.attempt)}`
         }
         text={megaPrompt.rendered}
         note={generationBriefNote(
@@ -1492,9 +1551,9 @@ function GenerateSection({
       ) : null}
       {requestedPromptMissing ? (
         <p className="text-pretty text-2xs leading-relaxed text-borderline">
-          The selected run has no saved Final prompt yet. The disclosure above
+          The selected run has no saved {workflowMode === "combined" ? "Take 2" : "Final"} prompt yet. The disclosure above
           shows the latest available approved-plan-bound brief as
-          context and does not claim Final was compiled or consumed.
+          context and does not claim the second prompt was compiled or consumed.
         </p>
       ) : null}
       {planMode ? (
@@ -1518,17 +1577,474 @@ function GenerateSection({
   );
 }
 
-function AggregateSection({
+function combinedCandidateReceipt(
+  run: Run | undefined,
+  iteration: 1 | 2
+): LampCombinedCandidateQualificationReceipt | undefined {
+  return iteration === 1
+    ? run?.serverExecution?.combinedCandidateReceipts?.initial
+    : run?.serverExecution?.combinedCandidateReceipts?.final;
+}
+
+function combinedIneligibilityLabel(
+  receipt: LampCombinedCandidateQualificationReceipt
+): string | null {
+  const reason = lampCombinedCandidateIneligibility(
+    lampCombinedCandidateReceiptToDeliveryCandidate(receipt)
+  );
+  if (reason === "generation-incomplete") return "generation incomplete";
+  if (reason === "audio-unverified") return "audio unverified";
+  if (reason === "sync-failed") return "sync failed";
+  if (reason === "sync-unverified") return "sync unverified";
+  if (reason === "evaluation-incomplete") return "evaluation incomplete";
+  return null;
+}
+
+function combinedAudioLabel(
+  receipt: LampCombinedCandidateQualificationReceipt
+): string {
+  if (receipt.audio.outcome === "verified") return "source audio verified";
+  if (receipt.audio.outcome === "silent_source") return "silent source";
+  return "source audio unverified";
+}
+
+function combinedSyncLabel(
+  receipt: LampCombinedCandidateQualificationReceipt
+): string {
+  const sync = receipt.repair?.sync ?? receipt.sync;
+  if (sync.outcome === "passed") {
+    return receipt.repair ? "passed after one repair" : "passed";
+  }
+  if (sync.outcome === "not_required") return "not required · silent source";
+  if (sync.outcome === "failed") return "failed";
+  return "not run · audio unverified";
+}
+
+interface CombinedQualificationSnapshot {
+  label: string;
+  detail: string;
+  color: string;
+  eligible: boolean;
+  receipt?: LampCombinedCandidateQualificationReceipt;
+}
+
+function combinedQualificationSnapshot(
+  run: Run | undefined,
+  mode: Mode,
+  iteration: 1 | 2
+): CombinedQualificationSnapshot {
+  const receipt = combinedCandidateReceipt(run, iteration);
+  if (receipt) {
+    const eligible = lampCombinedCandidateReceiptEligible(receipt);
+    const reason = combinedIneligibilityLabel(receipt);
+    return {
+      label: eligible ? "Eligible" : "Not eligible",
+      detail: eligible
+        ? "Eligible from the saved qualification receipt."
+        : `The saved receipt fails closed: ${reason ?? "qualification incomplete"}.`,
+      color: eligible ? "var(--pass)" : "var(--fail)",
+      eligible,
+      receipt,
+    };
+  }
+
+  if (!run) {
+    return {
+      label: "Definition only",
+      detail: "Select a Combined run to inspect its recorded candidate evidence.",
+      color: "var(--faint)",
+      eligible: false,
+    };
+  }
+
+  if (mode === "mock") {
+    return {
+      label: "Preview only",
+      detail:
+        "This demo candidate has no provider, audio, sync, or evaluation qualification receipt.",
+      color: "var(--accent)",
+      eligible: false,
+    };
+  }
+
+  const generated = run.iterations.some(
+    (candidate) =>
+      candidate.index === iteration && Boolean(candidate.generatedVideo)
+  );
+  return {
+    label: generated ? "Qualification pending" : "Not generated yet",
+    detail: generated
+      ? "A candidate is visible in run state, but its qualification receipt is not recorded, so it is not yet selectable as a winner."
+      : "Qualification starts only after this take is generated and evaluated.",
+    color: generated ? "var(--borderline)" : "var(--faint)",
+    eligible: false,
+  };
+}
+
+function CombinedPlanSection({ run }: { run?: Run }) {
+  const plan = run?.combinedPlan;
+  if (!run) {
+    return (
+      <section>
+        <SectionTitle>Aggregate plan evidence</SectionTitle>
+        <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+          Definition only. A selected run adds one source-specific aggregate
+          plan, its human approval state, enabled subplans, and saved planner
+          journal references.
+        </p>
+      </section>
+    );
+  }
+  if (!plan) {
+    return (
+      <section>
+        <SectionTitle>Aggregate plan evidence</SectionTitle>
+        <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+          This run does not have a saved Combined plan yet. No generation scope
+          or human approval is claimed here.
+        </p>
+      </section>
+    );
+  }
+
+  const cleanliness =
+    LAMP_COMBINED_CLEANLINESS_PROFILES[plan.controls.cleanlinessLevel];
+  const plannerReferences =
+    run.serverExecution?.combinedPlanOperationIds?.length ?? 0;
+  const approval = plan.approval.status === "approved";
+
+  return (
+    <>
+      <section>
+        <SectionTitle
+          right={
+            <Badge color={approval ? "var(--pass)" : "var(--borderline)"}>
+              {approval ? "human approved" : "draft"}
+            </Badge>
+          }
+        >
+          Saved aggregate scope
+        </SectionTitle>
+        <div className="grid grid-cols-2 gap-2">
+          <Fact
+            label="Relight"
+            value={
+              typeof run.relightIntensity === "number"
+                ? `${run.relightIntensity}/100`
+                : "not bound on this run"
+            }
+          />
+          <Fact
+            label="Background"
+            value={`${cleanliness.label} · ${plan.backgroundPlan.remove.length} remove · ${plan.backgroundPlan.preserve.length} preserve · ${plan.backgroundPlan.uncertain.length} uncertain`}
+          />
+          <Fact
+            label="Beautify"
+            value={
+              plan.beautify.state === "enabled"
+                ? `level ${plan.controls.beautifyLevel} · ${plan.beautify.plan.enhance.length} approved`
+                : "off · no beautify scope"
+            }
+          />
+          <Fact
+            label="Eye contact"
+            value={
+              plan.iris.state === "enabled"
+                ? `Presenter 2 · ${plan.iris.plan.correct.length} approved`
+                : "off · no Iris scope"
+            }
+          />
+          <div className="col-span-2">
+            <Fact
+              label="Planner journals"
+              value={`${plannerReferences} saved reference${plannerReferences === 1 ? "" : "s"}`}
+            />
+          </div>
+        </div>
+      </section>
+      <p className="text-pretty text-2xs leading-relaxed text-faint">
+        Saved references show what this run retained; this panel does not replay
+        planner calls or infer missing journal evidence. Cleanliness changes
+        execution thoroughness inside the approved removal targets, not the target set.
+      </p>
+    </>
+  );
+}
+
+function CombinedCandidateQualificationSection({
+  run,
+  mode,
+  iteration,
+}: {
+  run?: Run;
+  mode: Mode;
+  iteration: 1 | 2;
+}) {
+  const snapshot = combinedQualificationSnapshot(run, mode, iteration);
+  const receipt = snapshot.receipt;
+  return (
+    <section>
+      <SectionTitle right={<Badge color={snapshot.color}>{snapshot.label}</Badge>}>
+        {attemptLabel("combined", iteration)} qualification
+      </SectionTitle>
+      <p className="mb-3 text-pretty text-xs leading-relaxed text-muted">
+        {snapshot.detail}
+      </p>
+      {receipt ? (
+        <div className="grid grid-cols-2 gap-2">
+          <Fact
+            label="Generation journal"
+            value={
+              <span className="break-all font-[family-name:var(--font-geist-mono)] text-2xs">
+                {receipt.generation.operationId}
+              </span>
+            }
+          />
+          <Fact
+            label="Evaluation journal"
+            value={
+              <span className="break-all font-[family-name:var(--font-geist-mono)] text-2xs">
+                {receipt.evaluation.operationId}
+              </span>
+            }
+          />
+          <Fact label="Source audio" value={combinedAudioLabel(receipt)} />
+          <Fact label="Effective sync" value={combinedSyncLabel(receipt)} />
+          <div className="col-span-2">
+            <Fact
+              label="Receipt recorded"
+              value={new Date(receipt.recordedAt).toISOString()}
+            />
+          </div>
+        </div>
+      ) : null}
+      {receipt ? (
+        <p className="mt-2 text-pretty text-2xs leading-relaxed text-faint">
+          Eligibility is computed from this saved immutable receipt. The
+          inspector does not independently replay either provider interaction.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function CombinedCritiqueSection({
   run,
   onSelectNode,
 }: {
   run?: Run;
   onSelectNode: (nodeId: string) => void;
 }) {
+  const visualDefinitions = (run ? evalDefsForRun(run) : lampCombinedUiEvalDefs()).filter(
+    (definition) => definition.method !== "deterministic"
+  );
+  const visualIds = new Set(visualDefinitions.map((definition) => definition.id));
+  const take1 = run?.iterations.find((iteration) => iteration.index === 1);
+  const take2 = run?.iterations.find((iteration) => iteration.index === 2);
+  const visualResults =
+    take1?.evalResults.filter((result) => visualIds.has(result.evalId)) ?? [];
+  const corrections =
+    take2?.megaPrompt.corrections.filter((correction) => !correction.resolved) ?? [];
+  const evaluationReceipt = combinedCandidateReceipt(run, 1)?.evaluation;
+
+  return (
+    <>
+      <section>
+        <SectionTitle>Saved critique handoff</SectionTitle>
+        <PromptTrace
+          items={[
+            {
+              label: "Take 1 results",
+              value: run
+                ? `${visualResults.length}/${visualDefinitions.length} visual result records in run state`
+                : `${visualDefinitions.length} current visual definitions · no run selected`,
+              color: visualResults.length > 0 ? "var(--running)" : "var(--faint)",
+            },
+            {
+              label: "Evaluation journal",
+              value: evaluationReceipt
+                ? `Saved reference · ${evaluationReceipt.operationId}`
+                : run?.live
+                  ? "No Take 1 qualification receipt recorded yet"
+                  : run
+                    ? "Demo preview · no provider evaluation receipt"
+                    : "No run selected",
+              color: evaluationReceipt ? "var(--pass)" : "var(--faint)",
+            },
+            {
+              label: "Take 2 brief",
+              value: take2
+                ? `${corrections.length} active correction${corrections.length === 1 ? "" : "s"} saved · cap 12`
+                : "Not compiled in the selected run yet",
+              color: take2 ? "var(--borderline)" : "var(--faint)",
+            },
+          ]}
+        />
+      </section>
+      <section>
+        <SectionTitle
+          right={
+            <Badge color={corrections.length > 0 ? "var(--borderline)" : undefined}>
+              {corrections.length}/12
+            </Badge>
+          }
+        >
+          Corrections compiled into Take 2
+        </SectionTitle>
+        {corrections.length > 0 ? (
+          <ol className="space-y-2">
+            {corrections.map((correction, index) => (
+              <li
+                key={correction.id}
+                className="rounded-lg bg-raised p-3 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-2xs tabular-nums text-faint">
+                    {index + 1}
+                  </span>
+                  <Badge color={severityColor(correction.severity)}>
+                    {correction.severity}
+                  </Badge>
+                  <span className="text-2xs text-faint">
+                    {evalName(correction.sourceEvalId)}
+                  </span>
+                </div>
+                <p className="mt-2 text-pretty text-xs leading-relaxed text-ink">
+                  {correction.instruction}
+                </p>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="rounded-lg bg-raised px-3 py-2.5 text-pretty text-xs leading-relaxed text-muted shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+            {take2
+              ? "The saved Take 2 brief has no active correction entries."
+              : "No Take 2 correction ledger is saved yet."}
+          </p>
+        )}
+        <p className="mt-2 text-pretty text-2xs leading-relaxed text-faint">
+          This is the saved run projection only. Missing results or receipts are
+          left missing; the inspector does not infer a completed provider trace.
+        </p>
+      </section>
+      <button
+        type="button"
+        onClick={() => onSelectNode("final")}
+        className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
+      >
+        Inspect the Take 2 brief →
+      </button>
+    </>
+  );
+}
+
+function CombinedReviewSection({ run, mode }: { run?: Run; mode: Mode }) {
+  const snapshots = ([1, 2] as const).map((iteration) => ({
+    iteration,
+    snapshot: combinedQualificationSnapshot(run, mode, iteration),
+  }));
+  const eligibleCount = snapshots.filter(({ snapshot }) => snapshot.eligible).length;
+  const grade = run?.humanGrade;
+  const winner = grade?.gradedIteration;
+  const winnerLabel = winner
+    ? `${attemptLabel("combined", winner)} saved by the human grader`
+    : grade
+      ? "Grade saved without a Combined winner reference"
+      : "No winner saved yet";
+
+  return (
+    <>
+      <section>
+        <SectionTitle>Winner record</SectionTitle>
+        <PromptTrace
+          items={[
+            {
+              label: "Eligible pool",
+              value: run
+                ? `${eligibleCount}/2 takes eligible from saved receipts`
+                : "No run selected",
+              color: eligibleCount > 0 ? "var(--pass)" : "var(--faint)",
+            },
+            {
+              label: mode === "mock" ? "Saved demo winner" : "Human winner",
+              value: winnerLabel,
+              color: winner ? "var(--accent)" : grade ? "var(--borderline)" : "var(--faint)",
+            },
+            {
+              label: "Winner binding",
+              value: winner
+                ? grade?.gradedCandidateArtifactIdentityHash
+                  ? "Exact candidate artifact identity recorded"
+                  : "Winner iteration recorded · artifact identity absent on this record"
+                : "Nothing is auto-selected",
+              color: grade?.gradedCandidateArtifactIdentityHash
+                ? "var(--pass)"
+                : "var(--faint)",
+            },
+            {
+              label: "Human verdict",
+              value: grade ? (grade.shipIt ? "Ship it" : "Do not ship") : "Not graded yet",
+              color: grade
+                ? grade.shipIt
+                  ? "var(--pass)"
+                  : "var(--fail)"
+                : "var(--faint)",
+            },
+          ]}
+        />
+      </section>
+      <section>
+        <SectionTitle>Candidate qualification</SectionTitle>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {snapshots.map(({ iteration, snapshot }) => (
+            <div
+              key={iteration}
+              className="rounded-lg bg-raised p-3 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-ink">
+                  {attemptLabel("combined", iteration)}
+                </p>
+                <Badge color={snapshot.color}>{snapshot.label}</Badge>
+              </div>
+              <p className="mt-2 text-pretty text-2xs leading-relaxed text-muted">
+                {snapshot.detail}
+              </p>
+              {winner === iteration ? (
+                <p className="mt-2 text-2xs font-semibold text-accent">
+                  Saved winner
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </div>
+        <p className="mt-2 text-pretty text-2xs leading-relaxed text-faint">
+          The engine never picks a winner from scores. A person chooses one
+          eligible take, then the saved grade stays bound to that exact candidate.
+        </p>
+      </section>
+    </>
+  );
+}
+
+function AggregateSection({
+  run,
+  workflowMode,
+  onSelectNode,
+}: {
+  run?: Run;
+  workflowMode: WorkflowMode;
+  onSelectNode: (nodeId: string) => void;
+}) {
+  const visualDefinitions = (run
+    ? evalDefsForRun(run)
+    : evalDefinitionsForMode(workflowMode)
+  ).filter((definition) => definition.method !== "deterministic");
+  const visualIds = new Set(visualDefinitions.map((definition) => definition.id));
   const summaries =
     run?.iterations.map((iteration) => {
-      const visual = iteration.evalResults.filter(
-        (result) => result.evalId !== "audio-integrity"
+      const visual = iteration.evalResults.filter((result) =>
+        visualIds.has(result.evalId)
       );
       const average =
         visual.length > 0
@@ -1552,12 +2068,15 @@ function AggregateSection({
               color: "var(--running)",
             },
             {
-              label: "After Initial",
-              value: "Consolidates every actionable finding into one correction set",
+              label: workflowMode === "flora" ? "After an attempt" : "After Initial",
+              value:
+                workflowMode === "flora"
+                  ? "Consolidates actionable findings into the next attempt's correction set"
+                  : "Consolidates every actionable finding into one correction set",
               color: "var(--borderline)",
             },
             {
-              label: "After Final",
+              label: workflowMode === "flora" ? "At delivery" : "After Final",
               value: "Shows AI grades in Runs; Grade mode starts blind with an optional reveal",
               color: "var(--accent)",
             },
@@ -1574,14 +2093,18 @@ function AggregateSection({
                 className="rounded-lg bg-raised px-3 py-2.5 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]"
               >
                 <p className="text-2xs font-semibold uppercase tracking-[0.12em] text-faint">
-                  {index === 1 ? "Initial critique" : "Final evaluation"}
+                  {workflowMode === "flora"
+                    ? `${attemptLabel(workflowMode, index)} evaluation`
+                    : index === 1
+                      ? "Initial critique"
+                      : "Final evaluation"}
                 </p>
                 <div className="mt-1 flex items-baseline justify-between gap-3">
                   <span className="text-lg font-semibold tabular-nums text-ink">
                     {average ?? "—"}
                   </span>
                   <span className="text-2xs tabular-nums text-faint">
-                    {count} visual results
+                    {count}/{visualDefinitions.length} visual results
                   </span>
                 </div>
               </div>
@@ -1598,7 +2121,9 @@ function AggregateSection({
         onClick={() => onSelectNode("compile")}
         className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
       >
-        Inspect the Final prompt these fixes create →
+        {workflowMode === "flora"
+          ? "Inspect the next prompt these fixes create →"
+          : "Inspect the Final prompt these fixes create →"}
       </button>
     </>
   );
@@ -1802,7 +2327,7 @@ export function NodeInspector({
     run && runWorkflowMode(run) === workflowMode ? run : undefined;
   const state = inspectorRun?.nodeStates[node.id];
   const planModePromptRole =
-    !isVersionAPlanMode(workflowMode)
+    !isVersionAPlanMode(workflowMode) && workflowMode !== "combined"
       ? null
       : node.id === "plan"
         ? {
@@ -1826,7 +2351,8 @@ export function NodeInspector({
                   "Composes the mode's visual checks into one approved-plan-bound whole-video evaluator; audio is deterministic.",
               }
             : null;
-  const promptRole = planModePromptRole ?? promptRoleForNode(node);
+  const promptRole =
+    planModePromptRole ?? promptRoleForNode(node, workflowMode);
   const runMode: Mode = inspectorRun
     ? inspectorRun.live
       ? "live"
@@ -1924,8 +2450,17 @@ export function NodeInspector({
         {node.id === "plan" && workflowMode === "background" ? (
           <BackgroundPlanSection run={inspectorRun} />
         ) : null}
+        {node.id === "plan" && workflowMode === "combined" ? (
+          <CombinedPlanSection run={inspectorRun} />
+        ) : null}
         {node.id === "critique" && workflowMode === "background" ? (
           <BackgroundCritiqueSection
+            run={inspectorRun}
+            onSelectNode={onSelectNode}
+          />
+        ) : null}
+        {node.id === "critique" && workflowMode === "combined" ? (
+          <CombinedCritiqueSection
             run={inspectorRun}
             onSelectNode={onSelectNode}
           />
@@ -1942,16 +2477,33 @@ export function NodeInspector({
           />
         ) : null}
         {node.kind === "generate" ? (
-          <GenerateSection
-            node={node}
+          <>
+            <GenerateSection
+              node={node}
+              run={inspectorRun}
+              mode={runMode}
+              workflowMode={workflowMode}
+              onSelectNode={onSelectNode}
+            />
+            {workflowMode === "combined" &&
+            (node.id === "initial" || node.id === "final") ? (
+              <CombinedCandidateQualificationSection
+                run={inspectorRun}
+                mode={runMode}
+                iteration={node.id === "initial" ? 1 : 2}
+              />
+            ) : null}
+          </>
+        ) : null}
+        {node.kind === "aggregate" ? (
+          <AggregateSection
             run={inspectorRun}
-            mode={runMode}
             workflowMode={workflowMode}
             onSelectNode={onSelectNode}
           />
         ) : null}
-        {node.kind === "aggregate" ? (
-          <AggregateSection run={inspectorRun} onSelectNode={onSelectNode} />
+        {node.id === "review" && workflowMode === "combined" ? (
+          <CombinedReviewSection run={inspectorRun} mode={runMode} />
         ) : null}
         {node.kind === "gate" && node.id === "gate" ? (
           <GateSection

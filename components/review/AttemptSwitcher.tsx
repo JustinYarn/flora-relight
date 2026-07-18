@@ -22,7 +22,7 @@ function dotColor(status: Iteration["status"]): string {
       : "var(--fail)";
 }
 
-/** Initial and Final are the two meaningful Lamp outputs. Legacy extra
+/** Each Lamp method exposes its two meaningful outputs; legacy extra
  * iterations remain inspectable by their version number. */
 export function AttemptSwitcher({
   run,
@@ -33,10 +33,14 @@ export function AttemptSwitcher({
   activeKey: string | null;
   onSelect: (key: string) => void;
 }) {
+  const workflowMode = runWorkflowMode(run);
+  const combined = workflowMode === "combined";
   if (run.iterations.length === 0) {
     return (
       <p className="text-2xs text-faint">
-        initial video in progress — preparing the mega prompt…
+        {combined
+          ? "Take 1 in progress — preparing the approved-plan prompt…"
+          : "initial video in progress — preparing the mega prompt…"}
       </p>
     );
   }
@@ -46,7 +50,7 @@ export function AttemptSwitcher({
       active ? "bg-raised text-ink" : "text-muted hover:text-ink"
     }`;
 
-  const lampRun = isTwoPassWorkflowMode(runWorkflowMode(run));
+  const lampRun = isTwoPassWorkflowMode(workflowMode);
   const approvedPlanNoOp = isApprovedPlanNoOp(run);
   return (
     <div className="flex flex-wrap items-center gap-1">
@@ -68,7 +72,9 @@ export function AttemptSwitcher({
               style={{ background: dotColor(it.status) }}
             />
             {label}
-            <span className="text-2xs tabular-nums text-faint">v{it.index}</span>
+            {!combined ? (
+              <span className="text-2xs tabular-nums text-faint">v{it.index}</span>
+            ) : null}
             {!lampRun && run.bestIterationIndex === it.index ? (
               <span className="text-2xs text-accent" title="best attempt">
                 ★

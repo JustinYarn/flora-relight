@@ -33,6 +33,7 @@ export function parseHumanGrade(input: {
   value: unknown;
   requiredEvalIds: readonly string[];
   acceptedLegacyEvalIds?: readonly string[];
+  requireCombinedTarget?: boolean;
 }): HumanGrade | null {
   const value = input.value;
   if (
@@ -44,6 +45,22 @@ export function parseHumanGrade(input: {
     (value.overallNote !== undefined &&
       (typeof value.overallNote !== "string" ||
         value.overallNote.length > MAX_GRADE_OVERALL_NOTE_LENGTH))
+  ) {
+    return null;
+  }
+  const combinedIteration = value.gradedIteration;
+  const combinedArtifactHash = value.gradedCandidateArtifactIdentityHash;
+  if (input.requireCombinedTarget) {
+    if (
+      (combinedIteration !== 1 && combinedIteration !== 2) ||
+      typeof combinedArtifactHash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(combinedArtifactHash)
+    ) {
+      return null;
+    }
+  } else if (
+    combinedIteration !== undefined ||
+    combinedArtifactHash !== undefined
   ) {
     return null;
   }
@@ -100,6 +117,12 @@ export function parseHumanGrade(input: {
     shipIt: value.shipIt,
     ...(typeof value.overallNote === "string" && value.overallNote.length > 0
       ? { overallNote: value.overallNote }
+      : {}),
+    ...(input.requireCombinedTarget
+      ? {
+          gradedIteration: combinedIteration as 1 | 2,
+          gradedCandidateArtifactIdentityHash: combinedArtifactHash as string,
+        }
       : {}),
   };
 }

@@ -11,6 +11,8 @@ import {
   estimateLampBackgroundTwoPass,
   estimateLampBeautifyPlan,
   estimateLampBeautifyTwoPass,
+  estimateLampCombinedPlan,
+  estimateLampCombinedTwoPass,
   estimateLampIrisPlan,
   estimateLampIrisTwoPass,
   estimateLampRun,
@@ -20,6 +22,8 @@ import {
   lampBackgroundTwoPassReservationUsd,
   lampBeautifyPlanReservationUsd,
   lampBeautifyTwoPassReservationUsd,
+  lampCombinedPlanReservationUsd,
+  lampCombinedTwoPassReservationUsd,
   lampIrisPlanReservationUsd,
   lampIrisTwoPassReservationUsd,
   lampRunReservationUsd,
@@ -51,6 +55,14 @@ import {
 } from "@/lib/relight-intensity";
 import { runWorkflowMode, workflowModeLabel } from "@/lib/workflow-mode";
 import { parseOptionalPositiveBudgetUsd } from "@/lib/budget-input";
+import {
+  DEFAULT_LAMP_COMBINED_CONTROLS,
+  type LampCombinedControls,
+} from "@/lib/lamp-combined";
+import {
+  finalLampIteration,
+  isGradeable,
+} from "@/components/grade/derive";
 
 const FLORA_FLOW = [
   {
@@ -90,6 +102,29 @@ const LAMP_FLOW = [
     title: "Your grade",
     description:
       "Grade the final blind, then compare your calls with the available final AI evaluation.",
+  },
+] as const;
+
+const COMBINED_FLOW = [
+  {
+    title: "Plan once",
+    description:
+      "Run only the enabled source planners, then approve one consolidated edit boundary.",
+  },
+  {
+    title: "Two source-rooted takes",
+    description:
+      "Generate Take 1 from the original, critique it once, then generate Take 2 from that same original—not Take 1's pixels.",
+  },
+  {
+    title: "Qualify both",
+    description:
+      "Restore source audio and run SyncNet on each take. Take 1 cannot be repaired; Take 2 gets at most one repair.",
+  },
+  {
+    title: "You choose, then grade",
+    description:
+      "Compare the eligible takes, pick one winner, and blind-grade only that exact artifact.",
   },
 ] as const;
 
@@ -196,6 +231,12 @@ const MODE_COPY: Record<
     description:
       "Lamp Iris turns an approved gaze-correction plan into an Initial and one corrected Final while preserving identity, blinks, performance, background, lighting, camera, and audio.",
   },
+  combined: {
+    eyebrow: "One source-faithful finishing pass",
+    title: "Relight, clean, polish, and connect—in one bounded workflow.",
+    description:
+      "Lamp Combined freezes one approved plan, creates two source-rooted takes, safety-checks both, then lets you choose an eligible winner before grading.",
+  },
 };
 
 function estimateWorkflowRun(mode: WorkflowMode, durationSec: number) {
@@ -208,6 +249,9 @@ function estimateWorkflowRun(mode: WorkflowMode, durationSec: number) {
   }
   if (mode === "iris") {
     return estimateLampIrisTwoPass(durationSec);
+  }
+  if (mode === "combined") {
+    return estimateLampCombinedTwoPass(durationSec);
   }
   return estimateFirstCut(durationSec);
 }
@@ -225,6 +269,9 @@ function workflowReservationUsd(
   }
   if (mode === "iris") {
     return lampIrisTwoPassReservationUsd(durationSec);
+  }
+  if (mode === "combined") {
+    return lampCombinedTwoPassReservationUsd(durationSec);
   }
   return omniGenerationReservationUsd(durationSec);
 }
@@ -539,6 +586,12 @@ function isResumableSingleRun(
   ) {
     return true;
   }
+  if (
+    workflowMode === "combined" &&
+    run.combinedPlan?.approval.status === "draft"
+  ) {
+    return true;
+  }
   if (run.iterations.length !== 0) return false;
   if (!run.spendApproval && !run.serverExecution) return true;
   return (
@@ -557,8 +610,16 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
   const router = useRouter();
   const runMode = runWorkflowMode(run);
   const latest = run.iterations.at(-1);
-  const composite = latest?.composite;
-  const evals = latest?.evalResults ?? [];
+  // Combined has no automatic run-level winner. Its row stays scoreless until
+  // an exact, fingerprint-valid human grade chooses one candidate.
+  const scoreIteration =
+    runMode === "combined"
+      ? isGradeable(run)
+        ? finalLampIteration(run)
+        : undefined
+      : latest;
+  const composite = scoreIteration?.composite;
+  const evals = scoreIteration?.evalResults ?? [];
   const meanConfidence =
     evals.length > 0
       ? evals.reduce((sum, r) => sum + r.confidence, 0) / evals.length
@@ -568,14 +629,17 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
     isLampRun ||
     runMode === "background" ||
     runMode === "beautify" ||
-    runMode === "iris";
+    runMode === "iris" ||
+    runMode === "combined";
   const backgroundPlanDraft =
     (runMode === "background" &&
       run.backgroundCleanupPlan?.approval.status === "draft") ||
     (runMode === "beautify" &&
       run.beautifyPlan?.approval.status === "draft") ||
     (runMode === "iris" &&
-      run.irisPlan?.approval.status === "draft");
+      run.irisPlan?.approval.status === "draft") ||
+    (runMode === "combined" &&
+      run.combinedPlan?.approval.status === "draft");
   const status = readyToStart
     ? backgroundPlanDraft
       ? { color: "var(--borderline)", label: "plan review" }
@@ -603,7 +667,8 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
                 runMode === "lamp" ||
                 runMode === "background" ||
                 runMode === "beautify" ||
-                runMode === "iris"
+                runMode === "iris" ||
+                runMode === "combined"
                   ? "var(--accent)"
                   : "var(--muted)"
               }
@@ -622,14 +687,20 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
       <td className="px-4 py-3 text-sm text-muted">
         {run.status === "failed"
           ? isTwoPassRun && run.iterations.length >= 2
-            ? "Stopped after final"
+            ? runMode === "combined"
+              ? "Stopped after Take 2"
+              : "Stopped after final"
             : run.iterations.length === 1
               ? isTwoPassRun
-                ? "Stopped after initial"
+                ? runMode === "combined"
+                  ? "Stopped after Take 1"
+                  : "Stopped after initial"
                 : "Stopped after first cut"
               : "Not started"
           : isTwoPassRun && run.iterations.length >= 2
-            ? "Final ready"
+            ? runMode === "combined"
+              ? "Two takes ready"
+              : "Final ready"
             : run.iterations.length === 1
               ? isTwoPassRun
                 ? (runMode === "background" &&
@@ -640,7 +711,9 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
                   (runMode === "iris" &&
                     run.irisPlan?.decision === "exceptional-no-op")
                   ? "Unchanged source ready"
-                  : "Initial ready"
+                  : runMode === "combined"
+                    ? "Take 1 ready"
+                    : "Initial ready"
                 : "First cut ready"
               : "—"}
       </td>
@@ -684,6 +757,9 @@ export default function DashboardPage() {
   const [relightIntensity, setRelightIntensity] = useState(
     DEFAULT_RELIGHT_INTENSITY
   );
+  const [combinedControls, setCombinedControls] = useState<LampCombinedControls>(
+    DEFAULT_LAMP_COMBINED_CONTROLS
+  );
 
   /** Every run id that belongs to some batch — drives the "batch" row tag. */
   const batchRunIds = useMemo(
@@ -707,6 +783,7 @@ export default function DashboardPage() {
     trimNote: string | null;
     workflowMode: WorkflowMode;
     relightIntensity: number;
+    combinedControls?: LampCombinedControls;
   } | null>(null);
   /** Server-discovered single uploads that have not become prepared Runs yet. */
   const [pendingSingleUploads, setPendingSingleUploads] = useState<
@@ -1006,7 +1083,11 @@ export default function DashboardPage() {
   }, []);
 
   const handleSingle = useCallback(
-    async (file: File, selectedRelightIntensity: number) => {
+    async (
+      file: File,
+      selectedRelightIntensity: number,
+      selectedCombinedControls: LampCombinedControls
+    ) => {
       // Re-selecting the same interrupted single clip reuses its durable
       // reservation. Otherwise reserve a fresh canonical id; the Blob token
       // route commits that discoverable checkpoint before transfer begins.
@@ -1073,6 +1154,10 @@ export default function DashboardPage() {
           await startRun(video, {
             workflowMode,
             relightIntensity: selectedRelightIntensity,
+            combinedControls:
+              workflowMode === "combined"
+                ? selectedCombinedControls
+                : undefined,
             prepareOnly: true,
           });
         } catch (error) {
@@ -1088,6 +1173,9 @@ export default function DashboardPage() {
           trimNote,
           workflowMode,
           relightIntensity: selectedRelightIntensity,
+          ...(workflowMode === "combined"
+            ? { combinedControls: selectedCombinedControls }
+            : {}),
         });
         return;
       }
@@ -1095,6 +1183,8 @@ export default function DashboardPage() {
         const id = await startRun(video, {
           workflowMode,
           relightIntensity: selectedRelightIntensity,
+          combinedControls:
+            workflowMode === "combined" ? selectedCombinedControls : undefined,
         });
         router.push(`/runs/${id}`);
       } catch (error) {
@@ -1111,10 +1201,13 @@ export default function DashboardPage() {
       if (
         workflowMode === "background" ||
         workflowMode === "beautify" ||
-        workflowMode === "iris"
+        workflowMode === "iris" ||
+        workflowMode === "combined"
       ) {
         appendError(
-          workflowMode === "background"
+          workflowMode === "combined"
+            ? "Lamp Combined starts one clip at a time because its enabled planners and winner choice stay bound to one exact source. Select a single video."
+            : workflowMode === "background"
             ? "Lamp Background v1 starts one clip at a time because every source needs its own cleanup plan and explicit approval before generation. Select a single video."
             : workflowMode === "beautify"
               ? "Lamp Beautify v1 starts one clip at a time because every subject needs its own enhancement plan and explicit approval before generation. Select a single video."
@@ -1207,6 +1300,7 @@ export default function DashboardPage() {
     async (files: File[]) => {
       const selectedRelightIntensity =
         normalizeRelightIntensity(relightIntensity);
+      const selectedCombinedControls = { ...combinedControls };
       if (!hydrated) {
         setIngestError("Wait for saved history to finish loading before uploading.");
         return;
@@ -1239,7 +1333,11 @@ export default function DashboardPage() {
         });
         if (videos.length === 0) return;
         if (videos.length === 1) {
-          await handleSingle(videos[0], selectedRelightIntensity);
+          await handleSingle(
+            videos[0],
+            selectedRelightIntensity,
+            selectedCombinedControls
+          );
         } else {
           await handleMany(videos, selectedRelightIntensity);
         }
@@ -1256,6 +1354,7 @@ export default function DashboardPage() {
       ingesting,
       readiness,
       relightIntensity,
+      combinedControls,
     ]
   );
 
@@ -1279,7 +1378,9 @@ export default function DashboardPage() {
     pendingBatchId !== null;
   const workflowCopy = MODE_COPY[workflowMode];
   const workflowFlow =
-    workflowMode === "iris"
+    workflowMode === "combined"
+      ? COMBINED_FLOW
+      : workflowMode === "iris"
       ? IRIS_FLOW
       : workflowMode === "beautify"
         ? BEAUTIFY_FLOW
@@ -1307,6 +1408,8 @@ export default function DashboardPage() {
           onWorkflowModeChange={setWorkflowMode}
           relightIntensity={relightIntensity}
           onRelightIntensityChange={setRelightIntensity}
+          combinedControls={combinedControls}
+          onCombinedControlsChange={setCombinedControls}
           disabled={modeControlsDisabled}
         />
       </div>
@@ -1350,7 +1453,8 @@ export default function DashboardPage() {
           <SectionTitle>
             {workflowMode === "background" ||
             workflowMode === "beautify" ||
-            workflowMode === "iris"
+            workflowMode === "iris" ||
+            workflowMode === "combined"
               ? "Choose one video"
               : "Choose videos"}
           </SectionTitle>
@@ -1403,7 +1507,8 @@ export default function DashboardPage() {
                     ? "Uploads paused"
                     : workflowMode === "background" ||
                         workflowMode === "beautify" ||
-                        workflowMode === "iris"
+                        workflowMode === "iris" ||
+                        workflowMode === "combined"
                       ? "Drop one clip, or click to browse"
                       : "Drop one or more clips, or click to browse"}
             </p>
@@ -1414,6 +1519,8 @@ export default function DashboardPage() {
                 ? "video/* · v1 accepts one static-camera clip with at least one visible person — only the primary presenter is enhanced; everyone else is preserved exactly"
                 : workflowMode === "iris"
                 ? "video/* · v1 accepts one static-camera clip with at least one visible person — only the primary presenter's gaze is corrected; everyone else is preserved exactly"
+                : workflowMode === "combined"
+                ? "video/* · one static-camera clip · enabled planners share one approval · both takes start from this exact source"
                 : mode === "live"
                 ? `video/* · one clip starts a ${workflowModeLabel(workflowMode)} run · multiple clips start a live ${workflowModeLabel(workflowMode)} batch after cost review`
                 : `video/* · one clip starts a demo run · multiple clips start a ${workflowModeLabel(workflowMode)} demo batch`}
@@ -1437,7 +1544,8 @@ export default function DashboardPage() {
             multiple={
               workflowMode !== "background" &&
               workflowMode !== "beautify" &&
-              workflowMode !== "iris"
+              workflowMode !== "iris" &&
+              workflowMode !== "combined"
             }
             disabled={!hydrated || readiness.phase !== "ready"}
             className="hidden"
@@ -1481,18 +1589,24 @@ export default function DashboardPage() {
               (resumableMode === "beautify" &&
                 resumableSingle.beautifyPlan?.approval.status === "draft") ||
               (resumableMode === "iris" &&
-                resumableSingle.irisPlan?.approval.status === "draft");
+                resumableSingle.irisPlan?.approval.status === "draft") ||
+              (resumableMode === "combined" &&
+                resumableSingle.combinedPlan?.approval.status === "draft");
             const savedRelightIntensity = normalizeRelightIntensity(
               resumableSingle.relightIntensity
             );
             const planTitle =
-              resumableMode === "iris"
+              resumableMode === "combined"
+                ? "Combined plan ready for your review"
+                : resumableMode === "iris"
                 ? "Gaze plan ready for your review"
                 : resumableMode === "beautify"
                   ? "Enhancement plan ready for your review"
                   : "Cleanup plan ready for your review";
             const planDescription =
-              resumableMode === "iris"
+              resumableMode === "combined"
+                ? `${resumableSingle.originalVideo.label} has one consolidated plan binding lighting, approved cleanup targets, and only the optional edits you enabled.`
+                : resumableMode === "iris"
                 ? `${resumableSingle.originalVideo.label} has a source-specific correct / declined / uncertain plan waiting for approval.`
                 : resumableMode === "beautify"
                   ? `${resumableSingle.originalVideo.label} has a source-specific enhance / declined / uncertain plan waiting for approval.`
@@ -1535,7 +1649,8 @@ export default function DashboardPage() {
                       approvalResume &&
                       (resumableMode === "background" ||
                         resumableMode === "beautify" ||
-                        resumableMode === "iris")
+                        resumableMode === "iris" ||
+                        resumableMode === "combined")
                     ) {
                       router.push(`/runs/${resumableSingle.id}`);
                       return;
@@ -1547,6 +1662,10 @@ export default function DashboardPage() {
                         const id = await startRun(resumableSingle.originalVideo, {
                           workflowMode: resumableMode,
                           relightIntensity: savedRelightIntensity,
+                          combinedControls:
+                            resumableMode === "combined"
+                              ? resumableSingle.combinedControls
+                              : undefined,
                         });
                         router.push(`/runs/${id}`);
                       } catch (error) {
@@ -1565,11 +1684,17 @@ export default function DashboardPage() {
                       trimNote: null,
                       workflowMode: resumableMode,
                       relightIntensity: savedRelightIntensity,
+                      ...(resumableMode === "combined" &&
+                      resumableSingle.combinedControls
+                        ? { combinedControls: resumableSingle.combinedControls }
+                        : {}),
                     });
                   }}
                 >
                   {planDraft
-                    ? resumableMode === "beautify"
+                    ? resumableMode === "combined"
+                      ? "Review combined plan"
+                      : resumableMode === "beautify"
                       ? "Review enhancement plan"
                       : resumableMode === "iris"
                         ? "Review gaze plan"
@@ -1578,7 +1703,8 @@ export default function DashboardPage() {
                         "user_action_required"
                       ? resumableMode === "background" ||
                         resumableMode === "beautify" ||
-                        resumableMode === "iris"
+                        resumableMode === "iris" ||
+                        resumableMode === "combined"
                         ? "Open and resume"
                         : "Review and resume"
                       : mode === "live"
@@ -1640,6 +1766,8 @@ export default function DashboardPage() {
                   ? "Choose one clip above to analyze its source-specific enhancement plan."
                   : workflowMode === "iris"
                     ? "Choose one clip above to analyze its source-specific gaze-correction plan."
+                    : workflowMode === "combined"
+                      ? "Choose one clip above to build one consolidated finishing plan."
                     : `Choose one clip above to start a ${workflowModeLabel(workflowMode)} run, or choose several for a batch.`
             }
           />
@@ -1683,7 +1811,9 @@ export default function DashboardPage() {
       {pendingLaunch ? (
         <ConfirmSpend
           title={
-            pendingLaunch.workflowMode === "background"
+            pendingLaunch.workflowMode === "combined"
+              ? "Analyze this video and propose one Combined plan?"
+              : pendingLaunch.workflowMode === "background"
               ? "Analyze this video and propose a cleanup plan?"
               : pendingLaunch.workflowMode === "beautify"
                 ? "Analyze this video and propose an enhancement plan?"
@@ -1692,7 +1822,27 @@ export default function DashboardPage() {
                   : `Run ${workflowModeLabel(pendingLaunch.workflowMode)} for this video?`
           }
           lines={
-            pendingLaunch.workflowMode === "background"
+            pendingLaunch.workflowMode === "combined"
+              ? [
+                  `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
+                  `Estimated planning cost: ${formatUsd(
+                    estimateLampCombinedPlan(
+                      pendingLaunch.combinedControls ??
+                        DEFAULT_LAMP_COMBINED_CONTROLS
+                    ).totalUsd
+                  )}`,
+                  `Spend authorization: the server reserves ${formatReservationUsd(
+                    lampCombinedPlanReservationUsd(
+                      pendingLaunch.combinedControls ??
+                        DEFAULT_LAMP_COMBINED_CONTROLS
+                    )
+                  )} for Background plus only the optional planners enabled below. No video generation is authorized at this step.`,
+                  `Controls frozen for planning: relight ${pendingLaunch.relightIntensity}/100; background ${pendingLaunch.combinedControls?.cleanlinessLevel ?? DEFAULT_LAMP_COMBINED_CONTROLS.cleanlinessLevel}/3; Beautify ${pendingLaunch.combinedControls?.beautifyLevel === 0 || pendingLaunch.combinedControls === undefined ? "off" : `${pendingLaunch.combinedControls.beautifyLevel}/3`}; eye contact ${pendingLaunch.combinedControls?.eyeContact ? "Presenter P2" : "off"}.`,
+                  `Planners that will run: Background${pendingLaunch.combinedControls?.beautifyLevel ? " + Beautify" : ""}${pendingLaunch.combinedControls?.eyeContact ? " + Eye contact" : ""}. Disabled planners are skipped completely and cannot be enabled after approval.`,
+                  "You review one consolidated plan next. The separate two-generation estimate appears only after that exact source-specific plan is approved.",
+                  ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
+                ]
+              : pendingLaunch.workflowMode === "background"
               ? [
                   `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
                   `Estimated planning cost: ${formatUsd(estimateLampBackgroundPlan().totalUsd)}`,
@@ -1742,7 +1892,9 @@ export default function DashboardPage() {
                 ]
           }
           confirmLabel={
-            pendingLaunch.workflowMode === "background"
+            pendingLaunch.workflowMode === "combined"
+              ? "Analyze combined plan"
+              : pendingLaunch.workflowMode === "background"
               ? "Analyze cleanup plan"
               : pendingLaunch.workflowMode === "beautify"
                 ? "Analyze enhancement plan"
@@ -1762,12 +1914,14 @@ export default function DashboardPage() {
               const planFirst =
                 pendingLaunch.workflowMode === "background" ||
                 pendingLaunch.workflowMode === "beautify" ||
-                pendingLaunch.workflowMode === "iris";
+                pendingLaunch.workflowMode === "iris" ||
+                pendingLaunch.workflowMode === "combined";
               const id = await startRun(pendingLaunch.video, {
                 approveLiveSpend: planFirst ? undefined : true,
                 approvePlanSpend: planFirst ? true : undefined,
                 workflowMode: pendingLaunch.workflowMode,
                 relightIntensity: pendingLaunch.relightIntensity,
+                combinedControls: pendingLaunch.combinedControls,
               });
               setPendingLaunch(null);
               router.push(`/runs/${id}`);

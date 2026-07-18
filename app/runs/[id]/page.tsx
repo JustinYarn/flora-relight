@@ -30,6 +30,8 @@ import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
 import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
 import { IrisPlanReview } from "@/components/review/IrisPlanReview";
+import { CombinedPlanReview } from "@/components/review/CombinedPlanReview";
+import { CombinedWinnerPicker } from "@/components/review/CombinedWinnerPicker";
 import {
   deliveredInitialBestOfTwo,
   deliveredVideoLabel,
@@ -95,21 +97,32 @@ export default function RunReviewPage() {
     (workflowMode === "beautify" &&
       run.beautifyPlan?.approval.status === "draft") ||
     (workflowMode === "iris" &&
-      run.irisPlan?.approval.status === "draft");
+      run.irisPlan?.approval.status === "draft") ||
+    (workflowMode === "combined" &&
+      run.combinedPlan?.approval.status === "draft");
   // Default to the server-selected delivery; mid-flight, follow the newest stage.
-  const autoKey = run.finalVideo || deliveredInitialBestOfTwo(run)
-    ? DELIVERED_ATTEMPT_KEY
-    : latest
-      ? `iter-${latest.index}`
-      : null;
+  const autoKey =
+    workflowMode === "combined" && run.humanGrade?.gradedIteration
+      ? `iter-${run.humanGrade.gradedIteration}`
+      : run.finalVideo || deliveredInitialBestOfTwo(run)
+        ? DELIVERED_ATTEMPT_KEY
+        : latest
+          ? `iter-${latest.index}`
+          : null;
   const activeKey = userSelected ?? autoKey;
   const selectedAttempt = reviewAttemptSelection(run, activeKey);
   const selectedIteration = selectedAttempt.iteration;
   const relitVideo = selectedAttempt.video;
-  const relitLabel = selectedAttempt.delivered
-    ? deliveredVideoLabel(run)
+  const relitLabel =
+    workflowMode === "combined" &&
+    run.humanGrade?.gradedIteration === selectedIteration?.index
+      ? deliveredVideoLabel(run)
+      : selectedAttempt.delivered
+        ? deliveredVideoLabel(run)
     : selectedIteration
-      ? twoPassRun && selectedIteration.index === 1
+      ? workflowMode === "combined"
+        ? `TAKE ${selectedIteration.index}`
+        : twoPassRun && selectedIteration.index === 1
         ? "INITIAL VIDEO · v1"
         : twoPassRun && selectedIteration.index === 2
           ? "FINAL VIDEO · v2"
@@ -150,6 +163,11 @@ export default function RunReviewPage() {
           <BackgroundPlanReview run={run} />
           <BeautifyPlanReview run={run} />
           <IrisPlanReview run={run} />
+          <CombinedPlanReview run={run} />
+          <CombinedWinnerPicker
+            run={run}
+            onPreview={(iteration) => setUserSelected(`iter-${iteration}`)}
+          />
 
           {/* HERO — original next to relit, one shared transport. While the
           selected attempt is still generating, the relit slot becomes the
@@ -174,8 +192,9 @@ export default function RunReviewPage() {
           {planAwaitingApproval ? (
             <p className="mt-4 text-pretty text-xs leading-relaxed text-faint">
               Generation is paused here. Approving the plan above is the only
-              action that can authorize the planned edit or a supported
-              exact-source no-op.
+              action that can authorize {workflowMode === "combined"
+                ? "the two source-rooted takes. Combined does not auto-approve or bypass this plan."
+                : "the planned edit or a supported exact-source no-op."}
             </p>
           ) : (
             <>
@@ -206,16 +225,21 @@ export default function RunReviewPage() {
               <EvalList
                 iteration={selectedIteration}
                 definitions={evalDefsForRun(run)}
+                workflowMode={workflowMode}
                 evalsUnderway={run.status !== "running" || evalPhaseReached(run)}
               />
 
               {/* REVIEW */}
-            <div className="mt-6">
-              <ReviewActions
-                run={run}
-                onSubmit={(decision, notes) => submitReview(run.id, decision, notes)}
-              />
-            </div>
+              {workflowMode !== "combined" ? (
+                <div className="mt-6">
+                  <ReviewActions
+                    run={run}
+                    onSubmit={(decision, notes) =>
+                      submitReview(run.id, decision, notes)
+                    }
+                  />
+                </div>
+              ) : null}
             </>
           )}
         </div>

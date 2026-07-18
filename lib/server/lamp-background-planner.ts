@@ -19,6 +19,7 @@ import {
   type LampBackgroundCleanupPlan,
 } from "@/lib/lamp-background";
 import { lampBackgroundPlanOperationId } from "@/lib/lamp-background-operations";
+import { LAMP_COMBINED_BACKGROUND_PLAN_OPERATION_ID } from "@/lib/lamp-combined-operations";
 import {
   beginPaidOperation,
   completePaidOperation,
@@ -342,15 +343,24 @@ export function isLampBackgroundPlanArtifact(
 }
 
 export async function runLampBackgroundPlanner(
-  runId: string
+  runId: string,
+  combined?: {
+    workflowMode: "combined";
+    operationId: typeof LAMP_COMBINED_BACKGROUND_PLAN_OPERATION_ID;
+  }
 ): Promise<LampBackgroundPlanArtifact> {
   const storage = getStorage();
   const run = await storage.getRun(runId);
   if (!run) throw new Error("Run not found for Lamp Background planning.");
-  if (runWorkflowMode(run) !== "background") {
-    throw new Error("Only Lamp Background runs may create a cleanup plan.");
+  const expectedMode = combined?.workflowMode ?? "background";
+  if (runWorkflowMode(run) !== expectedMode) {
+    throw new Error(
+      combined
+        ? "Only Lamp Combined runs may create this Combined cleanup subplan."
+        : "Only Lamp Background runs may create a cleanup plan."
+    );
   }
-  const operationId = lampBackgroundPlanOperationId();
+  const operationId = combined?.operationId ?? lampBackgroundPlanOperationId();
   const claim = await beginPaidOperation({
     run,
     id: operationId,

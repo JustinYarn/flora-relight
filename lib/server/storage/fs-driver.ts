@@ -67,6 +67,10 @@ import {
 } from "./run-deletion";
 import { isProviderLostInteraction } from "@/lib/server/run-execution-failure";
 import type { MediaRange, MediaStat, RunPageCursor, StorageDriver } from "./types";
+import {
+  lampCombinedApprovalDisposition,
+  validateLampCombinedApprovalMutation,
+} from "./lamp-combined-approval";
 
 const PAID_OPERATION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
@@ -269,6 +273,34 @@ export function createFsDriver(): StorageDriver {
             ? { spendApproval: current.spendApproval }
             : {}),
         });
+      });
+    },
+    async approveLampCombinedRun(runId, input) {
+      const id = assertRunId(runId);
+      const validated = await validateLampCombinedApprovalMutation(id, input);
+      return withRunLock(async () => {
+        if (await isRunTombstoned(id)) {
+          return { ok: false as const, current: null };
+        }
+        const current = await readRun(id);
+        if (!current) return { ok: false as const, current: null };
+        const disposition = await lampCombinedApprovalDisposition(
+          current,
+          validated
+        );
+        if (disposition === "conflict") {
+          return { ok: false as const, current };
+        }
+        if (disposition === "already_approved") {
+          return { ok: true as const, run: current };
+        }
+        const updated: Run = {
+          ...current,
+          combinedPlan: validated.approvedPlan,
+          spendApproval: validated.spendApproval,
+        };
+        await writeRun(updated);
+        return { ok: true as const, run: updated };
       });
     },
     async getRunExecution(runId) {

@@ -23,6 +23,7 @@ import type {
   MegaPrompt,
   RelightBasePrompt,
   Run,
+  RunExecution,
   Violation,
 } from "./types.ts";
 
@@ -115,6 +116,49 @@ export function lampBeautifyPromptForRun(
     corrections,
     rendered: prompt.rendered,
   };
+}
+
+/**
+ * Project exact provider-journal bytes into the historical Run.Iteration UI
+ * shape without recompiling them through today's active Beautify catalog.
+ * Retired categories remain readable only through their already-persisted
+ * prompt lineage; this helper must therefore stay renderer-free.
+ */
+export function persistedLampBeautifyPromptForRun(input: {
+  plan: LampBeautifyPlan;
+  version: 1 | 2;
+  rendered: string;
+}): MegaPrompt {
+  if (typeof input.rendered !== "string" || input.rendered.length === 0) {
+    throw new Error("A persisted Lamp Beautify prompt must contain exact bytes.");
+  }
+  return lampBeautifyPromptForRun({
+    version: input.version,
+    base: LAMP_BEAUTIFY_BASE_PROMPT,
+    plan: parseLampBeautifyPlan(input.plan),
+    corrections: [],
+    rendered: input.rendered,
+  });
+}
+
+/**
+ * Read a not-yet-completed Beautify Initial directly from its immutable
+ * execution bytes. Historical plans can contain retired catalog entries that
+ * today's write compiler intentionally refuses, so queued/in-flight/held
+ * executions must never invoke that compiler merely to render their status.
+ */
+export function persistedLampBeautifyInitialExecutionPromptForRun(input: {
+  plan: LampBeautifyPlan;
+  execution: Pick<RunExecution, "executionId" | "renderedPrompt">;
+}): MegaPrompt {
+  if (!input.execution.executionId.startsWith("lamp-beautify:")) {
+    throw new Error("A persisted Beautify prompt requires a Beautify execution.");
+  }
+  return persistedLampBeautifyPromptForRun({
+    plan: input.plan,
+    version: 1,
+    rendered: input.execution.renderedPrompt,
+  });
 }
 
 export function lampBeautifyNoOpPromptForRun(

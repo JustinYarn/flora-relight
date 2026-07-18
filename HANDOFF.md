@@ -1,205 +1,224 @@
-# HANDOFF — Flora + Lamp relight workspace
+# HANDOFF — Lamp unified studio
 
-Written 2026-07-14 for whoever picks up this branch next. Read `README.md` for
-product and operator instructions and `ARCHITECTURE.md` for the older Flora
-design rationale. This file records the dual-mode Flora/Lamp release contract.
+Updated 2026-07-18 for the `codex/lamp-unification` integration branch. Read
+`README.md` for operator setup, `ARCHITECTURE.md` for the current technical
+boundaries, and `LAMP-UNIFICATION-BRIEF.md` for the original product brief and
+decision history.
 
-## Current state (2026-07-14)
+## Current product
 
-- **Branch and product name:** the release lives on
-  `codex/flora-prompt-map-ux` and presents **Flora + Lamp** as one workspace.
-  The repo, deployed project, API paths, persisted records, and environment
-  variables keep their existing `flora` / `FLORA_` names for compatibility.
-- **Scope:** Create has a persistent method selector. Flora keeps the established
-  one-cut live workflow; Lamp runs its exact two-pass method. Both methods accept
-  one video or a server-owned batch. Every run and batch persists `workflowMode`;
-  missing mode means legacy Flora.
-- **Provider truth:** the app has live generation and Gemini-evaluation seams,
-  but configured keys are not evidence that a deployment works. No paid provider
-  artifact round trip was run during this Lamp implementation session. Do not
-  describe the live two-pass path as verified until an explicitly approved test
-  completes submission, polling, download, audio remux/verification, both
-  evaluations, and final artifact materialization on the target deployment.
-- **Local persistence:** every run writes to `data/runs/<runId>/` (`run.json`
-  plus source audio/video and generated artifacts). `data/` is gitignored and is
-  the local artifact of record. Hosted runs use private Blob + Postgres.
-- **Secrets:** provider keys remain in `.env.local` (gitignored). Never echo or
-  commit them, and never infer permission for a paid call from their presence.
+This is one internal relight studio with five selectable Lamp methods. Lamp is
+the default for a new browser. The saved browser preference changes only the
+next-run setup. Only an untouched ingest skeleton may be retargeted: no plan,
+approval, execution, provider operation, generated iteration, node progress,
+review, final artifact, or human grade may exist. After any of those bindings
+exists, its `workflowMode` is immutable,
+so history, review, grading, costs, and recovery never depend on today's selector.
+Legacy Flora records remain readable but Flora cannot start new work.
 
-## The Lamp method
+| Mode | User intent | Controls before generation | Delivery |
+| --- | --- | --- | --- |
+| Lamp | Source-faithful relight | Relight 0–100 | Fixed Initial → critique → Final |
+| Background | Remove approved background clutter | One source-specific cleanup plan | Fixed two-pass Final, or approved exact-source no-op |
+| Beautify | Restrained on-camera polish | Approved plan plus level 1–3 | Fixed two-pass Final, or approved exact-source no-op |
+| Iris | Improve camera contact | Approved plan plus level 1–3 | Best eligible Initial or Final, or approved exact-source no-op |
+| Combined | Apply all enabled concerns in one generation product | Relight 0–100, Beautify off/1–3, cleanliness 1–3, eye contact off/on at Presenter P2 | Up to two qualified candidates; human chooses among eligible takes and blindly grades one exact winner |
 
-Every new live Lamp run follows the same fixed sequence:
+Background, Beautify, Iris, and Combined are single-clip workflows. Lamp keeps
+the established server-owned batch path. Combined batches are deliberately
+rejected: each member would need its own plan, two qualification receipts,
+winner choice, and grade binding.
 
-1. Freeze the initial mega prompt and generate **Initial** (iteration 1) from the
-   original source video.
-2. Restore and verify the original audio.
-3. Send the generated video to one holistic Gemini evaluation call covering all
-   eight Lamp visual checks:
-   `identity-preservation`, `skin-texture-age`, `appearance-fidelity`,
-   `background-fidelity`, `lighting-quality-delta`, `motion-lipsync`,
-   `temporal-stability`, and `hallucination-artifacts`.
-4. Record deterministic `audio-integrity` alongside those visual results.
-5. Compile exactly one correction mega prompt from the Initial critique.
-6. Generate **Final** (iteration 2) from the original source video and corrected
-   prompt, then restore and verify the original audio again.
-7. Run one final holistic Gemini evaluation across the same eight Lamp visual
-   checks and record deterministic audio integrity.
-8. Present Final for human grading with the completed AI evaluation hidden by
-   default. The grader may explicitly reveal that saved evaluation at any time;
-   after submission, compare it with the human score for that video, per check.
+## Combined contract
 
-Final is always the grading target; Lamp does not choose a best-scoring attempt or
-loop again. It does not create a manifest or Look Anchor, run a Claude second
-judge, gate on a pass threshold, or invoke a fallback.
+Combined is not four generated videos chained together. It is one aggregate,
+human-approved plan and one frozen prompt product used for exactly two
+source-rooted generations:
 
-Lamp's human and AI rubric has exactly nine checks: eight holistic visual checks
-plus deterministic `audio-integrity`. `temporal-alignment` and
-`lighting-match-to-anchor` are Flora-only checks; they are entirely absent from
-Lamp's evaluator, human grader, results, library, and share surfaces. Grade Results
-compares only those nine Lamp checks and never fabricates Flora-only rows or
-agreement.
+1. Persist the source, relight intensity, and three Combined controls.
+2. Run only the required planners: Background always, Beautify unless off, and
+   Iris only when eye contact is on.
+3. Reconstruct one aggregate plan from exact completed planner journals and show
+   it for one human approval. Approval binds the source, controls, relight value,
+   subplans, price snapshot, and worst-case reservation.
+4. Generate Take 1 from the immutable original and frozen initial prompt, then
+   restore and verify its source-audio binding.
+5. Run one complete Combined holistic evaluation of Take 1.
+6. Run SyncNet qualification. A failed or unverified Take 1 is ineligible and is
+   never repaired.
+7. Deterministically select at most 12 corrections: hard-gate failures first,
+   then one correction per concern, then remaining findings by stable severity.
+8. Generate Take 2 independently from the same original plus the exact frozen
+   prompt with only its correction body changed, then restore and verify its
+   source-audio binding. It never receives Take 1 pixels or an interaction chain.
+9. Run one complete Combined holistic evaluation of Take 2, then run SyncNet
+   qualification. It may receive at most one exact Lipsync-2-Pro repair after
+   that evaluation; the repaired artifact and its journal become the candidate
+   identity, while its AI evaluation continues to describe the pre-repair
+   generation.
+10. Show both candidates and their eligibility truth on Review. The app never
+   auto-picks a winner. A human chooses one eligible take, grades that exact
+   artifact with its AI evaluation hidden, and permanently binds the saved grade
+   to the candidate iteration and artifact-identity hash.
 
-## Durability and recovery boundary
+Disabled optional concerns become explicit preservation hard gates; they are
+not silently omitted. Lighting, face zones, background targets, and eyes have
+separate region ownership so one concern cannot borrow another concern's edit
+permission.
 
-- **Upload identity:** each upload receives a stable run id. The browser writes a
-  server run skeleton before analysis and can recover a completed ingest receipt
-  after a lost response. A partially streamed browser-to-Blob upload still needs
-  retransmission; a finalized upload survives reload.
-- **Canonical execution:** a revisioned `RunExecution` owns the exact source,
-  persisted Initial-prompt bytes, iteration, phase, spend approval, and
-  provider-operation bindings. Canonical evaluation 1 deterministically patches
-  only the version header and correction section of those persisted bytes; the
-  v2 provider journal binds that exact Final prompt across deploys. Browser state
-  is a read cache and cannot move execution backwards or replace server evidence.
-- **Potentially paid work:** Lamp approval covers exactly two generations and two
-  holistic evaluations. Every call has a stable operation id and durable claim.
-  Completed results replay from the journal. In-flight or ambiguous outcomes fail
-  closed into reconciliation; do not automatically repeat a potentially billed
-  request.
-- **Approval renewal:** if an exact Lamp grant expires before a later operation is
-  claimed, the execution enters `user_action_required`. A fresh exact grant CAS-
-  requeues the same execution id and prompt; completed provider journals replay as
-  cache hits, and the paused run remains deletion-protected.
-- **Workflow ownership:** Vercel Workflow owns provider submission, non-billed
-  polling, artifact download, original-audio remux, media verification, both
-  holistic evaluations, prompt correction, settlement, and transition to review.
-  Closing the browser does not stop an admitted run. Recovery polling may continue
-  for up to seven days.
-- **Human grading:** `/grade` restores and autosaves a revisioned draft through
-  `/api/grade-drafts`. Draft and final submission use compare-and-swap revisions,
-  so a stale tab receives a conflict instead of overwriting newer work. The
-  journaled Final artifact and final AI evaluation are the comparison target.
-  Normal run reads explicitly clear Final's AI projection. An exact-run,
-  no-store reveal request can expose that already-saved evidence inside Grade
-  without rerunning a provider. A successful human-grade save remains the reveal
-  boundary for Review, Journey, and Results.
-- **Deletion:** deleted run ids are tombstoned. Normal deletion is refused while
-  an execution, batch membership, or provider journal is active or needs
-  reconciliation.
-- **Dual-mode batches:** the immutable parent plan records the selected method,
-  ordered membership, concurrency, and per-member reservation. Flora approvals
-  remain one-cut. Lamp members reserve and execute the complete two-generation,
-  two-evaluation plan. The parent enqueues child Workflows and settles only
-  journaled actuals; ambiguous provider work remains reserved for reconciliation.
+## Safety and spend laws
 
-## Where everything lives
+- **Source-rooted only:** every generation conditions on the original video.
+- **Freeze prompt bytes first:** shipped prompt formats are persisted contracts.
+  Add a legacy parser/frozen renderer before changing old prompt bytes.
+- **Server/read symmetry:** any binding rule added to admission must also be
+  enforced by run materialization. Browser state is a cache, never authority.
+- **Exact journals:** provider submission, polling, results, evaluations, and
+  optional repair use stable operation ids. Completed calls replay; ambiguous
+  calls reconcile instead of rebilling.
+- **Current approval required:** no paid provider operation starts without a
+  non-expired exact grant and matching price snapshot.
+- **Estimate before, actual after:** the pre-plan confirmation authorizes only
+  the exact required planner calls. For a live Combined run, human aggregate-plan
+  approval then atomically mints a separate grant for both generations, both
+  evaluations, and at most one Take-2 repair. Confirmed actuals come from
+  completed provider journals.
+- **Atomicity:** live Combined aggregate approval and generation spend
+  authorization use one storage-level compare-and-swap operation. Mock Combined
+  persists provider-free approval without a spend grant. Background, Beautify,
+  and Iris persist their approved plan and generation grant as separate
+  server-owned writes.
+- **Node 22 only:** `.nvmrc` and `package.json` are authoritative. Do not test
+  with the system Node 18 installation.
+- **Never build beside a dev server:** Next dev and build share `.next/` and can
+  corrupt one another.
 
-| What | Where |
+## Persistence and recovery
+
+Local state lives in gitignored `data/`. Hosted state uses private Blob for
+media and Postgres for revisioned JSON. `RunExecution`, paid-operation journals,
+spend grants, plan approvals, grades, and grading drafts are server-owned.
+
+The Grade workspace autosaves answers plus a Combined candidate selection with
+revision compare-and-swap. Returning to bare `/grade` reconstructs the exact
+candidate from the durable draft. A deep link such as
+`/grade?run=<id>&candidate=1` explicitly overrides an older saved choice and
+resets incompatible answers. A successful Combined grade freezes the winner;
+later requests cannot swap its iteration or artifact hash.
+
+Combined paid-work replay remains intentionally disabled and fail-closed for
+v1. When Workflow is terminal `completed`, the recovery route may perform one
+settlement-only repair after revalidating the exact aggregate plan, both
+generation/evaluation/audio/SyncNet receipts, and immutable prompt bindings.
+Incomplete or mismatched proof is sealed `reconcile_required`; no provider work
+is restarted. Every other Combined adoption attempt returns a safe conflict.
+
+Deletion is refused while a run, provider journal, reconciliation, or active
+batch membership owns the record. Deleted ids remain tombstoned.
+
+## Consolidated local data
+
+The four pre-unification data roots were checksum-inventoried, copied, and
+validated into this worktree's `data/` without modifying the originals:
+
+- 47 runs
+- 38 durable run executions
+- 2 grading workspaces (`default` and `lamp-slider-calibration-v1`)
+- 0 batches
+- 0 divergent or identical file collisions
+
+Verified source backups and their per-file SHA-256 manifest live at:
+
+`/Users/justinyarn/Desktop/claude test flora/lamp-unification-backups/lamp-data-2026-07-18T04-53-58-717Z`
+
+The merge script is `scripts/consolidate-lamp-data.mjs`. Dry run is the default;
+`--apply` requires a backup root and refuses an existing destination.
+
+## Important code map
+
+| Concern | Canonical path |
 | --- | --- |
-| Repo (local) | `~/Desktop/claude test flora/flora-relight` |
-| Core contract | `lib/types.ts` |
-| Canonical Flora 11-check rubric registry | `lib/prompts/eval-defs.ts` |
-| Lamp eval set + correction compiler | `lib/lamp-evaluation.ts` |
-| Lamp server evaluator | `lib/server/lamp-evaluator.ts` |
-| Lamp mega prompts | `lib/prompts/mega-prompt.ts` |
-| Cost rates and fixed two-pass estimator | `lib/cost.ts` |
-| Durable live run owner | `workflows/durable-relight-run.ts` |
-| Run admission/recovery | `lib/server/run-execution-coordinator.ts`, `app/api/runs/recover/` |
-| Exact-once paid journal | `lib/server/paid-operation.ts`, `lib/server/storage/` |
-| Storage drivers (fs or Blob + Postgres) | `lib/server/storage/` |
-| Run artifacts | `data/runs/<runId>/` locally; Blob + Postgres when hosted |
-| Blind grading and comparison | `app/grade/`, `components/grade/`, `app/api/grade-drafts/` |
-| Provider-free Workflow probe | `workflows/durability-smoke.ts`, `app/api/debug/workflow/` |
-| Dual-mode batch owner | `workflows/durable-relight-batch.ts`, `lib/server/batch-execution-coordinator.ts`, `lib/server/batch-contract.ts` |
+| Shared contracts | `lib/types.ts` |
+| Mode parsing/default/labels | `lib/workflow-mode.ts` |
+| Five workflow graphs | `lib/workflow-def.ts` plus the mode-specific `*-workflow-def.ts` files |
+| Combined controls, plan, and parser | `lib/lamp-combined.ts` |
+| Combined frozen prompts | `lib/prompts/lamp-combined.ts` |
+| Combined evaluator/correction ordering | `lib/lamp-combined-evaluation.ts` |
+| Candidate receipt and artifact identity | `lib/lamp-combined-candidate.ts` |
+| Planner and aggregate approval | `lib/server/lamp-combined-planner.ts`, `lib/server/lamp-combined-approval.ts` |
+| Candidate qualification | `lib/server/lamp-combined-candidate-qualification.ts` |
+| Runtime execution binding | `lib/server/lamp-combined-execution.ts` |
+| Paid orchestration | `workflows/durable-relight-run.ts` |
+| Admission/read/grade authority | `app/api/runs/route.ts` |
+| Atomic Combined approval | `app/api/combined-plan/approve/route.ts`, `lib/server/storage/lamp-combined-approval.ts` |
+| Cost estimates and reservations | `lib/cost.ts` |
+| Create controls | `components/shell/WorkflowModeSelector.tsx`, `app/page.tsx` |
+| Review and winner choice | `components/review/CombinedPlanReview.tsx`, `components/review/CombinedWinnerPicker.tsx` |
+| Blind grade and resume | `components/grade/`, `app/api/grade-drafts/` |
+| Safe data consolidation | `scripts/consolidate-lamp-data.mjs` |
 
-## Run locally
+## Branch and rollback points
+
+Integration worktree:
+
+`/Users/justinyarn/Desktop/claude test flora/flora-relight-unification`
+
+Integration branch: `codex/lamp-unification`.
+
+Each original branch tip was pushed and tagged before integration:
+
+- `safety-pre-unification-20260717-slider` at `c4e1d8a`
+- `safety-pre-unification-20260717-background` at `5c985a6`
+- `safety-pre-unification-20260717-beautify` at `e103d74`
+- `safety-pre-unification-20260717-iris` at `fb9abea`
+
+The original worktrees and their data roots remain intact.
+
+## Validation and release sequence
+
+Run with Node 22:
 
 ```bash
-cd "~/Desktop/claude test flora/flora-relight"
-nvm use          # .nvmrc pins Node 22
-npm install
-npm run dev      # http://localhost:3000
+nvm use
+npm test
+npx tsc --noEmit --pretty false
+npm run build
 ```
 
-ffmpeg must be on `PATH` (`brew install ffmpeg`). Start the dev server with the
-project directory as its working directory or Tailwind and `data/` paths break.
-Keys in `.env.local` change provider readiness; their presence does not prove a
-functional artifact round trip.
+The July 18 local release gate passes 288/288 provider-free tests, TypeScript,
+lint with zero warnings, and the 19-page production build on Node 22. Hands-on
+browser QA covered all five Create modes, the consolidated 47-run history,
+Grade/Results, Rubrics, Engine, and a zero-key Combined rehearsal through plan
+approval, both preview takes, comparison, the preview-only grading guard, and
+reload resume. Paid mode smokes, hosted readiness/Workflow smoke, and exact-
+commit deployment remain release gates. Passing tests or configured keys are
+not provider verification.
 
-## Deploy and verify without providers
+Release order:
 
-The Vercel project remains `flora-relight` under `justin-5763s-projects`:
+1. Finish production build with no dev server running.
+2. Run provider-free UI checks for all five modes, including Combined draft
+   approval, candidate comparison, winner-only grading, reload resume, history,
+   and disabled batch/recovery behavior.
+3. Commit the exact tested tree.
+4. Immediately before any paid smoke, show the current estimate. Run modes
+   sequentially and stop on the first failure; record journaled actuals.
+5. Deploy that exact tested commit—no opportunistic edits between test and push.
+6. Verify the deployed Git SHA, readiness, private storage, Workflow smoke, and
+   gated internal access.
 
-```bash
-vercel link
-vercel deploy --prod
-```
+## Honest limitations
 
-Keep the established environment-variable names:
-
-- `FLORA_ACCESS_PASSWORD`
-- `FLORA_BLOB_ACCESS=private`
-- `BLOB_READ_WRITE_TOKEN`
-- `DATABASE_URL`
-- `GEMINI_API_KEY`
-- `SYNCNET_BASE_URL`
-- `REPLICATE_API_TOKEN`
-- `ANTHROPIC_API_KEY` (legacy/other evaluation paths; Lamp's holistic evaluator is
-  Gemini-only)
-- `FLORA_WORKFLOW_SMOKE_ENABLED` (temporary provider-free probe flag)
-- `FLORA_FFMPEG_DEBUG_ENABLED` (temporary diagnostics only)
-
-Hosted Preview and Production fail closed unless private Blob, Postgres, ffmpeg,
-and the access policy are configured. The access password must be at least 20
-characters with no surrounding whitespace; use a random 32+ character value and
-protect `/api/gate` with Deployment Protection or an edge/WAF rate limit. Keep
-`/.well-known/workflow/*` outside the human password middleware because Vercel's
-internal Workflow queue must reach it.
-
-`GET /api/readiness` performs private Blob and database write/read/delete probes
-plus an ffmpeg check. It calls no AI provider and uploads no user media. After a
-Workflow change, temporarily enable `FLORA_WORKFLOW_SMOKE_ENABLED=1`, redeploy,
-and run the signed-in probe documented in README. It verifies the Workflow control
-plane, private storage, writable scratch, and a synthetic ffmpeg
-encode/demux/remux/probe. Remove the flag and redeploy immediately afterward.
-
-Neither readiness nor the Workflow smoke proves Lamp's paid provider path.
-
-## Next work (priority order)
-
-1. Finish local automated validation with Node 22: tests, lint, typecheck, and a
-   production build. Exercise the UI with mock/provider-free data, including
-   Initial/Final switching, hidden-by-default grading, optional AI reveal,
-   final-AI comparison across Lamp's exact nine checks.
-2. Deploy the exact branch SHA to a protected environment and run readiness plus
-   the provider-free Workflow smoke. Record the source SHA and results.
-3. Only with explicit authorization, run one non-sensitive short clip through the
-   live two-pass path. Confirm exactly two generations and two holistic evaluations,
-   original-audio verification both times, reload recovery, durable Final selection,
-   independent grading, optional AI reveal, final-AI comparison, and journaled cost.
-4. Calibrate the eight Lamp visual rubrics using accumulated
-   human-versus-final-AI disagreements. Keep Flora-only `temporal-alignment` and
-   `lighting-match-to-anchor` checks outside every Lamp surface.
-5. Run an explicitly approved small Lamp batch after the single-video round trip.
-   Confirm per-member two-pass journals, hidden-by-default AI evidence, bounded concurrency,
-   budget skips, reload recovery, and final batch settlement.
-
-## Cost and approval truth
-
-`lib/cost.ts` is the source of truth. A Lamp estimate is the sum of two Omni
-video-to-video generations, two Gemini holistic evaluation calls, and local ffmpeg
-work. Show that complete estimate and obtain confirmation before any paid call.
-Completed actuals come from the server journal; `reconcile_required` may represent
-an unknown upstream charge and must stay visibly unresolved. Never treat a browser
-estimate, configured key, green build, readiness probe, or provider-free smoke as
-permission or evidence for a paid provider round trip.
+- Combined has not yet completed a paid provider artifact round trip in this
+  unification branch.
+- Combined batch execution is unsupported and rejected explicitly.
+- Combined automatic provider replay/restart is intentionally unsupported.
+  A terminal completed Workflow may repair settlement from exact saved proof
+  only; every other recovery case fails closed without replaying providers.
+- Mock Combined candidates are preview-only. They cannot produce a trusted human
+  grade because they have no provider artifact, audio, SyncNet, or evaluation
+  receipt.
+- Simulated Initial and Final artifacts in the other mock modes also stay out of
+  the blind Grade workspace and use ordinary Review. An approved exact-source
+  no-op is the provider-free grading exception.
+- This is an internal tool behind an access gate, not a public product surface.

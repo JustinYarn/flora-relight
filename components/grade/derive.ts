@@ -41,6 +41,14 @@ import {
   lampBackgroundCompositeForResults,
   LAMP_BACKGROUND_UI_EVAL_DEFS,
 } from "../../lib/lamp-background-read.ts";
+import {
+  isLampCombinedRun,
+  lampCombinedUiEvalDefs,
+} from "../../lib/lamp-combined-read.ts";
+import {
+  lampCombinedCandidateArtifactIdentityHash,
+  lampCombinedCandidateReceiptEligible,
+} from "../../lib/lamp-combined-candidate-read.ts";
 import { isApprovedPlanNoOp } from "../../lib/workflow-mode.ts";
 
 // ---------------------------------------------------------------------------
@@ -84,6 +92,20 @@ export function humanVerdictWord(points: HumanCheckGrade["points"]): string {
  * shipped video that exists and is not a mock/simulated CSS-filter stand-in.
  */
 export function isGradeable(run: Run): boolean {
+  if (isLampCombinedRun(run)) {
+    const iteration = run.humanGrade?.gradedIteration;
+    const hash = run.humanGrade?.gradedCandidateArtifactIdentityHash;
+    return (
+      iteration !== undefined &&
+      hash !== undefined &&
+      isGradeableLampCombinedCandidate(run, iteration) &&
+      lampCombinedCandidateArtifactIdentityHash(
+        iteration === 1
+          ? run.serverExecution!.combinedCandidateReceipts!.initial!
+          : run.serverExecution!.combinedCandidateReceipts!.final!
+      ) === hash
+    );
+  }
   const v = finalLampVideo(run);
   const serverVerifiedArtifact =
     finalLampIteration(run)?.recoveredFromProviderOperation === true;
@@ -97,6 +119,32 @@ export function isGradeable(run: Run): boolean {
     (serverVerifiedArtifact || approvedPlanNoOp) &&
     v !== undefined &&
     !v.simulatedFilter
+  );
+}
+
+/** Combined stays out of the ordinary queue until a human chooses this take. */
+export function isGradeableLampCombinedCandidate(
+  run: Run,
+  iteration: 1 | 2
+): boolean {
+  if (
+    !isLampCombinedRun(run) ||
+    run.live !== true ||
+    run.serverExecution?.status !== "awaiting_review"
+  ) {
+    return false;
+  }
+  const receipt =
+    iteration === 1
+      ? run.serverExecution.combinedCandidateReceipts?.initial
+      : run.serverExecution.combinedCandidateReceipts?.final;
+  const candidate = run.iterations.find((item) => item.index === iteration);
+  return Boolean(
+    receipt &&
+      lampCombinedCandidateReceiptEligible(receipt) &&
+      candidate?.recoveredFromProviderOperation === true &&
+      candidate.generatedVideo !== undefined &&
+      !candidate.generatedVideo.simulatedFilter
   );
 }
 
@@ -115,8 +163,18 @@ export function deliveredInitialBestOfTwo(run: Run): boolean {
  * Lamp's human grade and comparison target: the DELIVERED take — strictly v2
  * except for a Lamp Iris best-of-two run that delivered the Initial.
  */
-export function finalLampIteration(run: Run): Iteration | undefined {
+export function finalLampIteration(
+  run: Run,
+  combinedCandidateIteration?: 1 | 2
+): Iteration | undefined {
   const second = run.iterations.find((iteration) => iteration.index === 2);
+  if (isLampCombinedRun(run)) {
+    const iteration =
+      run.humanGrade?.gradedIteration ?? combinedCandidateIteration;
+    return iteration === undefined
+      ? undefined
+      : run.iterations.find((candidate) => candidate.index === iteration);
+  }
   if (deliveredInitialBestOfTwo(run)) {
     return run.iterations.find((iteration) => iteration.index === 1);
   }
@@ -139,10 +197,11 @@ export function finalLampIteration(run: Run): Iteration | undefined {
  */
 export function revealedDeliveredEvaluation(
   gradedRun: Run,
-  revealedRun: Run
+  revealedRun: Run,
+  combinedCandidateIteration?: 1 | 2
 ): Iteration | undefined {
-  const expected = finalLampIteration(gradedRun);
-  const revealed = finalLampIteration(revealedRun);
+  const expected = finalLampIteration(gradedRun, combinedCandidateIteration);
+  const revealed = finalLampIteration(revealedRun, combinedCandidateIteration);
   return expected &&
     revealed &&
     expected.index === revealed.index &&
@@ -152,13 +211,30 @@ export function revealedDeliveredEvaluation(
 }
 
 /** The delivered remux when present, otherwise the delivered take's artifact. */
-export function finalLampVideo(run: Run): VideoAsset | undefined {
-  return run.finalVideo ?? finalLampIteration(run)?.generatedVideo;
+export function finalLampVideo(
+  run: Run,
+  combinedCandidateIteration?: 1 | 2
+): VideoAsset | undefined {
+  // Combined never has a server-selected global Final. The exact candidate
+  // chosen in the blind grade is the only artifact we may present as winner.
+  if (isLampCombinedRun(run)) {
+    return finalLampIteration(run, combinedCandidateIteration)?.generatedVideo;
+  }
+  return (
+    run.finalVideo ??
+    finalLampIteration(run, combinedCandidateIteration)?.generatedVideo
+  );
 }
 
 /** Honest label for the exact artifact the human grader is watching. */
-export function deliveredVideoLabel(run: Run): string {
-  const delivered = finalLampIteration(run);
+export function deliveredVideoLabel(
+  run: Run,
+  combinedCandidateIteration?: 1 | 2
+): string {
+  const delivered = finalLampIteration(run, combinedCandidateIteration);
+  if (isLampCombinedRun(run) && delivered) {
+    return `CHOSEN TAKE ${delivered.index} · LAMP COMBINED`;
+  }
   if (isApprovedPlanNoOp(run)) {
     return "EXACT SOURCE · APPROVED NO-OP";
   }
@@ -295,7 +371,8 @@ export function evalDefsForRuns(runs: Run[]): EvalDefinition[] {
         !isLampRun(run) &&
         !isLampBackgroundRun(run) &&
         !isLampBeautifyRun(run) &&
-        !isLampIrisRun(run)
+        !isLampIrisRun(run) &&
+        !isLampCombinedRun(run)
     )
       ? [EVAL_DEFS]
       : []),
@@ -308,6 +385,9 @@ export function evalDefsForRuns(runs: Run[]): EvalDefinition[] {
       : []),
     ...(runs.some((run) => isLampIrisRun(run))
       ? [LAMP_IRIS_UI_EVAL_DEFS]
+      : []),
+    ...(runs.some((run) => isLampCombinedRun(run))
+      ? [lampCombinedUiEvalDefs(runs.find(isLampCombinedRun)?.combinedPlan)]
       : []),
   ];
   const definitions = new Map<string, EvalDefinition>();

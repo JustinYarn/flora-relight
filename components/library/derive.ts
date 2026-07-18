@@ -18,6 +18,7 @@ import {
   isTwoPassWorkflowMode,
   runWorkflowMode,
 } from "@/lib/workflow-mode";
+import { isLampCombinedRun } from "@/lib/lamp-combined-read";
 
 function isFixedTwoPassRun(run: Run): boolean {
   return isTwoPassWorkflowMode(runWorkflowMode(run));
@@ -40,6 +41,12 @@ export const STATUS_META: Record<RunStatus, { color: string; label: string }> = 
 export function shippedIteration(run: Run): Iteration | undefined {
   const last = run.iterations[run.iterations.length - 1];
   if (isFixedTwoPassRun(run)) {
+    if (isLampCombinedRun(run)) {
+      const winner = run.humanGrade?.gradedIteration;
+      return winner === undefined
+        ? undefined
+        : run.iterations.find((iteration) => iteration.index === winner);
+    }
     if (
       runWorkflowMode(run) === "iris" &&
       (run.serverExecution?.deliveredIteration ?? 2) === 1
@@ -55,6 +62,7 @@ export function shippedIteration(run: Run): Iteration | undefined {
 
 /** The cut to show as "after": Lamp Final or the legacy run's shipped generation. */
 export function shippedVideo(run: Run): VideoAsset | undefined {
+  if (isLampCombinedRun(run)) return shippedIteration(run)?.generatedVideo;
   return run.finalVideo ?? shippedIteration(run)?.generatedVideo;
 }
 

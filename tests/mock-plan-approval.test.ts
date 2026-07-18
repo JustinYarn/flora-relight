@@ -16,8 +16,13 @@ import {
   createMockLampIrisPlan,
 } from "../lib/lamp-iris.ts";
 import {
+  approveLampCombinedPlan,
+  buildLampCombinedPlan,
+} from "../lib/lamp-combined.ts";
+import {
   canAcceptMockBackgroundPlanApproval,
   canAcceptMockBeautifyPlanApproval,
+  canAcceptMockCombinedPlanApproval,
   canAcceptMockIrisPlanApproval,
 } from "../lib/mock-plan-approval.ts";
 
@@ -111,10 +116,61 @@ test("mock Iris approval accepts its exact draft and fixed global intensity", as
   }
 });
 
+test("mock Combined approval accepts only one exact aggregate approval", async () => {
+  const runId = "run-combined";
+  const draft = buildLampCombinedPlan({
+    planId: "lamp-combined-plan-run-combined",
+    runId,
+    createdAt: CREATED_AT,
+    controls: {
+      beautifyLevel: 2,
+      cleanlinessLevel: 3,
+      eyeContact: true,
+    },
+    backgroundPlan: createMockLampBackgroundCleanupPlan(runId, CREATED_AT),
+    beautifyPlan: createMockLampBeautifyPlan(runId, CREATED_AT),
+    irisPlan: createMockLampIrisPlan(runId, CREATED_AT),
+  });
+  const approved = approveLampCombinedPlan(draft, APPROVED_AT);
+  assert.equal(
+    await canAcceptMockCombinedPlanApproval({
+      currentPlan: draft,
+      candidatePlan: approved,
+      hasSpendApproval: false,
+    }),
+    true
+  );
+  assert.equal(
+    await canAcceptMockCombinedPlanApproval({
+      currentPlan: draft,
+      candidatePlan: {
+        ...approved,
+        controls: { ...approved.controls, cleanlinessLevel: 1 },
+      },
+      hasSpendApproval: false,
+    }),
+    false
+  );
+});
+
 test("all browser PUT fixture exceptions close once spend is authorized", async () => {
   const background = createMockLampBackgroundCleanupPlan("run-bg", CREATED_AT);
   const beautify = createMockLampBeautifyPlan("run-beautify", CREATED_AT);
   const iris = createMockLampIrisPlan("run-iris", CREATED_AT);
+  const combined = buildLampCombinedPlan({
+    planId: "lamp-combined-plan-run-combined-spend",
+    runId: "run-combined-spend",
+    createdAt: CREATED_AT,
+    controls: {
+      beautifyLevel: 0,
+      cleanlinessLevel: 2,
+      eyeContact: false,
+    },
+    backgroundPlan: createMockLampBackgroundCleanupPlan(
+      "run-combined-spend",
+      CREATED_AT
+    ),
+  });
   const inputs = [
     canAcceptMockBackgroundPlanApproval({
       currentPlan: background,
@@ -131,8 +187,13 @@ test("all browser PUT fixture exceptions close once spend is authorized", async 
       candidatePlan: approveLampIrisPlan(iris, APPROVED_AT),
       hasSpendApproval: true,
     }),
+    canAcceptMockCombinedPlanApproval({
+      currentPlan: combined,
+      candidatePlan: approveLampCombinedPlan(combined, APPROVED_AT),
+      hasSpendApproval: true,
+    }),
   ];
-  assert.deepEqual(await Promise.all(inputs), [false, false, false]);
+  assert.deepEqual(await Promise.all(inputs), [false, false, false, false]);
 });
 
 test("malformed browser plan data fails closed", async () => {
@@ -153,7 +214,12 @@ test("malformed browser plan data fails closed", async () => {
         candidatePlan: {},
         hasSpendApproval: false,
       }),
+      canAcceptMockCombinedPlanApproval({
+        currentPlan: {},
+        candidatePlan: {},
+        hasSpendApproval: false,
+      }),
     ]),
-    [false, false, false]
+    [false, false, false, false]
   );
 });

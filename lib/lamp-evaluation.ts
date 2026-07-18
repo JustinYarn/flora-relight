@@ -15,6 +15,10 @@ import {
   isLampBackgroundRun,
   LAMP_BACKGROUND_UI_EVAL_DEFS,
 } from "./lamp-background-read.ts";
+import {
+  isLampCombinedRun,
+  lampCombinedUiEvalDefs,
+} from "./lamp-combined-read.ts";
 import type {
   Correction,
   EvalDefinition,
@@ -135,7 +139,10 @@ export function getLampEvalDef(id: string): EvalDefinition {
   return definition;
 }
 
-type RunEvalScope = Pick<Run, "workflowId" | "workflowMode" | "serverExecution">;
+type RunEvalScope = Pick<
+  Run,
+  "workflowId" | "workflowMode" | "serverExecution" | "combinedPlan"
+>;
 
 /** Durable execution identity wins over browser-authored presentation fields. */
 export function isLampRun(run: RunEvalScope): boolean {
@@ -146,6 +153,7 @@ export function isLampRun(run: RunEvalScope): boolean {
 }
 
 export function evalDefsForRun(run: RunEvalScope): EvalDefinition[] {
+  if (isLampCombinedRun(run)) return lampCombinedUiEvalDefs(run.combinedPlan);
   if (isLampIrisRun(run)) return LAMP_IRIS_UI_EVAL_DEFS;
   if (isLampBeautifyRun(run)) return LAMP_BEAUTIFY_UI_EVAL_DEFS;
   if (isLampBackgroundRun(run)) return LAMP_BACKGROUND_UI_EVAL_DEFS;
@@ -167,6 +175,7 @@ export function evalDefForRun(
  */
 export function evalDefForId(evalId: string): EvalDefinition | undefined {
   return (
+    lampCombinedUiEvalDefs().find((definition) => definition.id === evalId) ??
     LAMP_BEAUTIFY_UI_EVAL_DEFS.find(
       (definition) => definition.id === evalId
     ) ??

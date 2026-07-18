@@ -45,7 +45,9 @@ export function promptRoleForNode(
         label: "planner prompt",
         color: "var(--running)",
         description:
-          workflowMode === "beautify"
+          workflowMode === "combined"
+            ? "Routes only enabled concern planners, reconstructs their exact journals, and pauses for one aggregate human approval."
+            : workflowMode === "beautify"
             ? "Classifies the closed enhancement catalog as enhance, declined, or uncertain before human approval."
             : workflowMode === "iris"
               ? "Classifies the closed gaze catalog as correct, declined, or uncertain before human approval."
@@ -56,7 +58,9 @@ export function promptRoleForNode(
         label: "approved-plan prompt",
         color: "var(--accent)",
         description:
-          workflowMode === "beautify"
+          workflowMode === "combined"
+            ? "Consumes the exact aggregate plan, separate relight value, and unified region-ownership locks for source-rooted Take 1."
+            : workflowMode === "beautify"
             ? "Consumes the exact approved enhancement plan with every out-of-scope region locked."
             : workflowMode === "iris"
               ? "Consumes the exact approved gaze plan with expression, identity, scene, and audio locked."
@@ -67,14 +71,18 @@ export function promptRoleForNode(
         label: "whole-video rubric",
         color: "var(--running)",
         description:
-          "Scores Initial against the approved plan and emits only structured, plan-bound corrections.",
+          workflowMode === "combined"
+            ? "Qualifies Take 1 and scores every active or preservation concern before emitting at most 12 deterministic corrections."
+            : "Scores Initial against the approved plan and emits only structured, plan-bound corrections.",
       };
     case "final":
       return {
         label: "corrected mega prompt",
         color: "var(--accent)",
         description:
-          "Consumes the immutable source, approved plan, and one consolidated correction set.",
+          workflowMode === "combined"
+            ? "Starts Take 2 separately from the immutable source with the same frozen bytes plus one capped correction body."
+            : "Consumes the immutable source, approved plan, and one consolidated correction set.",
       };
     case "manifest":
       return {

@@ -7,16 +7,17 @@ import type {
   RunExecution,
   RunExecutionPhase,
   RunExecutionStatus,
-} from "@/lib/types";
-import { assertRunId } from "@/lib/server/runstore";
+} from "../../types.ts";
+import { assertRunId } from "../runstore.ts";
 import {
   isLampApprovalReplayTransition,
   isLampLostGenerationAcknowledgeTransition,
   LAMP_USER_ACTION_REQUIRED_PREFIX,
-} from "@/lib/server/run-execution-resume";
-import { isTwoPassExecutionId } from "@/lib/workflow-mode";
+} from "../run-execution-resume.ts";
+import { isTwoPassExecutionId } from "../../workflow-mode.ts";
 import { isRelightIntensity } from "../../relight-intensity.ts";
 import { isV2CandidateSyncVerdict } from "../../v2-sync.ts";
+import { isLampCombinedCandidateQualificationReceipt } from "../../lamp-combined-candidate.ts";
 import { createHash } from "node:crypto";
 
 const EXECUTION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
@@ -164,6 +165,25 @@ export function assertRunExecution(execution: unknown): RunExecution {
     "planOperationId",
     MAX_OPTIONAL_ID_LENGTH
   );
+  if (candidate.combinedPlanOperationIds !== undefined) {
+    if (
+      !Array.isArray(candidate.combinedPlanOperationIds) ||
+      candidate.combinedPlanOperationIds.length < 1 ||
+      new Set(candidate.combinedPlanOperationIds).size !==
+        candidate.combinedPlanOperationIds.length
+    ) {
+      throw new Error(
+        "Run execution combinedPlanOperationIds must be a non-empty unique array"
+      );
+    }
+    candidate.combinedPlanOperationIds.forEach((operationId, index) =>
+      assertOptionalText(
+        operationId,
+        `combinedPlanOperationIds[${index}]`,
+        MAX_OPTIONAL_ID_LENGTH
+      )
+    );
+  }
   if (
     candidate.approvedPlanHash !== undefined &&
     (typeof candidate.approvedPlanHash !== "string" ||
@@ -195,6 +215,74 @@ export function assertRunExecution(execution: unknown): RunExecution {
   ) {
     throw new Error("Run execution candidateSyncVerdict is invalid");
   }
+
+  const combined = candidate.executionId.startsWith("lamp-combined:");
+  if (candidate.combinedCandidateReceipts !== undefined) {
+    const receipts = candidate.combinedCandidateReceipts;
+    if (!receipts || typeof receipts !== "object" || Array.isArray(receipts)) {
+      throw new Error("Run execution Combined candidate receipts are invalid");
+    }
+    if (receipts.initial === undefined && receipts.final === undefined) {
+      throw new Error("Run execution Combined candidate receipts cannot be empty");
+    }
+    if (
+      receipts.initial !== undefined &&
+      (!isLampCombinedCandidateQualificationReceipt(receipts.initial) ||
+        receipts.initial.iteration !== 1)
+    ) {
+      throw new Error("Run execution Combined Initial receipt is invalid");
+    }
+    if (
+      receipts.final !== undefined &&
+      (!isLampCombinedCandidateQualificationReceipt(receipts.final) ||
+        receipts.final.iteration !== 2)
+    ) {
+      throw new Error("Run execution Combined Final receipt is invalid");
+    }
+    for (const receipt of [receipts.initial, receipts.final]) {
+      if (
+        receipt &&
+        (receipt.recordedAt < candidate.startedAt ||
+          receipt.recordedAt > candidate.updatedAt ||
+          (receipt.repair &&
+            (receipt.repair.recordedAt < receipt.recordedAt ||
+              receipt.repair.recordedAt > candidate.updatedAt)))
+      ) {
+        throw new Error(
+          "Combined candidate receipt timestamps must fall inside the execution timeline"
+        );
+      }
+    }
+  }
+  if (
+    combined !==
+    Boolean(
+      candidate.combinedPlanOperationIds && candidate.approvedPlanHash
+    )
+  ) {
+    throw new Error(
+      "A Combined execution requires its exact planner set and approved plan hash"
+    );
+  }
+  if (
+    combined &&
+    (candidate.source !== "single" ||
+      candidate.batchId !== undefined ||
+      candidate.planOperationId !== undefined ||
+      candidate.candidateSyncVerdict !== undefined ||
+      candidate.deliveredIteration !== undefined ||
+      candidate.relightIntensity === undefined)
+  ) {
+    throw new Error(
+      "Lamp Combined is single-run only and cannot use legacy plan, sync, or winner fields"
+    );
+  }
+  if (!combined && candidate.combinedCandidateReceipts !== undefined) {
+    throw new Error("Combined candidate receipts are invalid on other executions");
+  }
+  if (!combined && candidate.combinedPlanOperationIds !== undefined) {
+    throw new Error("Combined planner ids are invalid on other executions");
+  }
   if (
     candidate.candidateSyncVerdict !== undefined &&
     (!isTwoPassExecutionId(candidate.executionId) || candidate.iteration < 2)
@@ -223,6 +311,16 @@ export function assertRunExecution(execution: unknown): RunExecution {
   ) {
     throw new Error(
       "A plan-first execution identity requires an approved planner operation and plan hash"
+    );
+  }
+  if (
+    candidate.status === "awaiting_review" &&
+    combined &&
+    (!candidate.combinedCandidateReceipts?.initial ||
+      !candidate.combinedCandidateReceipts?.final)
+  ) {
+    throw new Error(
+      "A completed Combined execution requires explicit receipts for both candidates"
     );
   }
 
@@ -265,7 +363,8 @@ export function assertNewRunExecution(execution: RunExecution): RunExecution {
     execution.status !== "queued" ||
     execution.phase !== "queued" ||
     execution.iteration !== 0 ||
-    execution.candidateSyncVerdict !== undefined
+    execution.candidateSyncVerdict !== undefined ||
+    execution.combinedCandidateReceipts !== undefined
   ) {
     throw new Error(
       "A new run execution must start queued at iteration 0 and revision 1"
@@ -298,6 +397,8 @@ export function assertRunExecutionTransition(
     candidate.inputHash !== current.inputHash ||
     candidate.renderedPrompt !== current.renderedPrompt ||
     candidate.planOperationId !== current.planOperationId ||
+    JSON.stringify(candidate.combinedPlanOperationIds) !==
+      JSON.stringify(current.combinedPlanOperationIds) ||
     candidate.approvedPlanHash !== current.approvedPlanHash ||
     candidate.relightIntensity !== current.relightIntensity ||
     candidate.source !== current.source ||
@@ -305,6 +406,77 @@ export function assertRunExecutionTransition(
     candidate.startedAt !== current.startedAt
   ) {
     throw new Error("Run execution identity fields are immutable");
+  }
+  const currentReceipts = current.combinedCandidateReceipts;
+  const nextReceipts = candidate.combinedCandidateReceipts;
+  const baseReceipt = (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const base = { ...(value as Record<string, unknown>) };
+    delete base.repair;
+    return base;
+  };
+  if (currentReceipts?.initial) {
+    if (
+      JSON.stringify(nextReceipts?.initial) !==
+      JSON.stringify(currentReceipts.initial)
+    ) {
+      throw new Error("Combined Initial qualification receipt is immutable");
+    }
+  } else if (nextReceipts?.initial) {
+    if (
+      current.status !== "running" ||
+      candidate.status !== "running" ||
+      current.iteration !== 1 ||
+      candidate.iteration !== 1
+    ) {
+      throw new Error(
+        "Combined Initial qualification may only be journaled on the active Initial"
+      );
+    }
+  }
+  if (currentReceipts?.final) {
+    if (
+      JSON.stringify(baseReceipt(nextReceipts?.final)) !==
+      JSON.stringify(baseReceipt(currentReceipts.final))
+    ) {
+      throw new Error("Combined Final base qualification receipt is immutable");
+    }
+    if (currentReceipts.final.repair) {
+      if (
+        JSON.stringify(nextReceipts?.final?.repair) !==
+        JSON.stringify(currentReceipts.final.repair)
+      ) {
+        throw new Error("Combined Final repair qualification is immutable");
+      }
+    } else if (
+      nextReceipts?.final?.repair &&
+      (current.status !== "running" ||
+        candidate.status !== "running" ||
+        current.iteration !== 2 ||
+        candidate.iteration !== 2)
+    ) {
+      throw new Error(
+        "Combined Final repair may only be appended on the active Final"
+      );
+    }
+  } else if (nextReceipts?.final) {
+    if (
+      current.status !== "running" ||
+      candidate.status !== "running" ||
+      current.iteration !== 2 ||
+      candidate.iteration !== 2 ||
+      !nextReceipts.initial
+    ) {
+      throw new Error(
+        "Combined Final qualification may only follow Initial on the active Final"
+      );
+    }
+  }
+  if (
+    currentReceipts !== undefined &&
+    nextReceipts === undefined
+  ) {
+    throw new Error("Combined candidate receipts cannot be removed");
   }
   if (
     !approvalReplay &&

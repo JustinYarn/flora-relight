@@ -18,6 +18,9 @@ import { EvalList } from "@/components/review/EvalList";
 import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
 import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
 import { IrisPlanReview } from "@/components/review/IrisPlanReview";
+import { CombinedPlanReview } from "@/components/review/CombinedPlanReview";
+import { isLampCombinedRun } from "@/lib/lamp-combined-read";
+import { lampCombinedCandidateArtifactIdentityHash } from "@/lib/lamp-combined-candidate-read";
 import {
   deliveredInitialBestOfTwo,
   deliveredVideoLabel,
@@ -115,6 +118,7 @@ function ScaleRow({
 
 export function ClipGrader({
   run,
+  combinedCandidateIteration,
   remaining,
   draft,
   draftSaveState,
@@ -124,6 +128,8 @@ export function ClipGrader({
   onSkip,
 }: {
   run: Run;
+  /** Combined only: explicit human choice carried by the deep link. */
+  combinedCandidateIteration?: 1 | 2;
   /** Clips still in the queue, this one included. */
   remaining: number;
   draft: GradeClipDraft;
@@ -143,13 +149,16 @@ export function ClipGrader({
   const [aiRevealError, setAiRevealError] = useState<string | null>(null);
   const revealRequest = useRef<AbortController | null>(null);
 
-  const shipped = finalLampIteration(run);
-  const relit = finalLampVideo(run);
+  const combined = isLampCombinedRun(run);
+  const shipped = finalLampIteration(run, combinedCandidateIteration);
+  const relit = finalLampVideo(run, combinedCandidateIteration);
   // Lamp Iris best-of-two delivered the Initial take; label it honestly.
   const bestOfTwoInitial = deliveredInitialBestOfTwo(run);
-  const aiEvaluationName = bestOfTwoInitial
-    ? "Delivered AI evaluation"
-    : "Final AI evaluation";
+  const aiEvaluationName = combined
+    ? "Chosen-take AI evaluation"
+    : bestOfTwoInitial
+      ? "Delivered AI evaluation"
+      : "Final AI evaluation";
   const exceptionalPlanNoOp = isApprovedPlanNoOp(run);
   const savedAiEvaluationExpected =
     isTwoPassWorkflowMode(runWorkflowMode(run)) && !exceptionalPlanNoOp;
@@ -189,7 +198,11 @@ export function ClipGrader({
     setAiRevealError(null);
     try {
       const response = await fetch(
-        `/api/runs?id=${encodeURIComponent(run.id)}&revealFinalEvaluation=1`,
+        `/api/runs?id=${encodeURIComponent(run.id)}&revealFinalEvaluation=1${
+          combinedCandidateIteration
+            ? `&combinedCandidate=${combinedCandidateIteration}`
+            : ""
+        }`,
         { cache: "no-store", signal: controller.signal }
       );
       const payload = (await response.json().catch(() => null)) as
@@ -200,7 +213,11 @@ export function ClipGrader({
           payload?.error ?? `${aiEvaluationName} could not be read (${response.status}).`
         );
       }
-      const final = revealedDeliveredEvaluation(run, payload.run);
+      const final = revealedDeliveredEvaluation(
+        run,
+        payload.run,
+        combinedCandidateIteration
+      );
       if (!final) {
         throw new Error("The saved delivered-take AI evaluation is not available yet.");
       }
@@ -234,11 +251,29 @@ export function ClipGrader({
         ...(a.note.trim() ? { note: a.note.trim() } : {}),
       };
     }
+    const combinedReceipt = combinedCandidateIteration
+      ? combinedCandidateIteration === 1
+        ? run.serverExecution?.combinedCandidateReceipts?.initial
+        : run.serverExecution?.combinedCandidateReceipts?.final
+      : undefined;
+    if (combined && (!combinedCandidateIteration || !combinedReceipt)) {
+      setSubmissionError(
+        "This Combined winner is missing its server qualification proof. Return to the run and choose an eligible take again."
+      );
+      return;
+    }
     const humanGrade: HumanGrade = {
       gradedAt: Date.now(),
       scores,
       shipIt,
       ...(overallNote.trim() ? { overallNote: overallNote.trim() } : {}),
+      ...(combinedCandidateIteration && combinedReceipt
+        ? {
+            gradedIteration: combinedCandidateIteration,
+            gradedCandidateArtifactIdentityHash:
+              lampCombinedCandidateArtifactIdentityHash(combinedReceipt),
+          }
+        : {}),
     };
 
     setSubmitting(true);
@@ -322,7 +357,9 @@ export function ClipGrader({
         <span className="text-2xs text-faint">
           {formatRunDate(run.createdAt)}
           {shipped
-            ? bestOfTwoInitial
+            ? combined
+              ? ` · chosen Take ${shipped.index}`
+              : bestOfTwoInitial
               ? ` · delivered v${shipped.index} · best of two`
               : ` · final v${shipped.index}`
             : ""}{" "}
@@ -336,7 +373,7 @@ export function ClipGrader({
           original={run.originalVideo}
           relit={relit}
           audible="relit"
-          relitLabel={deliveredVideoLabel(run)}
+          relitLabel={deliveredVideoLabel(run, combinedCandidateIteration)}
         />
       </div>
 
@@ -353,6 +390,11 @@ export function ClipGrader({
       {run.irisPlan?.approval.status === "approved" ? (
         <div className="mt-4">
           <IrisPlanReview run={run} interactive={false} compact />
+        </div>
+      ) : null}
+      {run.combinedPlan?.approval.status === "approved" ? (
+        <div className="mt-4">
+          <CombinedPlanReview run={run} interactive={false} compact />
         </div>
       ) : null}
 
@@ -373,7 +415,7 @@ export function ClipGrader({
               </span>
               <span className="mt-0.5 block text-pretty text-2xs leading-relaxed text-muted">
                 {aiRevealState === "shown"
-                  ? `These are the stored results for ${bestOfTwoInitial ? "the delivered Initial" : "Final"}. Hiding them does not change your grading draft.`
+                  ? `These are the stored results for ${combined ? `your chosen Take ${combinedCandidateIteration}` : bestOfTwoInitial ? "the delivered Initial" : "Final"}. Hiding them does not change your grading draft.`
                   : "Hidden by default so you can grade independently. Showing it only reads the saved result — no AI call runs again."}
               </span>
             </span>
@@ -411,7 +453,11 @@ export function ClipGrader({
               aria-labelledby={aiHeadingId}
               className="mt-4 border-t border-edge pt-4"
             >
-              <EvalList iteration={revealedFinal} definitions={gradeDefs} />
+              <EvalList
+                iteration={revealedFinal}
+                definitions={gradeDefs}
+                workflowMode={runWorkflowMode(run)}
+              />
             </div>
           ) : null}
         </section>

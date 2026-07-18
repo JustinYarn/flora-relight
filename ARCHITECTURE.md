@@ -1,4 +1,118 @@
-# Flora Relight — Architecture
+# Lamp unified studio — Architecture
+
+Updated 2026-07-18. The production-oriented app now starts new work through
+five Lamp modes: Lamp, Background, Beautify, Iris, and Combined. Flora remains a
+read-only legacy record type. The historical Flora proposal is retained below
+because it explains the original eval and structural-safety thinking, but it is
+not the current execution graph.
+
+## 0. Current release architecture
+
+### One shell, five separately bound methods
+
+The Create selector is a setup preference, not execution authority. Each run
+persists its `workflowMode`; read, review, cost, recovery, grading, and history
+resolve from the record. Only an untouched ingest skeleton may be retargeted:
+no plan, approval, execution, provider operation, generated iteration, node
+progress, review, final artifact, or human grade may exist. After any of those
+bindings exists, the mode is immutable.
+Existing Lamp methods keep their own prompts, planners, eval registries, and
+runtime rules. Unification shares the front door and history without blending
+their contracts.
+
+| Mode | Plan gate | Generated artifacts | Delivery authority |
+| --- | --- | --- | --- |
+| Lamp | Run spend confirmation | Initial + Final | Final |
+| Background | Human cleanup-plan approval | Initial + Final, or none for no-op | Final or approved exact-source no-op |
+| Beautify | Human enhancement-plan approval | Initial + Final, or none for no-op | Final or approved exact-source no-op |
+| Iris | Human gaze-plan approval | Initial + Final, or none for no-op | Server-qualified best of two, or approved exact-source no-op |
+| Combined | One aggregate human approval | Take 1 + Take 2, both from source | Human-selected, blindly graded exact candidate |
+
+Only Lamp currently supports batches. The three plan modes remain single-clip,
+and Combined is explicitly rejected by the batch route because its per-source
+plan, two candidate receipts, human winner choice, and exact grade binding have
+no safe batch contract yet.
+
+### Structural laws shared by every current mode
+
+1. **Immutable source:** every paid generation receives the canonical original,
+   never pixels or an interaction chain from a prior generation.
+2. **Original audio authority:** generated sound is discarded. Remux and digest
+   checks bind the source track (or explicit source silence) to the artifact.
+3. **Frozen prompts:** generation bytes are persisted before provider admission.
+   Read-time reconstruction validates those bytes instead of silently compiling
+   with today's renderer.
+4. **Exact paid journals:** a stable operation id owns each potentially billed
+   request. Completion replays; ambiguity reconciles; neither a tab retry nor a
+   deployment may create a second paid call.
+5. **Symmetric truth:** server admission and read materialization enforce the
+   same source, prompt, plan, operation, and artifact identities.
+6. **Current spend grant:** planner and generation grants are separate,
+   price-snapshotted, scope-limited, and atomically claimed. A completed journal
+   may be reused after approval renewal; an unclaimed expired scope pauses.
+7. **Human calibration:** automated evaluations are hidden during blind grading.
+   Final human grades are compare-and-swap writes over the exact artifact shown.
+
+### The Combined execution graph
+
+Combined is a fifth prompt product, not sequential execution of the other four
+modes. Its aggregate plan composes only enabled planners and assigns mutually
+exclusive edit ownership:
+
+- global illumination: relight 0–100;
+- approved background targets: cleanliness 1–3;
+- approved facial zones: Beautify off or 1–3;
+- eyes and eyelids: eye contact off or fixed Presenter P2;
+- every unowned region: preservation hard gate.
+
+After one human aggregate approval, the runtime freezes the initial prompt and
+runs this bounded graph:
+
+```text
+original + frozen prompt -> Take 1 + verified source audio -> holistic eval -> SyncNet
+original + same prompt bytes + <=12 ordered corrections -> Take 2
+Take 2 + verified source audio -> holistic eval -> SyncNet -> at most one exact repair
+eligible Take 1 + eligible Take 2 -> human chooses one -> blind exact-artifact grade
+```
+
+Take 1 is never repaired: a sync failure makes it ineligible. Take 2 may receive
+one Lipsync-2-Pro repair, and the repaired journal/artifact hash replaces the raw
+generation as that candidate's identity. Because evaluation precedes repair, its
+AI evaluation continues to describe the pre-repair generated artifact. No
+automatic winner is stored.
+`HumanGrade.gradedIteration` plus
+`gradedCandidateArtifactIdentityHash` is the delivery authority.
+
+The correction ledger is deterministic and capped at 12. It orders hard-gate
+failures first, then ensures at most one correction per enabled concern before
+filling remaining slots by stable severity. Final compilation changes only the
+version header and correction body of the frozen Take-1 prompt.
+
+### Persistence boundaries
+
+The local fs driver and hosted Blob/Postgres driver implement the same revision
+and compare-and-swap contracts for runs, executions, paid operations, plan
+approval, spend grants, human grades, and grade drafts. Live Combined approval is
+one atomic storage operation: it may not persist an approved aggregate without
+its matching grant, nor issue a grant for a different aggregate. Mock Combined is
+provider-free and persists approval without a grant. Background, Beautify, and
+Iris persist their approved plan and generation grant as separate server-owned
+writes rather than one paired atomic mutation.
+
+Combined reads require exact completed planner, generation, evaluation, audio,
+SyncNet, and optional repair journals before exposing a candidate as gradeable.
+Blind reads hide only the selected candidate's automated evaluation. Reveal is
+read-only and never starts a provider. Saved winners are immutable.
+
+Combined paid-work replay is intentionally unsupported in v1. A terminal
+`completed` Workflow may receive a settlement-only CAS repair, but only after
+the exact aggregate binding and both candidate receipt chains revalidate.
+Missing or mismatched proof becomes `reconcile_required`; the route never
+guesses or replays a paid operation. See `HANDOFF.md` for current limitations.
+
+---
+
+## Historical Flora design (reference only)
 
 Design document for the relighting pipeline. This is the product's north star: the mock app
 approximates it, and the prompts and evals in the repo encode it faithfully. It is the output

@@ -2,10 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  classifyWorkflowRunLiveness,
   deadWorkflowExecutionError,
   deadWorkflowSealMessage,
 } from "../lib/server/dead-workflow-messages.ts";
 import { isProviderLostInteractionError } from "../lib/lost-interaction.ts";
+
+test("completed Workflow status is terminal and never reported as alive", () => {
+  assert.equal(classifyWorkflowRunLiveness(true, "pending"), "alive");
+  assert.equal(classifyWorkflowRunLiveness(true, "running"), "alive");
+  assert.equal(classifyWorkflowRunLiveness(true, "completed"), "completed");
+  assert.equal(classifyWorkflowRunLiveness(true, "failed"), "failed");
+  assert.equal(classifyWorkflowRunLiveness(false, "running"), "missing");
+});
 
 test("a provider-confirmed loss seals with the shared marker prefix", () => {
   const sealed = deadWorkflowSealMessage(

@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { useAppStore } from "@/lib/store";
 import { markServerRunObserved } from "@/lib/persist";
 import type { Run } from "@/lib/types";
+import { runWorkflowMode } from "@/lib/workflow-mode";
 
 /**
  * List hydration intentionally omits embedded frame pixels. Detail/Journey
@@ -18,6 +19,11 @@ export function useRunDetails(runId: string): Run | undefined {
     run?.serverExecution?.status === "queued" ||
     run?.serverExecution?.status === "running" ||
     run?.serverExecution?.status === "reconcile_required";
+  const combinedExecutionActive =
+    run !== undefined &&
+    runWorkflowMode(run) === "combined" &&
+    (run.serverExecution?.status === "queued" ||
+      run.serverExecution?.status === "running");
   const singleRecoverable =
     run?.spendApproval?.source === "single" &&
     run.spendApproval.batchId === undefined &&
@@ -56,7 +62,9 @@ export function useRunDetails(runId: string): Run | undefined {
         });
         if (!response.ok || controller.signal.aborted) {
           if (
-            ((!recoveryBlocked && serverActive) || recoveryShouldRetry) &&
+            (combinedExecutionActive ||
+              (!recoveryBlocked && serverActive) ||
+              recoveryShouldRetry) &&
             !controller.signal.aborted
           ) {
             timer = setTimeout(() => void load(), 4_000);
@@ -97,9 +105,13 @@ export function useRunDetails(runId: string): Run | undefined {
           Boolean(fullRun.spendApproval) &&
           (!fullRun.serverExecution ||
             (fullRun.serverExecution.source === "single" && remainsActive));
+        const combinedRemainsActive =
+          runWorkflowMode(fullRun) === "combined" &&
+          (fullRun.serverExecution?.status === "queued" ||
+            fullRun.serverExecution?.status === "running");
         if (
-          !recoveryBlocked &&
-          (remainsActive || remainsRecoverable) &&
+          (combinedRemainsActive ||
+            (!recoveryBlocked && (remainsActive || remainsRecoverable))) &&
           !controller.signal.aborted
         ) {
           timer = setTimeout(() => void load(), 4_000);
@@ -108,7 +120,10 @@ export function useRunDetails(runId: string): Run | undefined {
         // Keep active durable runs polling across temporary hosted-network
         // failures; non-active detail fetches remain best effort.
         fetchedRef.current = null;
-        if ((serverActive || singleRecoverable) && !controller.signal.aborted) {
+        if (
+          (combinedExecutionActive || serverActive || singleRecoverable) &&
+          !controller.signal.aborted
+        ) {
           timer = setTimeout(() => void load(), 4_000);
         }
       }
@@ -118,7 +133,13 @@ export function useRunDetails(runId: string): Run | undefined {
       controller.abort();
       if (timer) clearTimeout(timer);
     };
-  }, [hydrated, runId, serverActive, singleRecoverable]);
+  }, [
+    combinedExecutionActive,
+    hydrated,
+    runId,
+    serverActive,
+    singleRecoverable,
+  ]);
 
   return run;
 }

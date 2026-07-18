@@ -7,12 +7,22 @@ import { MANIFEST_PROMPT } from "@/lib/prompts/manifest";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
 import { useAppStore } from "@/lib/store";
-import type { EvalDefinition, EvalMethod, WorkflowMode } from "@/lib/types";
+import type {
+  EvalDefinition,
+  EvalMethod,
+  MegaPrompt,
+  Run,
+  WorkflowMode,
+} from "@/lib/types";
 import { workflowForMode } from "@/lib/workflow-def";
 import { LAMP_EVAL_DEFS } from "@/lib/lamp-evaluation";
 import { LAMP_BACKGROUND_UI_EVAL_DEFS } from "@/lib/lamp-background-read";
 import { LAMP_BEAUTIFY_UI_EVAL_DEFS } from "@/lib/lamp-beautify-read";
 import { LAMP_IRIS_UI_EVAL_DEFS } from "@/lib/lamp-iris-read";
+import {
+  lampCombinedDefinitionPrompt,
+  lampCombinedUiEvalDefs,
+} from "@/lib/lamp-combined-read";
 import {
   lampBackgroundDisplayPrompt,
   sampleApprovedLampBackgroundPlan,
@@ -28,6 +38,7 @@ import {
   isVersionAPlanMode,
   lampBeautifyDisplayPrompt,
   lampIrisDisplayPrompt,
+  type PlanModeDisplayPrompt,
 } from "@/lib/plan-mode-display";
 import { runWorkflowMode, workflowModeLabel } from "@/lib/workflow-mode";
 
@@ -45,11 +56,60 @@ const FILTERS: Array<{ id: CheckFilter; label: string }> = [
   { id: "code", label: "Code checks" },
 ];
 
-function definitionsForMode(workflowMode: WorkflowMode): EvalDefinition[] {
+const COMBINED_PLANNER_ROUTING_OVERVIEW = [
+  "LAMP COMBINED PLANNER ROUTING — CODE-OWNED OVERVIEW, NOT ONE PROVIDER PROMPT",
+  "1. Background planning is always required and uses the canonical Lamp Background planner prompt.",
+  "2. Beautify planning runs only when Beautify is above off and uses the canonical Lamp Beautify planner prompt.",
+  "3. Iris planning runs only when eye contact is on and uses the canonical Lamp Iris planner prompt.",
+  "4. The server accepts only exact completed planner journals, reconstructs one aggregate plan, and pauses for one human approval before generation.",
+  "5. Disabled optional planners are skipped, not called and not billed.",
+].join("\n");
+
+function isPromptPlanMode(workflowMode: WorkflowMode): boolean {
+  return isVersionAPlanMode(workflowMode) || workflowMode === "combined";
+}
+
+function combinedDisplayPrompt(
+  run?: Run,
+  requestedIteration?: number
+): PlanModeDisplayPrompt {
+  const selectedIteration =
+    run && runWorkflowMode(run) === "combined"
+      ? run.iterations.find(
+          (iteration) => iteration.index === requestedIteration
+        ) ?? run.iterations[run.iterations.length - 1]
+      : undefined;
+  if (selectedIteration) {
+    return {
+      prompt: selectedIteration.megaPrompt,
+      runBound: true,
+      sample: false,
+      source: `run.iterations · Take ${selectedIteration.index} · megaPrompt.rendered`,
+    };
+  }
+  const prompt: MegaPrompt = lampCombinedDefinitionPrompt(
+    run?.relightIntensity
+  );
+  return {
+    prompt,
+    runBound: false,
+    sample: true,
+    source:
+      "definition overview only · exact bytes compile after aggregate approval",
+  };
+}
+
+function definitionsForMode(
+  workflowMode: WorkflowMode,
+  run?: Run
+): EvalDefinition[] {
   if (workflowMode === "lamp") return LAMP_EVAL_DEFS;
   if (workflowMode === "background") return LAMP_BACKGROUND_UI_EVAL_DEFS;
   if (workflowMode === "beautify") return LAMP_BEAUTIFY_UI_EVAL_DEFS;
   if (workflowMode === "iris") return LAMP_IRIS_UI_EVAL_DEFS;
+  if (workflowMode === "combined") {
+    return lampCombinedUiEvalDefs(run?.combinedPlan);
+  }
   return EVAL_DEFS;
 }
 
@@ -57,6 +117,7 @@ function planningPromptForMode(workflowMode: WorkflowMode): string | undefined {
   if (workflowMode === "background") return LAMP_BACKGROUND_CLEANUP_PLAN_PROMPT;
   if (workflowMode === "beautify") return LAMP_BEAUTIFY_PLAN_PROMPT;
   if (workflowMode === "iris") return LAMP_IRIS_PLAN_PROMPT;
+  if (workflowMode === "combined") return COMBINED_PLANNER_ROUTING_OVERVIEW;
   return undefined;
 }
 
@@ -64,6 +125,7 @@ function planEditLabel(workflowMode: WorkflowMode): string {
   if (workflowMode === "background") return "cleanup";
   if (workflowMode === "beautify") return "enhancement";
   if (workflowMode === "iris") return "gaze correction";
+  if (workflowMode === "combined") return "combined edit";
   return "edit";
 }
 
@@ -81,7 +143,7 @@ function Pre({ children }: { children: string }) {
 
 function codeCheckCaveat(evalId: string, workflowMode: WorkflowMode): string {
   if (evalId === "audio-integrity") {
-    if (isVersionAPlanMode(workflowMode)) {
+    if (isPromptPlanMode(workflowMode)) {
       return `${workflowModeLabel(workflowMode)} restores and verifies source audio on each generated cut. Audio is deterministic and never part of the visual model request.`;
     }
     return workflowMode === "lamp"
@@ -357,7 +419,7 @@ function CheckRow({
                 </DefinitionLine>
                 <DefinitionLine label="Category">{def.category}</DefinitionLine>
                 <DefinitionLine label="Method">
-                  {isVersionAPlanMode(workflowMode) &&
+                  {isPromptPlanMode(workflowMode) &&
                   def.method !== "deterministic"
                     ? "holistic Gemini · one shared request"
                     : def.method}
@@ -411,7 +473,7 @@ function CheckRow({
                     Current canonical rubric
                   </SectionTitle>
                   <p className="mb-3 text-pretty text-xs leading-relaxed text-faint">
-                    {isVersionAPlanMode(workflowMode)
+                    {isPromptPlanMode(workflowMode)
                       ? `This is the canonical ${workflowModeLabel(workflowMode)} criterion library. Its visual rubrics are composed into one approved-plan-bound whole-video Gemini request; Audio Integrity remains deterministic.`
                       : workflowMode === "lamp"
                       ? "This is the canonical criterion library. Lamp removes the older frame-grid input/output boilerplate and composes the applicable criteria into one full-video Gemini request. It is not a snapshot of a past run."
@@ -450,9 +512,12 @@ export default function PromptsPage() {
   const [selectedPlanRunId, setSelectedPlanRunId] = useState<
     string | null
   >(null);
+  const [selectedCombinedIteration, setSelectedCombinedIteration] = useState<
+    number | null
+  >(null);
   const planModeRuns = useMemo(
     () =>
-      isVersionAPlanMode(workflowMode)
+      isPromptPlanMode(workflowMode)
         ? runs.filter((run) => runWorkflowMode(run) === workflowMode)
         : [],
     [runs, workflowMode]
@@ -463,11 +528,24 @@ export default function PromptsPage() {
       planModeRuns[0],
     [planModeRuns, selectedPlanRunId]
   );
+  const combinedIterations = useMemo(
+    () =>
+      workflowMode === "combined"
+        ? (selectedPlanRun?.iterations ?? []).filter(
+            (iteration) => iteration.index === 1 || iteration.index === 2
+          )
+        : [],
+    [selectedPlanRun, workflowMode]
+  );
+  const displayedCombinedIteration =
+    combinedIterations.find(
+      (iteration) => iteration.index === selectedCombinedIteration
+    ) ?? combinedIterations[combinedIterations.length - 1];
   const modeMap = useMemo(() => {
     const workflow = workflowForMode(workflowMode);
-    const definitions = definitionsForMode(workflowMode);
+    const definitions = definitionsForMode(workflowMode, selectedPlanRun);
     const evalNodeIds =
-      isVersionAPlanMode(workflowMode)
+      isPromptPlanMode(workflowMode)
         ? new Map(
             definitions.map(
               (definition) => [definition.id, "critique"] as const
@@ -489,7 +567,7 @@ export default function PromptsPage() {
         (evalOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER)
     );
     return { workflow, evalNodeIds, orderedEvalDefs };
-  }, [workflowMode]);
+  }, [selectedPlanRun, workflowMode]);
   const backgroundPromptView = useMemo(
     () =>
       lampBackgroundDisplayPrompt(
@@ -511,14 +589,24 @@ export default function PromptsPage() {
       ),
     [selectedPlanRun, workflowMode]
   );
+  const combinedPromptView = useMemo(
+    () =>
+      combinedDisplayPrompt(
+        workflowMode === "combined" ? selectedPlanRun : undefined,
+        displayedCombinedIteration?.index
+      ),
+    [displayedCombinedIteration?.index, selectedPlanRun, workflowMode]
+  );
   const mega = useMemo(() => {
     if (workflowMode === "background") return backgroundPromptView.prompt;
     if (workflowMode === "beautify") return beautifyPromptView.prompt;
     if (workflowMode === "iris") return irisPromptView.prompt;
+    if (workflowMode === "combined") return combinedPromptView.prompt;
     return initialMegaPrompt(workflowMode);
   }, [
     backgroundPromptView.prompt,
     beautifyPromptView.prompt,
+    combinedPromptView.prompt,
     irisPromptView.prompt,
     workflowMode,
   ]);
@@ -531,13 +619,16 @@ export default function PromptsPage() {
   const isBackground = workflowMode === "background";
   const isBeautify = workflowMode === "beautify";
   const isIris = workflowMode === "iris";
-  const isPlanMode = isVersionAPlanMode(workflowMode);
+  const isCombined = workflowMode === "combined";
+  const isPlanMode = isPromptPlanMode(workflowMode);
   const activePlanPromptView = isBackground
     ? backgroundPromptView
     : isBeautify
       ? beautifyPromptView
       : isIris
         ? irisPromptView
+        : isCombined
+          ? combinedPromptView
         : undefined;
   const selectedBackgroundRun = isBackground ? selectedPlanRun : undefined;
   const planningPrompt = planningPromptForMode(workflowMode);
@@ -554,7 +645,7 @@ export default function PromptsPage() {
     !backgroundPromptView.sample &&
     backgroundPromptView.promptPlan.decision === "exceptional-no-op";
   const selectedPlanNoOp =
-    isPlanMode &&
+    isVersionAPlanMode(workflowMode) &&
     activePlanPromptView?.sample === false &&
     activePlanPromptView.prompt.rendered.startsWith(
       `=== ${modeLabel.toUpperCase()} APPROVED EXCEPTIONAL NO-OP ===`
@@ -601,33 +692,60 @@ export default function PromptsPage() {
             </Badge>
           </div>
           {isPlanMode && planModeRuns.length > 0 ? (
-            <label className="flex items-center gap-2 text-2xs text-faint">
-              {modeLabel} run
-              <select
-                value={selectedPlanRun?.id ?? ""}
-                onChange={(event) =>
-                  setSelectedPlanRunId(event.target.value || null)
-                }
-                className="min-h-10 rounded-lg border border-edge bg-raised px-2.5 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-accent"
-              >
-                {planModeRuns.map((run) => (
-                  <option key={run.id} value={run.id}>
-                    {run.originalVideo.label} · {run.status}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 text-2xs text-faint">
+                {modeLabel} run
+                <select
+                  value={selectedPlanRun?.id ?? ""}
+                  onChange={(event) => {
+                    setSelectedPlanRunId(event.target.value || null);
+                    setSelectedCombinedIteration(null);
+                  }}
+                  className="min-h-10 rounded-lg border border-edge bg-raised px-2.5 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-accent"
+                >
+                  {planModeRuns.map((run) => (
+                    <option key={run.id} value={run.id}>
+                      {run.originalVideo.label} · {run.status}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {isCombined && combinedIterations.length > 0 ? (
+                <label className="flex items-center gap-2 text-2xs text-faint">
+                  Prompt
+                  <select
+                    value={displayedCombinedIteration?.index ?? ""}
+                    onChange={(event) =>
+                      setSelectedCombinedIteration(Number(event.target.value))
+                    }
+                    className="min-h-10 rounded-lg border border-edge bg-raised px-2.5 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-accent"
+                  >
+                    {combinedIterations.map((iteration) => (
+                      <option key={iteration.index} value={iteration.index}>
+                        Take {iteration.index}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+            </div>
           ) : null}
         </div>
         <p className="mt-2 max-w-3xl text-pretty text-sm leading-relaxed text-muted">
-          {isPlanMode
+          {isCombined
+            ? "Inspect Combined's planner routing, aggregate-plan boundary, exact run-bound prompt bytes when available, and control-aware evaluation definitions."
+            : isPlanMode
             ? `Inspect ${modeLabel}'s planning instruction, exact approved-plan-bound ${editLabel} brief, and mode-specific evaluation definitions.`
             : isLamp
             ? "See the mega prompt and evaluation criteria behind Lamp's fixed Initial → critique → Final method. Long source text stays folded away until you need it."
             : "See the mega prompt and evaluation criteria behind Flora's full iterative relight method. Long source text stays folded away until you need it."}
         </p>
         <p className="mt-2 max-w-3xl text-pretty text-2xs leading-relaxed text-faint">
-          {isPlanMode
+          {isCombined
+            ? activePlanPromptView?.sample
+              ? `No generated Combined run is selected, so the prompt panel shows a clearly labeled contract overview—not invented provider bytes. ${rubricCount} visual checks run together; Audio Integrity is deterministic.`
+              : `The prompt below is the selected run's exact saved Take bytes. ${rubricCount} visual checks run together; Audio Integrity is deterministic and candidate qualification also requires explicit SyncNet proof.`
+            : isPlanMode
             ? activePlanPromptView?.sample
               ? `No generation-authorized ${modeLabel} run is selected, so this definition view uses a clearly labeled synthetic approved plan. ${rubricCount} visual checks run together; Audio Integrity is deterministic.`
               : `The brief below prefers the selected run's exact saved iteration prompt and approved plan. ${rubricCount} visual checks run together; Audio Integrity is deterministic.`
@@ -655,13 +773,19 @@ export default function PromptsPage() {
               <FlowNode
                 index={1}
                 title={
-                  isBackground
+                  isCombined
+                    ? "Plan enabled concerns"
+                    : isBackground
                     ? "Plan the cleanup"
                     : isBeautify
                       ? "Plan enhancements"
                       : "Plan eye contact"
                 }
-                detail={`Inspect the full source and classify approved, declined, and uncertain ${editLabel} items.`}
+                detail={
+                  isCombined
+                    ? "Run Background plus only enabled optional planners, then reconstruct one exact aggregate."
+                    : `Inspect the full source and classify approved, declined, and uncertain ${editLabel} items.`
+                }
                 nodeId="plan"
               />
               <span className="text-faint" aria-hidden="true">
@@ -669,8 +793,12 @@ export default function PromptsPage() {
               </span>
               <FlowNode
                 index={2}
-                title="Approve the plan"
-                detail="A human freezes the exact edit authorization before generation."
+                title={isCombined ? "Approve once" : "Approve the plan"}
+                detail={
+                  isCombined
+                    ? "One human click atomically freezes the aggregate and its generation grant."
+                    : "A human freezes the exact edit authorization before generation."
+                }
                 nodeId="plan"
               />
               <span className="text-faint" aria-hidden="true">
@@ -678,8 +806,12 @@ export default function PromptsPage() {
               </span>
               <FlowNode
                 index={3}
-                title="Generate Initial"
-                detail={`Apply only the approved ${editLabel} plan to the immutable source.`}
+                title={isCombined ? "Generate Take 1" : "Generate Initial"}
+                detail={
+                  isCombined
+                    ? "Apply every enabled concern together from the immutable source."
+                    : `Apply only the approved ${editLabel} plan to the immutable source.`
+                }
                 nodeId="initial"
               />
               <span className="text-faint" aria-hidden="true">
@@ -687,8 +819,14 @@ export default function PromptsPage() {
               </span>
               <FlowNode
                 index={4}
-                title={`Critique the ${editLabel}`}
-                detail={`Run ${rubricCount} plan-bound visual checks and deterministic audio.`}
+                title={
+                  isCombined ? "Qualify + critique Take 1" : `Critique the ${editLabel}`
+                }
+                detail={
+                  isCombined
+                    ? `Bind audio and SyncNet proof, then run ${rubricCount} visual checks and cap corrections at 12.`
+                    : `Run ${rubricCount} plan-bound visual checks and deterministic audio.`
+                }
                 nodeId="critique"
               />
               <span className="text-accent" aria-hidden="true">
@@ -696,8 +834,12 @@ export default function PromptsPage() {
               </span>
               <FlowNode
                 index={5}
-                title="Generate Final"
-                detail="Regenerate once from source with structured corrections."
+                title={isCombined ? "Generate Take 2" : "Generate Final"}
+                detail={
+                  isCombined
+                    ? "Start independently from source, qualify it, then let the human choose one eligible winner."
+                    : "Regenerate once from source with structured corrections."
+                }
                 nodeId="final"
               />
             </div>
@@ -795,7 +937,9 @@ export default function PromptsPage() {
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-2xs text-faint">
           <span>
-            {isBackground
+            {isCombined
+              ? "Lamp Combined has one aggregate plan, two separately source-rooted takes, explicit candidate qualification, and no automatic winner or open-ended retry loop."
+              : isBackground
               ? "Lamp Background has no relighting stage, scene-manifest extractor, or open-ended retry loop. The approved cleanup plan is the edit boundary."
               : isPlanMode
               ? `${modeLabel} has no relighting stage, scene-manifest extractor, or open-ended retry loop. Its approved ${editLabel} plan is the edit boundary.`
@@ -813,16 +957,24 @@ export default function PromptsPage() {
         <div className="grid gap-3">
           {isPlanMode && planningPrompt ? (
             <SourceDisclosure
-              title={`${modeLabel} plan analyzer`}
-              description={`Current whole-video planning instruction that proposes bounded ${editLabel} work or the rare exceptional no-op.`}
-              badge="planning prompt"
+              title={
+                isCombined
+                  ? "Combined planner routing contract"
+                  : `${modeLabel} plan analyzer`
+              }
+              description={
+                isCombined
+                  ? "Code-owned routing truth for Background and the enabled optional planners; each provider still receives its canonical concern-specific prompt."
+                  : `Current whole-video planning instruction that proposes bounded ${editLabel} work or the rare exceptional no-op.`
+              }
+              badge={isCombined ? "routing contract" : "planning prompt"}
               badgeColor="var(--running)"
             >
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
-                  This prompt can propose a draft only. It cannot authorize
-                  generation; the user must approve the exact source-specific
-                  plan first.
+                  {isCombined
+                    ? "The pre-plan grant can call only the planners required by the saved controls. Their completed journals reconstruct one draft aggregate; a separate human approval is required before either generation."
+                    : "This prompt can propose a draft only. It cannot authorize generation; the user must approve the exact source-specific plan first."}
                 </p>
                 <EngineLink nodeId="plan" />
               </div>
@@ -832,6 +984,14 @@ export default function PromptsPage() {
                     plan={visibleBackgroundPlan}
                     sample={visibleBackgroundPlanIsSample}
                   />
+                </div>
+              ) : null}
+              {isCombined && selectedPlanRun?.combinedPlan ? (
+                <div className="mb-4">
+                  <SectionTitle>Selected aggregate plan JSON</SectionTitle>
+                  <Pre>
+                    {JSON.stringify(selectedPlanRun.combinedPlan, null, 2)}
+                  </Pre>
                 </div>
               ) : null}
               <Pre>{planningPrompt}</Pre>
@@ -870,14 +1030,18 @@ export default function PromptsPage() {
               isPlanMode
                 ? selectedPlanNoOp
                   ? "Approved exceptional no-op delivery"
-                  : `Approved-plan-bound ${editLabel} brief`
+                  : isCombined
+                    ? "Aggregate-plan-bound Combined brief"
+                    : `Approved-plan-bound ${editLabel} brief`
                 : "Generation brief compiler"
             }
             description={
               isPlanMode
                 ? selectedPlanNoOp
                   ? `The selected run delivers the exact source unchanged; no ${editLabel} generation or Final AI evaluation is authorized.`
-                  : `The exact ${editLabel} authorization, preservation locks, structured corrections, and never-do constraints.`
+                  : isCombined
+                    ? "The exact aggregate authorization, region-ownership matrix, separately bound relight value, structured corrections, and never-do constraints."
+                    : `The exact ${editLabel} authorization, preservation locks, structured corrections, and never-do constraints.`
                 : "Current base task, invariant locks, lighting specification, active fixes, and never-do constraints."
             }
             badge="compiler"
@@ -888,6 +1052,8 @@ export default function PromptsPage() {
                 {isPlanMode
                   ? selectedPlanNoOp
                     ? "This is the selected run's saved exceptional no-op instruction. It records that the exact source is the delivery and does not claim a generation occurred."
+                    : isCombined && activePlanPromptView?.sample
+                      ? "Exact Combined provider bytes do not exist until one source-specific aggregate plan is approved. This is a contract overview only, clearly separated from any run-bound prompt."
                     : activePlanPromptView?.sample
                     ? `This definition-only example is compiled from a clearly labeled synthetic approved ${editLabel} plan. It is not attached to a real video.`
                     : `These are the selected run's exact saved ${editLabel}-prompt bytes when an iteration exists; otherwise they are compiled from its approved plan.`
@@ -909,6 +1075,29 @@ export default function PromptsPage() {
             <div className="grid gap-5 lg:grid-cols-2">
               <div className="min-w-0">
                 <SectionTitle>Base instructions</SectionTitle>
+                {isCombined ? (
+                  <dl className="rounded-lg bg-raised px-3">
+                    <DefinitionLine label="Source">
+                      Both takes condition separately on the immutable original.
+                    </DefinitionLine>
+                    <DefinitionLine label="Ownership">
+                      Lighting, approved background targets, approved face zones,
+                      and gaze each have one non-overlapping edit owner.
+                    </DefinitionLine>
+                    <DefinitionLine label="Disabled controls">
+                      Beautify-off and eye-contact-off become preservation hard gates.
+                    </DefinitionLine>
+                    <DefinitionLine label="Correction pass">
+                      Take 2 changes only the frozen correction body, with at most 12
+                      deterministically ordered actions.
+                    </DefinitionLine>
+                    <DefinitionLine label="Winner">
+                      The runtime chooses nobody; a human blindly grades one exact
+                      eligible candidate.
+                    </DefinitionLine>
+                  </dl>
+                ) : (
+                  <>
                 <dl className="rounded-lg bg-raised px-3">
                   <DefinitionLine label="Task">{base.task}</DefinitionLine>
                   <DefinitionLine label="Identity">{base.locks.identity}</DefinitionLine>
@@ -954,6 +1143,8 @@ export default function PromptsPage() {
                     ))}
                   </ul>
                 </div>
+                  </>
+                )}
               </div>
 
               <div className="min-w-0">
@@ -972,7 +1163,9 @@ export default function PromptsPage() {
                   {isPlanMode
                     ? selectedPlanNoOp
                       ? "Exact-source delivery instruction"
-                      : `${modeLabel} prompt sent to generation`
+                      : isCombined && activePlanPromptView?.sample
+                        ? "Combined definition overview"
+                        : `${modeLabel} prompt sent to generation`
                     : "Current compiled example"}
                 </SectionTitle>
                 <Pre>{mega.rendered}</Pre>

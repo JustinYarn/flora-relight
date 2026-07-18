@@ -18,7 +18,11 @@ import {
   type LampCombinedIteration,
   type LampCombinedPlan,
 } from "./lamp-combined.ts";
-import type { Verdict, ViolationSeverity } from "./types.ts";
+import type {
+  GeminiProUsageSnapshot,
+  Verdict,
+  ViolationSeverity,
+} from "./types.ts";
 
 export const LAMP_COMBINED_EVALUATOR_VERSION =
   "lamp-combined-holistic-v1" as const;
@@ -447,6 +451,9 @@ export interface LampCombinedEvaluationArtifact {
   planHash: string;
   iteration: LampCombinedIteration;
   evalResults: LampCombinedEvalResult[];
+  /** Exact billable counters returned by the one holistic Gemini call. */
+  usage: GeminiProUsageSnapshot;
+  costUsd: number;
 }
 
 export interface LampCombinedHolisticEvaluationSchema {
@@ -522,6 +529,16 @@ function canonicalPlanHash(value: unknown): string {
   return value;
 }
 
+function usageIsValid(value: unknown): value is GeminiProUsageSnapshot {
+  return (
+    isRecord(value) &&
+    Number.isSafeInteger(value.promptTokenCount) &&
+    (value.promptTokenCount as number) >= 0 &&
+    Number.isSafeInteger(value.candidatesTokenCount) &&
+    (value.candidatesTokenCount as number) >= 0
+  );
+}
+
 function verdictFor(
   score: number,
   passThreshold: number,
@@ -540,16 +557,6 @@ function approvedPlan(value: LampCombinedPlan): LampCombinedPlan {
     );
   }
   return plan;
-}
-
-function registryEntry(evalId: LampCombinedEvalId): LampCombinedEvalRegistryEntry {
-  const definition = LAMP_COMBINED_EVAL_REGISTRY.find(
-    (candidate) => candidate.id === evalId
-  );
-  if (!definition) {
-    throw new Error(`Unknown Lamp Combined eval id "${evalId}".`);
-  }
-  return definition;
 }
 
 function isControlDisabled(
@@ -889,6 +896,16 @@ function parseArtifactWithExpectedHash(
   if (!Array.isArray(value.evalResults)) {
     throw new Error("Lamp Combined evaluation artifact results must be an array.");
   }
+  if (!usageIsValid(value.usage)) {
+    throw new Error("Lamp Combined evaluation usage snapshot is invalid.");
+  }
+  if (
+    typeof value.costUsd !== "number" ||
+    !Number.isFinite(value.costUsd) ||
+    value.costUsd < 0
+  ) {
+    throw new Error("Lamp Combined evaluation cost must be non-negative.");
+  }
   const byId = new Map<LampCombinedEvalId, LampCombinedEvalResult>();
   for (let index = 0; index < value.evalResults.length; index += 1) {
     const result = canonicalArtifactResult(
@@ -919,6 +936,8 @@ function parseArtifactWithExpectedHash(
     planHash,
     iteration,
     evalResults: LAMP_COMBINED_EVAL_IDS.map((evalId) => byId.get(evalId)!),
+    usage: value.usage,
+    costUsd: value.costUsd,
   };
 }
 
@@ -1036,11 +1055,24 @@ export async function buildLampCombinedEvaluationArtifact(input: {
   iteration: LampCombinedIteration;
   audioVerified: boolean;
   previousArtifact?: LampCombinedEvaluationArtifact;
+  usage?: GeminiProUsageSnapshot;
+  costUsd?: number;
 }): Promise<LampCombinedEvaluationArtifact> {
   const plan = approvedPlan(input.plan);
   const iteration = canonicalIteration(input.iteration);
   if (typeof input.audioVerified !== "boolean") {
     throw new Error("Lamp Combined deterministic audio result must be boolean.");
+  }
+  const usage = input.usage ?? {
+    promptTokenCount: 0,
+    candidatesTokenCount: 0,
+  };
+  const costUsd = input.costUsd ?? 0;
+  if (!usageIsValid(usage)) {
+    throw new Error("Lamp Combined evaluation usage snapshot is invalid.");
+  }
+  if (!Number.isFinite(costUsd) || costUsd < 0) {
+    throw new Error("Lamp Combined evaluation cost must be non-negative.");
   }
   const planHash = await hashLampCombinedPlan(plan);
   let previousResults: LampCombinedEvalResult[] = [];
@@ -1118,6 +1150,8 @@ export async function buildLampCombinedEvaluationArtifact(input: {
         ...LAMP_COMBINED_VISUAL_EVAL_IDS.map((evalId) => byId.get(evalId)!),
         audioIntegrityResult(iteration, input.audioVerified, previousResults),
       ],
+      usage,
+      costUsd,
     },
     plan,
     planHash,
@@ -1275,4 +1309,3 @@ export async function collectLampCombinedCorrections(
   }
   return compiled;
 }
-

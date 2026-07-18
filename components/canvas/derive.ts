@@ -12,6 +12,7 @@ import {
   DEFAULT_WORKFLOW_MODE,
   runWorkflowMode,
 } from "../../lib/workflow-mode.ts";
+import { lampCombinedCandidateReceiptEligible } from "../../lib/lamp-combined-candidate-read.ts";
 
 export type StageState = "idle" | "running" | "pass" | "fail" | "skipped";
 
@@ -365,6 +366,107 @@ function deriveBackgroundStageChips(run: Run | undefined): StageChip[] {
   ];
 }
 
+function combinedCandidateDetail(
+  run: Run | undefined,
+  iteration: 1 | 2
+): string | undefined {
+  const receipt =
+    iteration === 1
+      ? run?.serverExecution?.combinedCandidateReceipts?.initial
+      : run?.serverExecution?.combinedCandidateReceipts?.final;
+  if (!receipt) {
+    const generated = run?.iterations.some(
+      (candidate) =>
+        candidate.index === iteration && Boolean(candidate.generatedVideo)
+    );
+    if (!generated) return undefined;
+    return run?.live ? "qualification pending" : "preview only";
+  }
+  if (!lampCombinedCandidateReceiptEligible(receipt)) return "not eligible";
+  return receipt.repair ? "eligible · sync repaired" : "eligible";
+}
+
+function deriveCombinedStageChips(run: Run | undefined): StageChip[] {
+  const planState =
+    run?.combinedPlan?.approval.status === "draft"
+      ? "running"
+      : groupState(run, ["plan"]);
+  const initial = groupState(run, ["initial"]);
+  const critique = groupState(run, ["critique"]);
+  const final = groupState(run, ["final"]);
+  const review = run?.humanGrade
+    ? "pass"
+    : run?.status === "awaiting-review"
+      ? "running"
+      : groupState(run, ["review"]);
+  const initialIteration = run?.iterations.find(
+    (iteration) => iteration.index === 1
+  );
+  const visualIds = new Set(
+    run
+      ? evalDefsForRun(run)
+          .filter((definition) => definition.method !== "deterministic")
+          .map((definition) => definition.id)
+      : []
+  );
+  const critiqueCount =
+    initialIteration?.evalResults.filter((result) =>
+      visualIds.has(result.evalId)
+    ).length ?? 0;
+
+  return [
+    {
+      id: "plan",
+      label: "Combined plan",
+      state: planState,
+      symbol: SYMBOL[planState],
+      detail:
+        run?.combinedPlan?.approval.status === "approved"
+          ? "scope locked"
+          : run?.combinedPlan
+            ? "awaiting approval"
+            : undefined,
+    },
+    {
+      id: "initial",
+      label: "Take 1",
+      state: initial,
+      symbol: SYMBOL[initial],
+      detail: combinedCandidateDetail(run, 1),
+    },
+    {
+      id: "critique",
+      label: "Holistic critique",
+      state: critique,
+      symbol: SYMBOL[critique],
+      detail:
+        visualIds.size > 0 && critiqueCount > 0
+          ? `${critiqueCount}/${visualIds.size} visual`
+          : undefined,
+    },
+    {
+      id: "final",
+      label: "Take 2",
+      state: final,
+      symbol: SYMBOL[final],
+      detail: combinedCandidateDetail(run, 2),
+    },
+    {
+      id: "review",
+      label: "Pick + grade",
+      state: review,
+      symbol: SYMBOL[review],
+      detail: run?.humanGrade
+        ? run.humanGrade.gradedIteration
+          ? `winner Take ${run.humanGrade.gradedIteration} saved`
+          : "grade saved · winner missing"
+        : run?.status === "awaiting-review"
+          ? "choose one eligible take"
+          : undefined,
+    },
+  ];
+}
+
 export function deriveStageChips(
   run: Run | undefined,
   _config: RunConfig,
@@ -383,9 +485,19 @@ export function deriveStageChips(
   if (workflowMode === "background") {
     return deriveBackgroundStageChips(run);
   }
+  if (workflowMode === "combined") {
+    return deriveCombinedStageChips(run);
+  }
   const latest = run?.iterations[run.iterations.length - 1];
+  const visualIds = new Set(
+    run
+      ? evalDefsForRun(run)
+          .filter((definition) => definition.method !== "deterministic")
+          .map((definition) => definition.id)
+      : []
+  );
   const latestVisualCount =
-    latest?.evalResults.filter((result) => result.evalId !== "audio-integrity").length ?? 0;
+    latest?.evalResults.filter((result) => visualIds.has(result.evalId)).length ?? 0;
 
   const source = groupState(run, SOURCE_IDS);
   const generate = groupState(run, GENERATE_IDS);
@@ -404,14 +516,22 @@ export function deriveStageChips(
       label: "Generate & verify",
       state: generate,
       symbol: SYMBOL[generate],
-      detail: latest ? (latest.index === 1 ? "Initial" : "Final") : undefined,
+      detail: latest
+        ? workflowMode === "flora"
+          ? `Attempt ${latest.index}`
+          : latest.index === 1
+            ? "Initial"
+            : latest.index === 2
+              ? "Final"
+              : `v${latest.index}`
+        : undefined,
     },
     {
       id: "evaluate",
       label: "Whole-video evaluation",
       state: evaluate,
       symbol: SYMBOL[evaluate],
-      detail: latest ? `${latestVisualCount}/8 visual` : undefined,
+      detail: latest ? `${latestVisualCount}/${visualIds.size} visual` : undefined,
     },
     {
       id: "grade",

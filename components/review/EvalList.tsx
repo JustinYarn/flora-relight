@@ -6,6 +6,7 @@ import type {
   EvalResult,
   Iteration,
   ViolationSeverity,
+  WorkflowMode,
 } from "@/lib/types";
 import {
   Badge,
@@ -242,9 +243,11 @@ export function EvalList({
   iteration,
   definitions,
   evalsUnderway = true,
+  workflowMode,
 }: {
   iteration?: Iteration;
   definitions: readonly EvalDefinition[];
+  workflowMode?: WorkflowMode;
   /**
    * While the run executes: has the pipeline reached the checks phase yet?
    * (see evalPhaseReached in GenerationTheater). Defaults true so completed
@@ -261,7 +264,9 @@ export function EvalList({
   const availableCount =
     iteration?.evalResults.filter((result) => definitionIds.has(result.evalId)).length ?? 0;
   const sectionLabel =
-    iteration?.index === 1
+    workflowMode === "combined" && iteration
+      ? `Take ${iteration.index} AI evaluation`
+      : iteration?.index === 1
       ? "Initial whole-video critique"
       : iteration?.index === 2
         ? "Final AI evaluation"

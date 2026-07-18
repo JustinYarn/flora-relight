@@ -28,6 +28,10 @@ import {
   type RunPageCursor,
 } from "@/lib/server/storage";
 import { buildRun, freshNodeStates } from "@/lib/run-factory";
+import {
+  isPristinePreparedRun,
+  prepareRunForConfirmation,
+} from "@/lib/run-preparation";
 import { workflowForMode } from "@/lib/workflow-def";
 import {
   createSpendApproval,
@@ -35,6 +39,7 @@ import {
   hasReusableLampBackgroundPlanApproval,
   hasReusableLampBeautifyPlanApproval,
   hasReusableLampIrisPlanApproval,
+  hasReusableLampCombinedPlanApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
 import {
@@ -45,9 +50,38 @@ import {
   estimateLampBeautifyTwoPass,
   estimateLampIrisPlan,
   estimateLampIrisTwoPass,
+  estimateLampCombinedPlan,
+  estimateLampCombinedTwoPass,
   estimateLampRun,
   estimateRun,
 } from "@/lib/cost";
+import {
+  parseLampCombinedControls,
+  parseLampCombinedPlan,
+  type LampCombinedControls,
+  type LampCombinedPlan,
+} from "@/lib/lamp-combined";
+import {
+  lampCombinedEvalDefinitions,
+  LAMP_COMBINED_EVAL_IDS,
+  parseLampCombinedEvaluationArtifact,
+  type LampCombinedEvaluationArtifact,
+} from "@/lib/lamp-combined-evaluation";
+import {
+  isLampCombinedCandidateQualificationReceipt,
+  lampCombinedCandidateArtifactIdentityHash,
+  lampCombinedCandidateReceiptEligible,
+  lampCombinedCandidateReceiptMatches,
+  type LampCombinedCandidateQualificationReceipt,
+} from "@/lib/lamp-combined-candidate";
+import {
+  lampCombinedEvaluationOperationId,
+  LAMP_COMBINED_BACKGROUND_PLAN_OPERATION_ID,
+  LAMP_COMBINED_BEAUTIFY_PLAN_OPERATION_ID,
+  LAMP_COMBINED_IRIS_PLAN_OPERATION_ID,
+} from "@/lib/lamp-combined-operations";
+import { prepareLampCombinedPlan } from "@/lib/server/lamp-combined-planner";
+import { validateLampCombinedExecutionBinding } from "@/lib/server/lamp-combined-execution";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { parseHumanGrade } from "@/lib/human-grade";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
@@ -91,6 +125,8 @@ import {
   isLampBeautifyEvaluationArtifact,
   isLampBeautifyRun,
   lampBeautifyPromptForRun,
+  persistedLampBeautifyInitialExecutionPromptForRun,
+  persistedLampBeautifyPromptForRun,
   projectLampBeautifyEvaluationForRead,
 } from "@/lib/lamp-beautify-read";
 import {
@@ -139,8 +175,14 @@ import {
 import {
   canAcceptMockBackgroundPlanApproval,
   canAcceptMockBeautifyPlanApproval,
+  canAcceptMockCombinedPlanApproval,
   canAcceptMockIrisPlanApproval,
 } from "@/lib/mock-plan-approval";
+import {
+  compileLampCombinedFinalPrompt,
+  initialLampCombinedMegaPrompt,
+  type LampCombinedMegaPrompt,
+} from "@/lib/prompts/lamp-combined";
 import {
   compileLampFinalPrompt,
   isLampEvaluationArtifact,
@@ -175,6 +217,10 @@ import {
   isRelightIntensity,
   normalizeRelightIntensity,
 } from "@/lib/relight-intensity";
+import {
+  isLipsyncOperationResult,
+  LIPSYNC_OPERATION_ID,
+} from "@/lib/v2-sync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -496,6 +542,65 @@ async function prepareLampIrisPlan(input: {
   return { ok: true, run: updated, plan: artifact.plan };
 }
 
+async function prepareLampCombinedAggregate(input: {
+  run: Run;
+  controls: LampCombinedControls;
+  mock: boolean;
+}): Promise<
+  | { ok: true; run: Run; plan: LampCombinedPlan; actualPlannerCostUsd: number }
+  | { ok: false; status: number; message: string; run: Run }
+> {
+  const storage = getStorage();
+  const failPlan = async (message: string): Promise<Run> => {
+    const failed: Run = {
+      ...input.run,
+      status: "failed",
+      nodeStates: {
+        ...input.run.nodeStates,
+        plan: { nodeId: "plan", status: "failed", detail: message },
+      },
+      log: [
+        ...input.run.log,
+        { at: Date.now(), nodeId: "plan", level: "error", message },
+      ],
+    };
+    await storage.putRun(failed);
+    return failed;
+  };
+  try {
+    const prepared = await prepareLampCombinedPlan({
+      runId: input.run.id,
+      controls: input.controls,
+      mock: input.mock,
+    });
+    const plan = parseLampCombinedPlan(prepared.plan);
+    const updated: Run = {
+      ...input.run,
+      combinedControls: input.controls,
+      combinedPlan: plan,
+      ...(input.mock ? {} : { live: true }),
+    };
+    await storage.putRun(updated);
+    return {
+      ok: true,
+      run: updated,
+      plan,
+      actualPlannerCostUsd: prepared.actualPlannerCostUsd,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Lamp Combined planning could not be completed safely.";
+    return {
+      ok: false,
+      status: 502,
+      message,
+      run: await failPlan(message),
+    };
+  }
+}
+
 async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
   const approval = run.spendApproval;
   if (!approval) throw new Error("Live spend approval was not persisted.");
@@ -764,11 +869,15 @@ function mergeServerGeneratedVideos(
             return lampBackgroundPromptForRun(prompt);
           }
           if (recoveredMode === "beautify" && candidate.beautifyPlan) {
+            if (operation.renderedPrompt) {
+              return persistedLampBeautifyPromptForRun({
+                plan: candidate.beautifyPlan,
+                version: recoveredPlanVersion,
+                rendered: operation.renderedPrompt,
+              });
+            }
             const prompt = initialLampBeautifyMegaPrompt(candidate.beautifyPlan);
             prompt.version = recoveredPlanVersion;
-            if (operation.renderedPrompt) {
-              prompt.rendered = operation.renderedPrompt;
-            }
             return lampBeautifyPromptForRun(prompt);
           }
           if (recoveredMode === "iris" && candidate.irisPlan) {
@@ -778,6 +887,17 @@ function mergeServerGeneratedVideos(
               prompt.rendered = operation.renderedPrompt;
             }
             return lampIrisPromptForRun(prompt);
+          }
+          if (recoveredMode === "combined") {
+            const prompt = initialMegaPrompt(
+              "lamp",
+              candidate.relightIntensity
+            );
+            prompt.version = operation.iteration;
+            if (operation.renderedPrompt) {
+              prompt.rendered = operation.renderedPrompt;
+            }
+            return prompt;
           }
           const prompt = initialMegaPrompt(
             recoveredMode,
@@ -1378,6 +1498,369 @@ function mergeLampIrisEvaluationResults(
   }
 }
 
+interface LampCombinedRawEvaluationProjection {
+  planOperations: PaidOperation[];
+  first: PaidOperation | null;
+  final: PaidOperation | null;
+  lipsync: PaidOperation | null;
+}
+
+interface LampCombinedCandidateReadProjection {
+  receipt: LampCombinedCandidateQualificationReceipt;
+  matchesJournals: boolean;
+  eligible: boolean;
+  artifactIdentityHash: string;
+  videoUrl?: string;
+}
+
+interface LampCombinedEvaluationProjection
+  extends LampCombinedRawEvaluationProjection {
+  bindingValid: boolean;
+  plan: LampCombinedPlan | null;
+  firstArtifact?: LampCombinedEvaluationArtifact;
+  finalArtifact?: LampCombinedEvaluationArtifact;
+  initialPrompt?: LampCombinedMegaPrompt;
+  finalPrompt?: LampCombinedMegaPrompt;
+  candidates: {
+    initial?: LampCombinedCandidateReadProjection;
+    final?: LampCombinedCandidateReadProjection;
+  };
+}
+
+const EMPTY_LAMP_COMBINED_EVALUATIONS: LampCombinedEvaluationProjection = {
+  planOperations: [],
+  first: null,
+  final: null,
+  lipsync: null,
+  bindingValid: false,
+  plan: null,
+  candidates: {},
+};
+
+async function readLampCombinedRawEvaluationProjection(
+  storage: ReturnType<typeof getStorage>,
+  runId: string
+): Promise<LampCombinedRawEvaluationProjection> {
+  const [backgroundPlan, beautifyPlan, irisPlan, first, final, lipsync] =
+    await Promise.all([
+      storage.getPaidOperation(
+        runId,
+        LAMP_COMBINED_BACKGROUND_PLAN_OPERATION_ID
+      ),
+      storage.getPaidOperation(
+        runId,
+        LAMP_COMBINED_BEAUTIFY_PLAN_OPERATION_ID
+      ),
+      storage.getPaidOperation(runId, LAMP_COMBINED_IRIS_PLAN_OPERATION_ID),
+      storage.getPaidOperation(runId, lampCombinedEvaluationOperationId(1)),
+      storage.getPaidOperation(runId, lampCombinedEvaluationOperationId(2)),
+      storage.getPaidOperation(runId, LIPSYNC_OPERATION_ID),
+    ]);
+  return {
+    planOperations: [backgroundPlan, beautifyPlan, irisPlan].filter(
+      (operation): operation is PaidOperation => operation !== null
+    ),
+    first,
+    final,
+    lipsync,
+  };
+}
+
+async function lampCombinedArtifact(
+  operation: PaidOperation | null,
+  plan: LampCombinedPlan,
+  iteration: 1 | 2
+): Promise<LampCombinedEvaluationArtifact | undefined> {
+  if (operation?.status !== "completed") return undefined;
+  try {
+    return await parseLampCombinedEvaluationArtifact(operation.result, {
+      plan,
+      iteration,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function lampCombinedPromptForRun(prompt: LampCombinedMegaPrompt) {
+  const presentation = initialMegaPrompt("lamp", prompt.relightIntensity);
+  return {
+    ...presentation,
+    version: prompt.iteration,
+    corrections: prompt.corrections.map((correction) => ({
+      id: correction.id,
+      sourceEvalId: correction.sourceEvalId,
+      severity: correction.severity,
+      instruction: correction.instruction,
+      addedAtIteration: 2,
+      resolved: false,
+    })),
+    rendered: prompt.rendered,
+  };
+}
+
+function lampCombinedArtifactResultsForRun(
+  artifact: LampCombinedEvaluationArtifact
+): Run["iterations"][number]["evalResults"] {
+  return artifact.evalResults.map((result) => {
+    const violations = result.violations.map((violation) => ({
+      aspect: violation.aspect,
+      severity: violation.severity,
+      description: violation.description,
+      ...(violation.frameTimestampSec !== undefined
+        ? { frameTimestampSec: violation.frameTimestampSec }
+        : {}),
+      correction: violation.correction
+        ? `${violation.correction.action}${
+            violation.correction.planItemIds.length > 0
+              ? `: ${violation.correction.planItemIds.join(", ")}`
+              : ""
+          }`
+        : "Restore the corresponding source-faithful state.",
+    }));
+    return {
+      evalId: result.evalId,
+      iteration: result.iteration,
+      verdicts:
+        result.evalId === "audio-integrity"
+          ? []
+          : [
+              {
+                judge: "gemini" as const,
+                score: result.score,
+                verdict: result.verdict,
+                violations,
+                reasoning: result.reasoning,
+              },
+            ],
+      score: result.score,
+      confidence: result.confidence,
+      verdict: result.verdict,
+      violations,
+      ...(result.deltaFromPrevious !== undefined
+        ? { deltaFromPrevious: result.deltaFromPrevious }
+        : {}),
+    };
+  });
+}
+
+function lampCombinedCompositeForResults(
+  plan: LampCombinedPlan,
+  results: Run["iterations"][number]["evalResults"]
+): Run["iterations"][number]["composite"] {
+  const byId = new Map(results.map((result) => [result.evalId, result]));
+  let weighted = 0;
+  let totalWeight = 0;
+  const hardGateFailures: string[] = [];
+  for (const definition of lampCombinedEvalDefinitions(plan)) {
+    const result = byId.get(definition.id);
+    if (!result) continue;
+    weighted += result.score * definition.weight;
+    totalWeight += definition.weight;
+    if (definition.hardGate && result.verdict !== "pass") {
+      hardGateFailures.push(definition.id);
+    }
+  }
+  const score =
+    Math.round((totalWeight > 0 ? weighted / totalWeight : 0) * 10) / 10;
+  return {
+    score,
+    hardGateFailures,
+    passed: score >= 75 && hardGateFailures.length === 0,
+  };
+}
+
+function lampCombinedCandidateReadProjection(input: {
+  iteration: 1 | 2;
+  receipt: unknown;
+  run: Run;
+  plan: LampCombinedPlan;
+  planHash: string;
+  evaluationOperation: PaidOperation | null;
+  evaluationArtifact?: LampCombinedEvaluationArtifact;
+  lipsyncOperation: PaidOperation | null;
+}): LampCombinedCandidateReadProjection | undefined {
+  if (!isLampCombinedCandidateQualificationReceipt(input.receipt)) {
+    return undefined;
+  }
+  const generationOperation = input.run.providerOperations?.find(
+    (operation) => operation.id === videoGenerationOperationId(input.iteration)
+  );
+  if (!generationOperation || !input.evaluationOperation) return undefined;
+  const finalLipsync = input.iteration === 2 ? input.lipsyncOperation : null;
+  const completedLipsync =
+    finalLipsync?.status === "completed" ? finalLipsync : null;
+  const matchesJournals = Boolean(
+    input.evaluationArtifact &&
+      lampCombinedCandidateReceiptMatches({
+        receipt: input.receipt,
+        generationOperation,
+        evaluationOperation: input.evaluationOperation,
+        planId: input.plan.id,
+        planHash: input.planHash,
+        sourceHasAudio: input.run.originalVideo.hasAudio,
+        canonicalSourceSync: input.run.originalVideo.syncBaseline,
+        lipsyncOperation: finalLipsync,
+      })
+  );
+  const repaired =
+    input.receipt.repair &&
+    completedLipsync &&
+    isLipsyncOperationResult(completedLipsync.result)
+      ? completedLipsync.result
+      : undefined;
+  return {
+    receipt: input.receipt,
+    matchesJournals,
+    eligible:
+      matchesJournals && lampCombinedCandidateReceiptEligible(input.receipt),
+    artifactIdentityHash:
+      lampCombinedCandidateArtifactIdentityHash(input.receipt),
+    ...(repaired?.videoUrl
+      ? { videoUrl: repaired.videoUrl }
+      : generationOperation.result?.videoUrl
+        ? { videoUrl: generationOperation.result.videoUrl }
+        : {}),
+  };
+}
+
+async function prepareLampCombinedEvaluationProjection(input: {
+  run: Run | null;
+  execution: RunExecution | null;
+  raw: LampCombinedRawEvaluationProjection;
+}): Promise<LampCombinedEvaluationProjection> {
+  const base: LampCombinedEvaluationProjection = {
+    ...input.raw,
+    bindingValid: false,
+    plan: null,
+    candidates: {},
+  };
+  if (
+    !input.run ||
+    !input.execution ||
+    !input.execution.executionId.startsWith("lamp-combined:")
+  ) {
+    return base;
+  }
+  try {
+    const plan = await validateLampCombinedExecutionBinding({
+      run: input.run,
+      execution: input.execution,
+      planOperations: input.raw.planOperations,
+    });
+    const [firstArtifact, finalArtifact, initialPrompt] = await Promise.all([
+      lampCombinedArtifact(input.raw.first, plan, 1),
+      lampCombinedArtifact(input.raw.final, plan, 2),
+      initialLampCombinedMegaPrompt(plan, input.execution.relightIntensity),
+    ]);
+    const finalPrompt = firstArtifact
+      ? await compileLampCombinedFinalPrompt(
+          input.execution.renderedPrompt,
+          plan,
+          input.execution.relightIntensity,
+          firstArtifact
+        )
+      : undefined;
+    const planHash = input.execution.approvedPlanHash!;
+    const initial = lampCombinedCandidateReadProjection({
+      iteration: 1,
+      receipt: input.execution.combinedCandidateReceipts?.initial,
+      run: input.run,
+      plan,
+      planHash,
+      evaluationOperation: input.raw.first,
+      evaluationArtifact: firstArtifact,
+      lipsyncOperation: null,
+    });
+    const final = lampCombinedCandidateReadProjection({
+      iteration: 2,
+      receipt: input.execution.combinedCandidateReceipts?.final,
+      run: input.run,
+      plan,
+      planHash,
+      evaluationOperation: input.raw.final,
+      evaluationArtifact: finalArtifact,
+      lipsyncOperation: input.raw.lipsync,
+    });
+    return {
+      ...input.raw,
+      bindingValid: true,
+      plan,
+      ...(firstArtifact ? { firstArtifact } : {}),
+      ...(finalArtifact ? { finalArtifact } : {}),
+      initialPrompt,
+      ...(finalPrompt ? { finalPrompt } : {}),
+      candidates: {
+        ...(initial ? { initial } : {}),
+        ...(final ? { final } : {}),
+      },
+    };
+  } catch {
+    return base;
+  }
+}
+
+function providerOperationMatchesLampCombinedExecution(
+  operation: ProviderOperation,
+  execution: RunExecution,
+  evaluations: LampCombinedEvaluationProjection
+): boolean {
+  if (
+    operation.kind !== "video_generation" ||
+    !evaluations.bindingValid ||
+    execution.inputHash !== runExecutionInputHash(execution.renderedPrompt)
+  ) {
+    return false;
+  }
+  if (operation.iteration === 1) {
+    return providerOperationMatchesExecution(operation, execution);
+  }
+  return (
+    operation.iteration === 2 &&
+    typeof operation.renderedPrompt === "string" &&
+    operation.renderedPrompt === evaluations.finalPrompt?.rendered
+  );
+}
+
+function mergeLampCombinedEvaluationResults(
+  candidate: Run,
+  evaluations: LampCombinedEvaluationProjection,
+  hideEvaluation: boolean,
+  blindIteration?: 1 | 2
+): void {
+  if (!evaluations.plan) return;
+  for (const iteration of candidate.iterations) {
+    const artifact =
+      iteration.index === 1
+        ? evaluations.firstArtifact
+        : iteration.index === 2
+          ? evaluations.finalArtifact
+          : undefined;
+    const prompt =
+      iteration.index === 1
+        ? evaluations.initialPrompt
+        : iteration.index === 2
+          ? evaluations.finalPrompt
+          : undefined;
+    if (prompt) iteration.megaPrompt = lampCombinedPromptForRun(prompt);
+    const hidden =
+      hideEvaluation &&
+      candidate.humanGrade === undefined &&
+      (blindIteration === undefined || blindIteration === iteration.index);
+    if (!artifact || hidden) {
+      iteration.evalResults = [];
+      delete iteration.composite;
+      continue;
+    }
+    const results = lampCombinedArtifactResultsForRun(artifact);
+    iteration.evalResults = results;
+    iteration.composite = lampCombinedCompositeForResults(
+      evaluations.plan,
+      results
+    );
+  }
+}
+
 function providerOperationMatchesLampExecution(
   operation: ProviderOperation,
   execution: RunExecution,
@@ -1511,7 +1994,25 @@ function mergeCost(
  * their generated asset and actual cost into every read so a stale browser
  * snapshot cannot make a completed background artifact disappear from the UI.
  */
-function paidCostLabel(entry: PaidOperationCostEntry): string {
+function paidCostLabel(
+  entry: PaidOperationCostEntry,
+  workflowMode: WorkflowMode
+): string {
+  if (entry.id === LAMP_COMBINED_BACKGROUND_PLAN_OPERATION_ID) {
+    return "Lamp Combined Background plan (Gemini)";
+  }
+  if (entry.id === LAMP_COMBINED_BEAUTIFY_PLAN_OPERATION_ID) {
+    return "Lamp Combined Beautify plan (Gemini)";
+  }
+  if (entry.id === LAMP_COMBINED_IRIS_PLAN_OPERATION_ID) {
+    return "Lamp Combined eye-contact plan (Gemini)";
+  }
+  if (entry.id === lampCombinedEvaluationOperationId(1)) {
+    return "Lamp Combined Take 1 whole-video critique (Gemini)";
+  }
+  if (entry.id === lampCombinedEvaluationOperationId(2)) {
+    return "Lamp Combined Take 2 whole-video evaluation (Gemini)";
+  }
   if (entry.id === lampBackgroundPlanOperationId()) {
     return "Lamp Background cleanup plan (Gemini)";
   }
@@ -1546,7 +2047,9 @@ function paidCostLabel(entry: PaidOperationCostEntry): string {
     return "Lamp final whole-video evaluation (Gemini)";
   }
   if (entry.kind === "lipsync") {
-    return "Final Lipsync-2-Pro repair (Replicate)";
+    return workflowMode === "combined"
+      ? "Take 2 Lipsync-2-Pro repair (Replicate)"
+      : "Final Lipsync-2-Pro repair (Replicate)";
   }
   if (entry.kind === "manifest") return "Scene manifest extraction (Gemini)";
   if (entry.kind === "anchor") {
@@ -1582,7 +2085,10 @@ function materializeServerResults(
     planHash: null,
     first: null,
     final: null,
-  }
+  },
+  combinedEvaluations: LampCombinedEvaluationProjection =
+    EMPTY_LAMP_COMBINED_EVALUATIONS,
+  combinedBlindIteration?: 1 | 2
 ): Run {
   const materialized: Run = {
     ...run,
@@ -1598,6 +2104,9 @@ function materializeServerResults(
   const background = isLampBackgroundExecution(execution);
   const beautify = isLampBeautifyExecution(execution);
   const iris = isLampIrisExecution(execution);
+  const combined = Boolean(
+    execution?.executionId.startsWith("lamp-combined:")
+  );
   const firstCutOperation = firstCutProviderOperation(materialized);
   const secondCutOperation = materialized.providerOperations?.find(
     (operation) =>
@@ -1655,8 +2164,19 @@ function materializeServerResults(
                 materialized,
                 execution,
                 irisEvaluations
-              )))))
-  );
+              )))) ||
+        (combined &&
+          (!combinedEvaluations.bindingValid ||
+            (secondCutOperation &&
+              !providerOperationMatchesLampCombinedExecution(
+                secondCutOperation,
+                execution,
+                combinedEvaluations
+              )) ||
+            (execution.status === "awaiting_review" &&
+              (!combinedEvaluations.candidates.initial?.matchesJournals ||
+                !combinedEvaluations.candidates.final?.matchesJournals))))
+  ));
   const durableExecution = executionBindingMismatch
     ? {
         ...execution!,
@@ -1705,11 +2225,37 @@ function materializeServerResults(
                   execution,
                   irisEvaluations
                 )
+            : combined
+              ? providerOperationMatchesLampCombinedExecution(
+                  operation,
+                  execution,
+                  combinedEvaluations
+                )
             : operation.iteration === 1 &&
               providerOperationMatchesExecution(operation, execution))
       )
     : materialized.providerOperations;
   mergeServerGeneratedVideos(materialized, materialized, artifactOperations);
+  const repairedCombinedFinal = combinedEvaluations.candidates.final;
+  if (
+    combined &&
+    repairedCombinedFinal?.matchesJournals &&
+    repairedCombinedFinal.receipt.repair &&
+    repairedCombinedFinal.videoUrl
+  ) {
+    const finalIteration = materialized.iterations.find(
+      (iteration) => iteration.index === 2
+    );
+    if (finalIteration?.generatedVideo) {
+      finalIteration.generatedVideo = {
+        ...finalIteration.generatedVideo,
+        url: repairedCombinedFinal.videoUrl,
+        label: "Lamp Combined Take 2 — Lipsync-2-Pro repaired",
+        hasAudio: true,
+      };
+      finalIteration.recoveredFromProviderOperation = true;
+    }
+  }
   // A live finalVideo was only a browser-created alias of the already-remuxed
   // generation. Prefer the exact journal-backed URL the trust marker proves.
   if (
@@ -1721,14 +2267,18 @@ function materializeServerResults(
   }
   const actualItems: NonNullable<Run["cost"]>["items"] = paidCosts.map(
     (entry) => ({
-      label: paidCostLabel(entry),
+      label: paidCostLabel(entry, runWorkflowMode(materialized)),
       usd: entry.costUsd,
       estimated: false,
     })
   );
   for (const operation of materialized.providerOperations ?? []) {
     if (operation.status !== "completed" || !operation.result) continue;
-    const label = `Video generation v${operation.iteration} (${operation.result.durationSec.toFixed(1)}s, Omni Flash)`;
+    const generationLabel =
+      runWorkflowMode(materialized) === "combined"
+        ? `Take ${operation.iteration}`
+        : `Video generation v${operation.iteration}`;
+    const label = `${generationLabel} (${operation.result.durationSec.toFixed(1)}s, Omni Flash)`;
     if (!actualItems.some((item) => item.label === label)) {
       actualItems.push({
         label,
@@ -1741,7 +2291,24 @@ function materializeServerResults(
     const estimatedItems = (materialized.cost?.items ?? []).filter(
       (item) => item.estimated
     );
-    const fallbackEstimate = isLampBackgroundRun(materialized)
+    const fallbackEstimate = runWorkflowMode(materialized) === "combined"
+      ? (() => {
+          const controls = parseLampCombinedControls(
+            materialized.combinedControls
+          );
+          const plan = estimateLampCombinedPlan(controls);
+          if (materialized.combinedPlan?.approval.status !== "approved") {
+            return plan;
+          }
+          const execution = estimateLampCombinedTwoPass(
+            materialized.originalVideo.durationSec
+          );
+          return {
+            totalUsd: plan.totalUsd + execution.totalUsd,
+            items: [...plan.items, ...execution.items],
+          };
+        })()
+      : isLampBackgroundRun(materialized)
       ? materialized.backgroundCleanupPlan?.approval.status === "approved" &&
         materialized.backgroundCleanupPlan.decision === "cleanup"
         ? (() => {
@@ -1798,9 +2365,25 @@ function materializeServerResults(
     const background = isLampBackgroundExecution(execution);
     const beautify = isLampBeautifyExecution(execution);
     const iris = isLampIrisExecution(execution);
-    const twoPass = lamp || background || beautify || iris;
+    const combined =
+      workflowModeFromExecutionId(execution.executionId) === "combined";
+    const twoPass = lamp || background || beautify || iris || combined;
     const budgetSkipped = execution.error?.startsWith("BATCH_BUDGET_SKIPPED") === true;
-    const estimate = background || beautify || iris
+    const estimate = combined
+      ? (() => {
+          const controls = parseLampCombinedControls(
+            materialized.combinedControls
+          );
+          const plan = estimateLampCombinedPlan(controls);
+          const combinedExecution = estimateLampCombinedTwoPass(
+            materialized.originalVideo.durationSec
+          );
+          return {
+            totalUsd: plan.totalUsd + combinedExecution.totalUsd,
+            items: [...plan.items, ...combinedExecution.items],
+          };
+        })()
+      : background || beautify || iris
       ? (() => {
           const plan = background
             ? estimateLampBackgroundPlan()
@@ -1866,7 +2449,9 @@ function materializeServerResults(
       let iteration = materialized.iterations.find((item) => item.index === 1);
       if (!iteration) {
         const megaPrompt =
-          background && materialized.backgroundCleanupPlan
+          combined && combinedEvaluations.initialPrompt
+            ? lampCombinedPromptForRun(combinedEvaluations.initialPrompt)
+          : background && materialized.backgroundCleanupPlan
             ? (() => {
                 const prompt = initialLampBackgroundMegaPrompt(
                   materialized.backgroundCleanupPlan
@@ -1875,13 +2460,10 @@ function materializeServerResults(
                 return lampBackgroundPromptForRun(prompt);
               })()
             : beautify && materialized.beautifyPlan
-              ? (() => {
-                  const prompt = initialLampBeautifyMegaPrompt(
-                    materialized.beautifyPlan
-                  );
-                  prompt.rendered = execution.renderedPrompt;
-                  return lampBeautifyPromptForRun(prompt);
-                })()
+              ? persistedLampBeautifyInitialExecutionPromptForRun({
+                  plan: materialized.beautifyPlan,
+                  execution,
+                })
               : iris && materialized.irisPlan
                 ? (() => {
                     const prompt = initialLampIrisMegaPrompt(
@@ -1891,7 +2473,7 @@ function materializeServerResults(
                     return lampIrisPromptForRun(prompt);
                   })()
                 : initialMegaPrompt(
-                    lamp ? "lamp" : "flora",
+                    lamp || combined ? "lamp" : "flora",
                     materialized.relightIntensity
                   );
         // RunExecution revision 1 binds the exact prompt bytes before any
@@ -1966,7 +2548,9 @@ function materializeServerResults(
         ? lampBeautifyPromptForRun(beautifyFinal)
         : irisFinal
           ? lampIrisPromptForRun(irisFinal)
-          : lampFinal;
+          : combinedEvaluations.finalPrompt
+            ? lampCombinedPromptForRun(combinedEvaluations.finalPrompt)
+            : lampFinal;
     if (twoPass && execution.iteration >= 2 && finalPromptForRun) {
       let iteration = materialized.iterations.find((item) => item.index === 2);
       if (!iteration) {
@@ -1989,6 +2573,8 @@ function materializeServerResults(
         secondCutOperation.result &&
         (lamp
           ? lampArtifact(lampEvaluations.final, 2)
+          : combined
+            ? combinedEvaluations.finalArtifact
           : beautify
             ? lampBeautifyArtifact(beautifyEvaluations.final, 2)
             : iris
@@ -2012,6 +2598,119 @@ function materializeServerResults(
         lampEvaluations,
         hideFinalEvaluation && durableExecution?.status === "awaiting_review"
       );
+    }
+    if (combined) {
+      mergeLampCombinedEvaluationResults(
+        materialized,
+        combinedEvaluations,
+        hideFinalEvaluation && durableExecution.status === "awaiting_review",
+        combinedBlindIteration
+      );
+
+      const firstEvaluation = combinedEvaluations.firstArtifact;
+      const finalEvaluation = combinedEvaluations.finalArtifact;
+      const terminal =
+        execution.status === "failed" ||
+        execution.status === "reconcile_required";
+      const paused = execution.status === "user_action_required";
+      materialized.nodeStates.plan = {
+        nodeId: "plan",
+        status: "succeeded",
+        detail: "one human-approved aggregate plan and exact enabled controls",
+      };
+      materialized.nodeStates.initial = {
+        nodeId: "initial",
+        status: firstEvaluation
+          ? "succeeded"
+          : terminal
+            ? "failed"
+            : execution.iteration >= 1 &&
+                (execution.phase === "video_generation" ||
+                  execution.phase === "finalizing")
+              ? "running"
+              : "queued",
+        detail: firstEvaluation
+          ? "Take 1 generated, qualified, and evaluated from the original"
+          : paused
+            ? "paused before the next authorized paid operation"
+            : "one source-rooted Combined generation",
+      };
+      materialized.nodeStates.critique = {
+        nodeId: "critique",
+        status: firstEvaluation
+          ? "succeeded"
+          : terminal
+            ? "failed"
+            : execution.phase === "evaluating" && execution.iteration === 1
+              ? "running"
+              : "queued",
+        detail: firstEvaluation
+          ? "one holistic evaluation compiled bounded corrections"
+          : "awaiting the Take 1 whole-video evaluation",
+      };
+      materialized.nodeStates.final = {
+        nodeId: "final",
+        status: finalEvaluation
+          ? "succeeded"
+          : terminal
+            ? "failed"
+            : execution.iteration >= 2 &&
+                (execution.phase === "video_generation" ||
+                  execution.phase === "finalizing" ||
+                  execution.phase === "evaluating")
+              ? "running"
+              : "queued",
+        detail: finalEvaluation
+          ? "Take 2 generated from the original and independently evaluated"
+          : paused
+            ? "paused; renew the exact Combined approval to resume"
+            : "one bounded correction pass from the immutable source",
+      };
+      materialized.nodeStates.review = {
+        nodeId: "review",
+        status: materialized.humanGrade
+          ? "succeeded"
+          : execution.status === "awaiting_review"
+            ? "queued"
+            : "idle",
+        detail: materialized.humanGrade
+          ? materialized.humanGrade.shipIt
+            ? "chosen candidate graded — ship"
+            : "chosen candidate graded — do not ship"
+          : "choose one eligible take, then blind grade that exact artifact",
+      };
+
+      // Combined never silently selects a take. The saved grade target is the
+      // permanent human choice; until then both exact candidates remain visible.
+      delete materialized.bestIterationIndex;
+      delete materialized.finalVideo;
+      delete materialized.fallback;
+      const logKey = `server execution ${execution.executionId}`;
+      if (!materialized.log.some((entry) => entry.message.includes(logKey))) {
+        const safeExecutionError = execution.error
+          ?.replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 240);
+        const message =
+          execution.status === "awaiting_review"
+            ? `${logKey}: Lamp Combined completed both source-rooted candidates, both holistic evaluations, and candidate qualification — choose one eligible take for blind grading`
+            : execution.status === "user_action_required"
+              ? `${logKey}: paused before the next paid operation; renew the exact Combined approval to resume without rebilling completed journals`
+              : terminal
+                ? `${logKey}: durable Lamp Combined execution stopped before both candidates were qualified${safeExecutionError ? ` — ${safeExecutionError}` : ""}`
+                : `${logKey}: durable server Workflow owns Lamp Combined's approved two-pass run; this browser may close safely`;
+        materialized.log.push({
+          at: execution.updatedAt,
+          nodeId: execution.status === "awaiting_review" ? "review" : "final",
+          level: terminal
+            ? "error"
+            : execution.status === "user_action_required"
+              ? "warn"
+              : "info",
+          message,
+        });
+      }
+      return materialized;
     }
     if (background) {
       mergeLampBackgroundEvaluationResults(
@@ -2711,6 +3410,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const hideFinalEvaluation =
     req.nextUrl.searchParams.get("hideFinalEvaluation") === "1" &&
     req.nextUrl.searchParams.get("revealFinalEvaluation") !== "1";
+  const rawCombinedBlindIteration =
+    req.nextUrl.searchParams.get("combinedCandidate");
+  const combinedBlindIteration =
+    rawCombinedBlindIteration === "1" || rawCombinedBlindIteration === "2"
+      ? (Number(rawCombinedBlindIteration) as 1 | 2)
+      : undefined;
 
   const requestedId = req.nextUrl.searchParams.get("id");
   if (requestedId !== null) {
@@ -2725,6 +3430,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       backgroundEvaluations,
       beautifyEvaluations,
       irisEvaluations,
+      combinedRawEvaluations,
     ] = await Promise.all([
       storage.getRun(requestedId),
       storage.listPaidOperationCosts(requestedId),
@@ -2733,7 +3439,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       readLampBackgroundEvaluationProjection(storage, requestedId),
       readLampBeautifyEvaluationProjection(storage, requestedId),
       readLampIrisEvaluationProjection(storage, requestedId),
+      readLampCombinedRawEvaluationProjection(storage, requestedId),
     ]);
+    const combinedEvaluations = await prepareLampCombinedEvaluationProjection({
+      run: storedRun,
+      execution,
+      raw: combinedRawEvaluations,
+    });
     const run = storedRun
       ? materializeServerResults(
           storedRun,
@@ -2743,7 +3455,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           backgroundEvaluations,
           hideFinalEvaluation,
           beautifyEvaluations,
-          irisEvaluations
+          irisEvaluations,
+          combinedEvaluations,
+          combinedBlindIteration
         )
       : null;
     if (!run) return NextResponse.json({ error: "Run not found." }, { status: 404 });
@@ -2785,6 +3499,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         backgroundEvaluations,
         beautifyEvaluations,
         irisEvaluations,
+        combinedRawEvaluations,
       ] = await Promise.all([
         storage.listPaidOperationCosts(run.id),
         storage.getRunExecution(run.id),
@@ -2792,7 +3507,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         readLampBackgroundEvaluationProjection(storage, run.id),
         readLampBeautifyEvaluationProjection(storage, run.id),
         readLampIrisEvaluationProjection(storage, run.id),
+        readLampCombinedRawEvaluationProjection(storage, run.id),
       ]);
+      const combinedEvaluations =
+        await prepareLampCombinedEvaluationProjection({
+          run,
+          execution,
+          raw: combinedRawEvaluations,
+        });
       return compactRun(
         materializeServerResults(
           run,
@@ -2802,7 +3524,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           backgroundEvaluations,
           hideFinalEvaluation,
           beautifyEvaluations,
-          irisEvaluations
+          irisEvaluations,
+          combinedEvaluations,
+          combinedBlindIteration
         )
       );
     })
@@ -2852,6 +3576,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     workflowMode?: unknown;
     mock?: unknown;
     relightIntensity?: unknown;
+    combinedControls?: unknown;
+    prepareOnly?: unknown;
   };
   try {
     body = (await req.json()) as {
@@ -2861,6 +3587,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       workflowMode?: unknown;
       mock?: unknown;
       relightIntensity?: unknown;
+      combinedControls?: unknown;
+      prepareOnly?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "Body must be JSON." }, { status: 400 });
@@ -2905,17 +3633,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
   if (
+    body.prepareOnly !== undefined &&
+    typeof body.prepareOnly !== "boolean"
+  ) {
+    return NextResponse.json(
+      { error: "prepareOnly must be a boolean." },
+      { status: 400 }
+    );
+  }
+  if (
+    body.prepareOnly === true &&
+    (body.approveLiveSpend === true || body.approvePlanSpend === true)
+  ) {
+    return NextResponse.json(
+      { error: "prepareOnly cannot authorize provider spend." },
+      { status: 400 }
+    );
+  }
+  if (
     body.workflowMode !== undefined &&
     body.workflowMode !== "flora" &&
     body.workflowMode !== "lamp" &&
     body.workflowMode !== "background" &&
     body.workflowMode !== "beautify" &&
-    body.workflowMode !== "iris"
+    body.workflowMode !== "iris" &&
+    body.workflowMode !== "combined"
   ) {
     return NextResponse.json(
       {
         error:
-          'workflowMode must be "flora", "lamp", "background", "beautify", or "iris".',
+          'workflowMode must be "flora", "lamp", "background", "beautify", "iris", or "combined".',
       },
       { status: 400 }
     );
@@ -2929,10 +3676,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           ? "beautify"
           : body.workflowMode === "iris"
             ? "iris"
-            : "lamp";
+            : body.workflowMode === "combined"
+              ? "combined"
+              : "lamp";
+  let combinedControls: LampCombinedControls | undefined;
+  if (workflowMode === "combined") {
+    try {
+      combinedControls = parseLampCombinedControls(body.combinedControls);
+    } catch (error) {
+      return NextResponse.json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Lamp Combined controls are required and invalid.",
+        },
+        { status: 400 }
+      );
+    }
+  } else if (body.combinedControls !== undefined) {
+    return NextResponse.json(
+      { error: "combinedControls applies only to Lamp Combined runs." },
+      { status: 400 }
+    );
+  }
   if (
-    workflowMode === "lamp" &&
-    body.relightIntensity !== undefined &&
+    (workflowMode === "lamp" || workflowMode === "combined") &&
+    (body.relightIntensity !== undefined || workflowMode === "combined") &&
     !isRelightIntensity(body.relightIntensity)
   ) {
     return NextResponse.json(
@@ -2945,18 +3715,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const relightIntensity =
     workflowMode === "lamp"
       ? normalizeRelightIntensity(body.relightIntensity)
-      : undefined;
+      : workflowMode === "combined"
+        ? (body.relightIntensity as number)
+        : undefined;
   if (
     body.approveLiveSpend === true &&
     (workflowMode === "background" ||
       workflowMode === "beautify" ||
-      workflowMode === "iris")
+      workflowMode === "iris" ||
+      workflowMode === "combined")
   ) {
     return NextResponse.json(
       {
         error:
           workflowMode === "background"
             ? "Approve the source-specific Lamp Background cleanup plan before authorizing the two-pass generation."
+            : workflowMode === "combined"
+              ? "Approve the source-specific Lamp Combined aggregate plan before authorizing the two-pass generation."
             : workflowMode === "iris"
               ? "Approve the source-specific Lamp Iris gaze plan before authorizing the two-pass generation."
               : "Approve the source-specific Lamp Beautify enhancement plan before authorizing the two-pass generation.",
@@ -2977,12 +3752,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     body.approvePlanSpend === true &&
     workflowMode !== "background" &&
     workflowMode !== "beautify" &&
-    workflowMode !== "iris"
+    workflowMode !== "iris" &&
+    workflowMode !== "combined"
   ) {
     return NextResponse.json(
       {
         error:
-          "Plan spend applies only to Lamp Background, Lamp Beautify, and Lamp Iris runs.",
+          "Plan spend applies only to Lamp Background, Lamp Beautify, Lamp Iris, and Lamp Combined runs.",
       },
       { status: 400 }
     );
@@ -3005,6 +3781,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (
     workflowMode === "background" &&
     body.mock !== true &&
+    body.prepareOnly !== true &&
     body.approvePlanSpend !== true &&
     !existing?.backgroundCleanupPlan
   ) {
@@ -3019,6 +3796,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (
     workflowMode === "beautify" &&
     body.mock !== true &&
+    body.prepareOnly !== true &&
     body.approvePlanSpend !== true &&
     !existing?.beautifyPlan
   ) {
@@ -3033,6 +3811,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (
     workflowMode === "iris" &&
     body.mock !== true &&
+    body.prepareOnly !== true &&
     body.approvePlanSpend !== true &&
     !existing?.irisPlan
   ) {
@@ -3040,6 +3819,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       {
         error:
           "Approve the one-call gaze-plan analysis before starting a live Lamp Iris run.",
+      },
+      { status: 400 }
+    );
+  }
+  if (
+    workflowMode === "combined" &&
+    body.mock !== true &&
+    body.prepareOnly !== true &&
+    body.approvePlanSpend !== true &&
+    (!existing?.combinedPlan || existing.live !== true)
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "Approve the enabled Combined planner analyses before starting a live Lamp Combined run.",
       },
       { status: 400 }
     );
@@ -3090,12 +3884,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (existing) {
     const existingExecution = await storage.getRunExecution(video.runId);
     const existingMode = persistedWorkflowMode(existing);
-    const canRetargetPreparedRun =
-      existingExecution === null &&
-      existing.spendApproval === undefined &&
-      (existing.providerOperations?.length ?? 0) === 0 &&
-      existing.iterations.length === 0 &&
-      existing.humanGrade === undefined;
+    const canRetargetPreparedRun = isPristinePreparedRun(
+      existing,
+      existingExecution
+    );
+    if (
+      body.prepareOnly === true &&
+      !isPristinePreparedRun(existing, existingExecution)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "This saved run has already crossed a plan, approval, provider, or review boundary. Its method and controls were left untouched.",
+        },
+        { status: 409 }
+      );
+    }
+    let combinedControlsChanged = false;
     if (existingMode !== workflowMode && !canRetargetPreparedRun) {
       return NextResponse.json(
         {
@@ -3109,7 +3914,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
     if (
-      workflowMode === "lamp" &&
+      (workflowMode === "lamp" || workflowMode === "combined") &&
       normalizeRelightIntensity(existing.relightIntensity) !==
         relightIntensity &&
       !canRetargetPreparedRun
@@ -3121,6 +3926,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         },
         { status: 409 }
       );
+    }
+    if (workflowMode === "combined" && existingMode === "combined") {
+      let savedControls: LampCombinedControls;
+      try {
+        savedControls = parseLampCombinedControls(existing.combinedControls);
+      } catch {
+        return NextResponse.json(
+          { error: "This saved Combined run has invalid bound controls." },
+          { status: 409 }
+        );
+      }
+      if (
+        savedControls.beautifyLevel !== combinedControls!.beautifyLevel ||
+        savedControls.cleanlinessLevel !== combinedControls!.cleanlinessLevel ||
+        savedControls.eyeContact !== combinedControls!.eyeContact
+      ) {
+        combinedControlsChanged = true;
+        if (!canRetargetPreparedRun) {
+          return NextResponse.json(
+            {
+              error:
+                "This saved clip already has different Combined controls bound to it. Upload it again as a fresh run so planner authorization cannot expand.",
+            },
+            { status: 409 }
+          );
+        }
+      }
     }
     if (
       existingExecution &&
@@ -3144,6 +3976,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             ? hasReusableLampBeautifyPlanApproval(existing)
             : workflowMode === "iris"
               ? hasReusableLampIrisPlanApproval(existing)
+              : workflowMode === "combined"
+                ? hasReusableLampCombinedPlanApproval(existing)
               : hasReusableFirstCutApproval(existing, "single")) &&
       existing.originalVideo.runId === canonicalVideo.runId &&
       existing.originalVideo.url === canonicalVideo.url &&
@@ -3168,7 +4002,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
                   ? "beautify_plan"
                   : workflowMode === "iris"
                     ? "iris_plan"
-                    : "first_cut"
+                    : workflowMode === "combined"
+                      ? "combined_plan"
+                      : "first_cut",
+            workflowMode === "combined" ? combinedControls : undefined
           )
         : undefined
     );
@@ -3178,18 +4015,47 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: 409 }
       );
     }
+    if (body.prepareOnly === true) {
+      updated = prepareRunForConfirmation(
+        updated,
+        workflowMode,
+        relightIntensity,
+        combinedControls
+      );
+      await storage.putRun(updated);
+      return NextResponse.json({
+        ok: true,
+        created: false,
+        run: updated,
+        preparedOnly: true,
+        serverOwned: true,
+      });
+    }
     if (
       existingMode !== workflowMode ||
-      (workflowMode === "lamp" &&
+      ((workflowMode === "lamp" || workflowMode === "combined") &&
         canRetargetPreparedRun &&
-        existing.relightIntensity !== relightIntensity)
+        existing.relightIntensity !== relightIntensity) ||
+      (workflowMode === "combined" &&
+        canRetargetPreparedRun &&
+        combinedControlsChanged)
     ) {
       const workflow = workflowForMode(workflowMode);
+      const retargetedBase =
+        workflowMode === "combined" &&
+        (existingMode !== workflowMode || combinedControlsChanged)
+          ? (() => {
+              const rest = { ...updated };
+              delete rest.combinedPlan;
+              return rest;
+            })()
+          : updated;
       updated = {
-        ...updated,
+        ...retargetedBase,
         workflowId: workflow.id,
         workflowMode,
         ...(relightIntensity !== undefined ? { relightIntensity } : {}),
+        ...(combinedControls ? { combinedControls } : {}),
         nodeStates: freshNodeStates(workflowMode),
       };
       await storage.putRun(updated);
@@ -3254,6 +4120,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         serverOwned: body.mock !== true,
       });
     }
+    if (workflowMode === "combined") {
+      const prepared = await prepareLampCombinedAggregate({
+        run: updated,
+        controls: combinedControls!,
+        mock: body.mock === true,
+      });
+      if (!prepared.ok) {
+        return NextResponse.json(
+          { error: prepared.message, run: prepared.run },
+          { status: prepared.status }
+        );
+      }
+      return NextResponse.json({
+        ok: true,
+        created: false,
+        run: prepared.run,
+        planReviewRequired: prepared.plan.approval.status !== "approved",
+        costEstimate: estimateLampCombinedPlan(combinedControls!),
+        actualPlannerCostUsd: prepared.actualPlannerCostUsd,
+        serverOwned: body.mock !== true,
+      });
+    }
     if (body.approveLiveSpend === true) {
       try {
         const launch = await enqueueSingleRun(updated, workflowMode);
@@ -3305,6 +4193,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     workflowMode,
     relightIntensity
   );
+  if (workflowMode === "combined") {
+    run.combinedControls = combinedControls!;
+  }
   if (body.approveLiveSpend === true || body.approvePlanSpend === true) {
     run.spendApproval = createSpendApproval(
       canonicalVideo,
@@ -3319,10 +4210,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             ? "beautify_plan"
             : workflowMode === "iris"
               ? "iris_plan"
-              : "first_cut"
+              : workflowMode === "combined"
+                ? "combined_plan"
+                : "first_cut",
+      workflowMode === "combined" ? combinedControls : undefined
     );
   }
   await storage.putRun(run);
+  if (body.prepareOnly === true) {
+    return NextResponse.json(
+      {
+        ok: true,
+        created: true,
+        run,
+        preparedOnly: true,
+        serverOwned: true,
+      },
+      { status: 201 }
+    );
+  }
   if (workflowMode === "background") {
     const prepared = await prepareLampBackgroundPlan({
       run,
@@ -3387,6 +4293,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         run: prepared.run,
         planReviewRequired:
           prepared.plan.approval.status !== "approved",
+        serverOwned: body.mock !== true,
+      },
+      { status: 201 }
+    );
+  }
+  if (workflowMode === "combined") {
+    const prepared = await prepareLampCombinedAggregate({
+      run,
+      controls: combinedControls!,
+      mock: body.mock === true,
+    });
+    if (!prepared.ok) {
+      return NextResponse.json(
+        { error: prepared.message, run: prepared.run },
+        { status: prepared.status }
+      );
+    }
+    return NextResponse.json(
+      {
+        ok: true,
+        created: true,
+        run: prepared.run,
+        planReviewRequired: prepared.plan.approval.status !== "approved",
+        costEstimate: estimateLampCombinedPlan(combinedControls!),
+        actualPlannerCostUsd: prepared.actualPlannerCostUsd,
         serverOwned: body.mock !== true,
       },
       { status: 201 }
@@ -3482,6 +4413,8 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   persisted.workflowId = current.workflowId;
   persisted.workflowMode = current.workflowMode;
   persisted.relightIntensity = current.relightIntensity;
+  persisted.combinedControls = current.combinedControls;
+  persisted.live = current.live;
   persisted.providerOperations = current.providerOperations;
   clearProviderTrustMarkers(persisted);
   stripIncomingUnverifiedRealArtifacts(persisted);
@@ -3501,6 +4434,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   let acceptsMockPlanApproval = false;
   let acceptsMockBeautifyPlanApproval = false;
   let acceptsMockIrisPlanApproval = false;
+  let acceptsMockCombinedPlanApproval = false;
   const mockApprovalInput = {
     hasSpendApproval: current.spendApproval !== undefined,
   };
@@ -3508,6 +4442,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     acceptsMockPlanApproval,
     acceptsMockBeautifyPlanApproval,
     acceptsMockIrisPlanApproval,
+    acceptsMockCombinedPlanApproval,
   ] = await Promise.all([
     canAcceptMockBackgroundPlanApproval({
       ...mockApprovalInput,
@@ -3524,6 +4459,11 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
       currentPlan: current.irisPlan,
       candidatePlan: candidate.irisPlan,
     }),
+    canAcceptMockCombinedPlanApproval({
+      ...mockApprovalInput,
+      currentPlan: current.combinedPlan,
+      candidatePlan: candidate.combinedPlan,
+    }),
   ]);
   if (acceptsMockPlanApproval) {
     // Provider-free mock plans still require a deliberate human approval.
@@ -3539,6 +4479,9 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   persisted.irisPlan = acceptsMockIrisPlanApproval
     ? candidate.irisPlan
     : current.irisPlan;
+  persisted.combinedPlan = acceptsMockCombinedPlanApproval
+    ? candidate.combinedPlan
+    : current.combinedPlan;
   persisted.cost = mergeCost(candidate.cost, current.cost);
   await storage.putRun(persisted);
   return NextResponse.json({ ok: true, id: candidate.id });
@@ -3582,6 +4525,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     backgroundEvaluations,
     beautifyEvaluations,
     irisEvaluations,
+    combinedRawEvaluations,
   ] = await Promise.all([
     storage.getRun(id),
     storage.getRunExecution(id),
@@ -3589,10 +4533,16 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     readLampBackgroundEvaluationProjection(storage, id),
     readLampBeautifyEvaluationProjection(storage, id),
     readLampIrisEvaluationProjection(storage, id),
+    readLampCombinedRawEvaluationProjection(storage, id),
   ]);
   if (!current) {
     return NextResponse.json({ error: "Run not found." }, { status: 404 });
   }
+  const combinedEvaluations = await prepareLampCombinedEvaluationProjection({
+    run: current,
+    execution,
+    raw: combinedRawEvaluations,
+  });
   const materialized = materializeServerResults(
     current,
     [],
@@ -3601,7 +4551,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     backgroundEvaluations,
     false,
     beautifyEvaluations,
-    irisEvaluations
+    irisEvaluations,
+    combinedEvaluations
   );
   const authoritativeExecution = materialized.serverExecution;
   const background = authoritativeExecution
@@ -3618,14 +4569,23 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     (authoritativeExecution
       ? isLampIrisExecution(authoritativeExecution)
       : isLampIrisRun(materialized));
-  const lamp = !background && !beautify && !iris &&
+  const combined =
+    !background &&
+    !beautify &&
+    !iris &&
+    (authoritativeExecution
+      ? authoritativeExecution.executionId.startsWith("lamp-combined:")
+      : persistedWorkflowMode(materialized) === "combined");
+  const lamp = !background && !beautify && !iris && !combined &&
     (authoritativeExecution
       ? isLampExecution(authoritativeExecution)
       : persistedWorkflowMode(materialized) === "lamp");
-  const twoPass = lamp || background || beautify || iris;
+  const twoPass = lamp || background || beautify || iris || combined;
   const grade = parseHumanGrade({
     value: body.humanGrade,
-    requiredEvalIds: background
+    requiredEvalIds: combined
+      ? LAMP_COMBINED_EVAL_IDS
+      : background
       ? LAMP_BACKGROUND_EVAL_IDS
       : beautify
         ? LAMP_BEAUTIFY_EVAL_IDS
@@ -3635,17 +4595,20 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
             ? LAMP_EVAL_IDS
             : ALL_EVAL_IDS,
     ...(lamp ? { acceptedLegacyEvalIds: ALL_EVAL_IDS } : {}),
+    ...(combined ? { requireCombinedTarget: true } : {}),
   });
   if (!grade) {
     return NextResponse.json({ error: "Invalid human grade." }, { status: 400 });
   }
   const lastIteration = materialized.iterations.at(-1);
   const selectedIndex = materialized.bestIterationIndex;
-  // Best-of-two settlement is a Lamp Iris-only field: the delivered take may
-  // be the Initial (1). Every other two-pass mode ships the Final (2).
-  const deliveredIteration = iris
-    ? authoritativeExecution?.deliveredIteration ?? 2
-    : 2;
+  // Iris settlement chooses automatically. Combined never does: the exact
+  // grade target is the human's permanent candidate choice.
+  const deliveredIteration = combined
+    ? grade.gradedIteration!
+    : iris
+      ? authoritativeExecution?.deliveredIteration ?? 2
+      : 2;
   const shipped = twoPass
     ? materialized.iterations.find(
         (iteration) => iteration.index === deliveredIteration
@@ -3655,15 +4618,62 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       : materialized.iterations.find(
           (iteration) => iteration.index === selectedIndex
         ) ?? materialized.iterations[selectedIndex] ?? lastIteration;
+  const combinedCandidate = combined
+    ? deliveredIteration === 1
+      ? combinedEvaluations.candidates.initial
+      : combinedEvaluations.candidates.final
+    : undefined;
+  if (
+    combined &&
+    current.humanGrade?.gradedIteration !== undefined &&
+    (current.humanGrade.gradedIteration !== grade.gradedIteration ||
+      current.humanGrade.gradedCandidateArtifactIdentityHash !==
+        grade.gradedCandidateArtifactIdentityHash)
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "This Combined run already has a permanent winner. Update that winner's grade instead of switching candidates.",
+      },
+      { status: 409 }
+    );
+  }
   const shippedOperation = materialized.providerOperations?.find(
     (operation) =>
       operation.iteration === shipped?.index &&
       operation.status === "completed" &&
-      operation.result?.videoUrl === shipped?.generatedVideo?.url
+      (combined ||
+        operation.result?.videoUrl === shipped?.generatedVideo?.url)
   );
-  const executionOwnsArtifact = authoritativeExecution
-    ? background
-      ? authoritativeExecution.status === "awaiting_review" &&
+  const executionOwnsArtifact = (() => {
+    if (!authoritativeExecution) return !combined;
+    if (combined) {
+      const artifact =
+        deliveredIteration === 1
+          ? combinedEvaluations.firstArtifact
+          : combinedEvaluations.finalArtifact;
+      return Boolean(
+        authoritativeExecution.status === "awaiting_review" &&
+          combinedEvaluations.bindingValid &&
+          combinedCandidate?.matchesJournals &&
+          combinedCandidate.eligible &&
+          combinedCandidate.artifactIdentityHash ===
+            grade.gradedCandidateArtifactIdentityHash &&
+          shipped?.index === deliveredIteration &&
+          shipped?.generatedVideo?.url === combinedCandidate.videoUrl &&
+          shippedOperation?.id ===
+            videoGenerationOperationId(deliveredIteration) &&
+          providerOperationMatchesLampCombinedExecution(
+            shippedOperation,
+            authoritativeExecution,
+            combinedEvaluations
+          ) &&
+          artifact
+      );
+    }
+    if (background) {
+      return (
+        authoritativeExecution.status === "awaiting_review" &&
         shipped?.index === 2 &&
         shippedOperation !== undefined &&
         shippedOperation.result?.audioVerified === true &&
@@ -3674,8 +4684,11 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           backgroundEvaluations
         ) &&
         lampBackgroundArtifact(backgroundEvaluations.final, 2) !== undefined
-      : lamp
-        ? authoritativeExecution.status === "awaiting_review" &&
+      );
+    }
+    if (lamp) {
+      return (
+        authoritativeExecution.status === "awaiting_review" &&
         shipped?.index === 2 &&
         shippedOperation !== undefined &&
         shippedOperation.result?.audioVerified === true &&
@@ -3685,8 +4698,11 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           lampEvaluations
         ) &&
         lampArtifact(lampEvaluations.final, 2) !== undefined
-        : beautify
-          ? authoritativeExecution.status === "awaiting_review" &&
+      );
+    }
+    if (beautify) {
+      return (
+        authoritativeExecution.status === "awaiting_review" &&
         shipped?.index === 2 &&
         shippedOperation !== undefined &&
         shippedOperation.result?.audioVerified === true &&
@@ -3697,8 +4713,11 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           beautifyEvaluations
         ) &&
         lampBeautifyArtifact(beautifyEvaluations.final, 2) !== undefined
-          : iris
-            ? authoritativeExecution.status === "awaiting_review" &&
+      );
+    }
+    if (iris) {
+      return (
+        authoritativeExecution.status === "awaiting_review" &&
         shipped?.index === deliveredIteration &&
         shippedOperation !== undefined &&
         shippedOperation.id === videoGenerationOperationId(deliveredIteration) &&
@@ -3712,24 +4731,25 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         lampIrisArtifact(irisEvaluations.final, 2) !== undefined &&
         (deliveredIteration !== 1 ||
           lampIrisArtifact(irisEvaluations.first, 1) !== undefined)
-            : authoritativeExecution.status === "awaiting_review" &&
-              shipped?.index === 1 &&
-              shippedOperation !== undefined &&
-              providerOperationMatchesExecution(
-                shippedOperation,
-                authoritativeExecution
-              )
-    : true;
+      );
+    }
+    return (
+      authoritativeExecution.status === "awaiting_review" &&
+      shipped?.index === 1 &&
+      shippedOperation !== undefined &&
+      providerOperationMatchesExecution(
+        shippedOperation,
+        authoritativeExecution
+      )
+    );
+  })();
   const approvedPlanNoOp =
     !authoritativeExecution &&
     isApprovedPlanNoOp(materialized) &&
     materialized.status === "awaiting-review" &&
     shipped?.generatedVideo?.url === materialized.originalVideo.url;
   const canonicalArtifact =
-    approvedPlanNoOp ||
-    (!authoritativeExecution &&
-      materialized.live !== true &&
-      shipped?.generatedVideo?.simulatedFilter !== undefined) ||
+    (!combined && approvedPlanNoOp) ||
     (shipped?.recoveredFromProviderOperation === true &&
       shipped.generatedVideo !== undefined &&
       shippedOperation !== undefined &&
@@ -3752,6 +4772,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       freshBackgroundEvaluations,
       freshBeautifyEvaluations,
       freshIrisEvaluations,
+      freshCombinedRawEvaluations,
     ] = await Promise.all([
       storage.listPaidOperationCosts(id),
       storage.getRunExecution(id),
@@ -3759,7 +4780,14 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       readLampBackgroundEvaluationProjection(storage, id),
       readLampBeautifyEvaluationProjection(storage, id),
       readLampIrisEvaluationProjection(storage, id),
+      readLampCombinedRawEvaluationProjection(storage, id),
     ]);
+    const freshCombinedEvaluations =
+      await prepareLampCombinedEvaluationProjection({
+        run: result.current!,
+        execution: freshExecution,
+        raw: freshCombinedRawEvaluations,
+      });
     const conflictRun = materializeServerResults(
       result.current!,
       paidCosts,
@@ -3768,7 +4796,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       freshBackgroundEvaluations,
       false,
       freshBeautifyEvaluations,
-      freshIrisEvaluations
+      freshIrisEvaluations,
+      freshCombinedEvaluations
     );
     return NextResponse.json(
       {
@@ -3788,6 +4817,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     freshBackgroundEvaluations,
     freshBeautifyEvaluations,
     freshIrisEvaluations,
+    freshCombinedRawEvaluations,
   ] = await Promise.all([
     storage.listPaidOperationCosts(id),
     storage.getRunExecution(id),
@@ -3795,7 +4825,14 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     readLampBackgroundEvaluationProjection(storage, id),
     readLampBeautifyEvaluationProjection(storage, id),
     readLampIrisEvaluationProjection(storage, id),
+    readLampCombinedRawEvaluationProjection(storage, id),
   ]);
+  const freshCombinedEvaluations =
+    await prepareLampCombinedEvaluationProjection({
+      run: result.run,
+      execution: freshExecution,
+      raw: freshCombinedRawEvaluations,
+    });
   const savedRun = materializeServerResults(
     result.run,
     paidCosts,
@@ -3804,7 +4841,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     freshBackgroundEvaluations,
     false,
     freshBeautifyEvaluations,
-    freshIrisEvaluations
+    freshIrisEvaluations,
+    freshCombinedEvaluations
   );
   return NextResponse.json(
     { ok: true, run: compactRun(savedRun) },
@@ -3832,7 +4870,11 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
         (execution.status === "queued" || execution.status === "running")
           ? await workflowRunLiveness(execution.workflowRunId)
           : null;
-      if (liveness === "alive" || liveness === "unknown") {
+      if (
+        liveness === "alive" ||
+        liveness === "completed" ||
+        liveness === "unknown"
+      ) {
         return NextResponse.json(
           {
             code: "WORKFLOW_ALIVE",

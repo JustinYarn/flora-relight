@@ -5,7 +5,11 @@ import Link from "next/link";
 import type { BatchExecutionSummary, GradeClipDraft, Run } from "@/lib/types";
 import { useAppStore } from "@/lib/store";
 import { EmptyState } from "@/components/ui";
-import { finalLampIteration, isGradeable } from "@/components/grade/derive";
+import {
+  finalLampIteration,
+  isGradeable,
+  isGradeableLampCombinedCandidate,
+} from "@/components/grade/derive";
 import { ClipGrader } from "@/components/grade/ClipGrader";
 import { ResultsView } from "@/components/grade/ResultsView";
 import { useGradeDraft } from "@/components/grade/useGradeDraft";
@@ -22,7 +26,7 @@ import { mergeGradeFeedRuns } from "@/components/grade/run-feed";
  *   Results     — shows saved human grades and, only when they exist, the
  *                 automated comparisons useful for rubric calibration.
  *
- * The queue admits only provider-journal-backed artifacts. Final grades use a
+ * The queue admits only provider-journal-backed artifacts. Saved grades use a
  * dedicated atomic API write instead of the browser's whole-run sync path.
  */
 
@@ -60,8 +64,17 @@ function ModeTabs({
 }
 
 export function GradeView(
-  { requestedRunId }: { requestedRunId?: string } = {}
+  {
+    requestedRunId,
+    requestedCombinedCandidateIteration,
+  }: {
+    requestedRunId?: string;
+    requestedCombinedCandidateIteration?: 1 | 2;
+  } = {}
 ) {
+  const requestedSelectionKey = requestedRunId
+    ? `${requestedRunId}:${requestedCombinedCandidateIteration ?? "delivered"}`
+    : undefined;
   const runs = useAppStore((s) => s.runs);
   const batchExecutions = useAppStore((s) => s.batchExecutions);
   const hydrated = useAppStore((s) => s.hydrated);
@@ -70,13 +83,38 @@ export function GradeView(
     requestedRunId ?? null
   );
   const selectedRunIdRef = useRef<string | null>(requestedRunId ?? null);
-  const appliedRequestedRunId = useRef<string | null>(null);
-  const lastRequestedRunId = useRef<string | undefined>(requestedRunId);
+  const appliedRequestedSelection = useRef<string | null>(null);
+  const lastRequestedSelection = useRef<string | undefined>(
+    requestedSelectionKey
+  );
   const [feedStatus, setFeedStatus] = useState<
     "loading" | "ready" | "error"
   >("loading");
   const { draft, ready: draftReady, saveState, updateDraft, retry } =
     useGradeDraft();
+  const combinedDraftTargetKey = useMemo(() => {
+    const targets = Object.entries(draft?.clips ?? {}).flatMap(
+      ([runId, clip]) =>
+        clip.combinedCandidateIteration
+          ? [[runId, clip.combinedCandidateIteration] as const]
+          : []
+    );
+    if (
+      requestedRunId &&
+      requestedCombinedCandidateIteration
+    ) {
+      const existing = targets.findIndex(([runId]) => runId === requestedRunId);
+      if (existing >= 0) targets.splice(existing, 1);
+      targets.push([requestedRunId, requestedCombinedCandidateIteration]);
+    }
+    return JSON.stringify(
+      targets.sort(([left], [right]) => left.localeCompare(right))
+    );
+  }, [
+    draft?.clips,
+    requestedCombinedCandidateIteration,
+    requestedRunId,
+  ]);
   const activeServerRunKey = useMemo(
     () =>
       runs
@@ -110,7 +148,7 @@ export function GradeView(
   // Focus also discovers work created by another tab/device.
   useEffect(() => {
     if (!hydrated) return;
-    if (lastRequestedRunId.current !== requestedRunId) {
+    if (lastRequestedSelection.current !== requestedSelectionKey) {
       setFeedStatus("loading");
     }
     const controller = new AbortController();
@@ -149,8 +187,16 @@ export function GradeView(
       try {
         for (let page = 0; page < 20; page += 1) {
           const url = cursor
-            ? `/api/runs?limit=25&hideFinalEvaluation=1&cursor=${encodeURIComponent(cursor)}`
-            : "/api/runs?limit=25&hideFinalEvaluation=1";
+            ? `/api/runs?limit=25&hideFinalEvaluation=1${
+                requestedCombinedCandidateIteration
+                  ? `&combinedCandidate=${requestedCombinedCandidateIteration}`
+                  : ""
+              }&cursor=${encodeURIComponent(cursor)}`
+            : `/api/runs?limit=25&hideFinalEvaluation=1${
+                requestedCombinedCandidateIteration
+                  ? `&combinedCandidate=${requestedCombinedCandidateIteration}`
+                  : ""
+              }`;
           const response = await fetch(url, {
             cache: "no-store",
             signal: controller.signal,
@@ -182,6 +228,46 @@ export function GradeView(
           }
           if (next === cursor) break;
           cursor = next;
+        }
+        // A Combined blind grade is target-bound. Re-read every persisted
+        // candidate draft directly so a bare /grade resume reconstructs the
+        // exact media projection without admitting every Combined run.
+        const combinedTargets = JSON.parse(combinedDraftTargetKey) as Array<
+          [string, 1 | 2]
+        >;
+        if (combinedTargets.length > 0) {
+          const targeted = await Promise.allSettled(
+            combinedTargets.map(async ([runId, candidate]) => {
+              const response = await fetch(
+                `/api/runs?id=${encodeURIComponent(runId)}&hideFinalEvaluation=1&combinedCandidate=${candidate}`,
+                { cache: "no-store", signal: controller.signal }
+              );
+              if (!response.ok) {
+                throw new Error(
+                  `Combined candidate refresh failed (${response.status}).`
+                );
+              }
+              const payload = (await response.json()) as { run?: Run };
+              if (!payload.run || payload.run.id !== runId) {
+                throw new Error("Combined candidate refresh returned the wrong run.");
+              }
+              return payload.run;
+            })
+          );
+          const targetedRuns = targeted.flatMap((result) =>
+            result.status === "fulfilled" ? [result.value] : []
+          );
+          if (targetedRuns.length > 0) {
+            const targetedById = new Map(
+              targetedRuns.map((run) => [run.id, run] as const)
+            );
+            for (let index = 0; index < verifiedRuns.length; index += 1) {
+              verifiedRuns[index] =
+                targetedById.get(verifiedRuns[index].id) ?? verifiedRuns[index];
+              targetedById.delete(verifiedRuns[index].id);
+            }
+            verifiedRuns.push(...targetedById.values());
+          }
         }
         if (stopped || controller.signal.aborted) return;
 
@@ -269,9 +355,17 @@ export function GradeView(
       document.removeEventListener("visibilitychange", refreshVisible);
       window.removeEventListener("focus", refreshVisible);
     };
-  }, [activeBatchExecutionKey, activeServerRunKey, hydrated, requestedRunId]);
+  }, [
+    activeBatchExecutionKey,
+    activeServerRunKey,
+    combinedDraftTargetKey,
+    hydrated,
+    requestedCombinedCandidateIteration,
+    requestedRunId,
+    requestedSelectionKey,
+  ]);
 
-  // Keep the grading queue live while durable Lamp finals finish. The broad
+  // Keep the grading queue live while durable Lamp outputs finish. The broad
   // refresh above discovers all persisted runs once; this focused loop then
   // polls only active execution ids and stops as soon as each cut settles.
   useEffect(() => {
@@ -359,8 +453,26 @@ export function GradeView(
   }, [activeServerRunKey, hydrated]);
 
   const gradeable = useMemo(
-    () => runs.filter(isGradeable).sort((a, b) => b.createdAt - a.createdAt),
-    [runs]
+    () => {
+      const canonical = runs.filter(isGradeable);
+      const combinedTargets = new Map(
+        (JSON.parse(combinedDraftTargetKey) as Array<[string, 1 | 2]>)
+      );
+      const targetedCombined = runs.filter((run) => {
+        const candidate = combinedTargets.get(run.id);
+        return (
+          candidate !== undefined &&
+          run.humanGrade === undefined &&
+          isGradeableLampCombinedCandidate(run, candidate)
+        );
+      });
+      return [
+        ...targetedCombined.filter(
+          (run) => !canonical.some((candidate) => candidate.id === run.id)
+        ),
+        ...canonical,
+      ].sort((a, b) => b.createdAt - a.createdAt);
+    }, [combinedDraftTargetKey, runs]
   );
   const graded = useMemo(
     () => gradeable.filter((r) => r.humanGrade),
@@ -405,13 +517,28 @@ export function GradeView(
     return [ordered[currentIndex], ...ordered.filter((_, i) => i !== currentIndex)];
   }, [draft?.currentRunId, draft?.skippedRunIds, selectedRunId, ungraded]);
   const current = queue[0];
+  const persistedCurrentDraft = current ? draft?.clips[current.id] : undefined;
+  const currentCombinedCandidateIteration =
+    current?.id === requestedRunId && requestedCombinedCandidateIteration
+      ? requestedCombinedCandidateIteration
+      : persistedCurrentDraft?.combinedCandidateIteration;
+  const currentDraft = currentCombinedCandidateIteration
+    ? persistedCurrentDraft?.combinedCandidateIteration ===
+      currentCombinedCandidateIteration
+      ? persistedCurrentDraft
+      : {
+          ...emptyClipDraft(),
+          combinedCandidateIteration: currentCombinedCandidateIteration,
+        }
+    : (persistedCurrentDraft ?? emptyClipDraft());
   const requestedRun = requestedRunId
     ? runs.find((run) => run.id === requestedRunId)
     : undefined;
   const requestedUngraded = requestedRunId
     ? ungraded.find((run) => run.id === requestedRunId)
     : undefined;
-  const requestedRunChanged = lastRequestedRunId.current !== requestedRunId;
+  const requestedRunChanged =
+    lastRequestedSelection.current !== requestedSelectionKey;
 
   useEffect(() => {
     selectedRunIdRef.current = selectedRunId;
@@ -420,32 +547,60 @@ export function GradeView(
   // A deep link selects once. Subsequent Skip/Save choices own navigation and
   // are not pulled back to the original query-string run.
   useEffect(() => {
-    if (lastRequestedRunId.current !== requestedRunId) {
-      lastRequestedRunId.current = requestedRunId;
-      appliedRequestedRunId.current = null;
+    if (lastRequestedSelection.current !== requestedSelectionKey) {
+      lastRequestedSelection.current = requestedSelectionKey;
+      appliedRequestedSelection.current = null;
     }
     if (
       !draftReady ||
       !requestedRunId ||
-      appliedRequestedRunId.current === requestedRunId ||
+      appliedRequestedSelection.current === requestedSelectionKey ||
       !ungraded.some((run) => run.id === requestedRunId)
     ) {
       return;
     }
-    appliedRequestedRunId.current = requestedRunId;
+    appliedRequestedSelection.current = requestedSelectionKey ?? null;
     selectedRunIdRef.current = requestedRunId;
     setSelectedRunId(requestedRunId);
     updateDraft(
-      (workspace) => ({
-        ...workspace,
-        currentRunId: requestedRunId,
-        skippedRunIds: workspace.skippedRunIds.filter(
-          (id) => id !== requestedRunId
-        ),
-      }),
+      (workspace) => {
+        const currentClip = workspace.clips[requestedRunId];
+        const combinedClip = requestedCombinedCandidateIteration
+          ? currentClip?.combinedCandidateIteration ===
+            requestedCombinedCandidateIteration
+            ? currentClip
+            : {
+                ...emptyClipDraft(),
+                combinedCandidateIteration:
+                  requestedCombinedCandidateIteration,
+              }
+          : currentClip;
+        return {
+          ...workspace,
+          ...(combinedClip
+            ? {
+                clips: {
+                  ...workspace.clips,
+                  [requestedRunId]: combinedClip,
+                },
+              }
+            : {}),
+          currentRunId: requestedRunId,
+          skippedRunIds: workspace.skippedRunIds.filter(
+            (id) => id !== requestedRunId
+          ),
+        };
+      },
       { immediate: true }
     );
-  }, [draftReady, requestedRunId, ungraded, updateDraft]);
+  }, [
+    draftReady,
+    requestedCombinedCandidateIteration,
+    requestedRunId,
+    requestedSelectionKey,
+    ungraded,
+    updateDraft,
+  ]);
 
   const updateClipDraft = useCallback(
     (runId: string, update: (current: GradeClipDraft) => GradeClipDraft) => {
@@ -558,10 +713,10 @@ export function GradeView(
         <h1 className="text-balance text-base font-semibold text-ink">Grade</h1>
         <p className="text-pretty text-2xs text-faint">
           {mode === "grade"
-            ? "grade every active rubric row by eye — each Lamp mode shows its own visual rows plus source audio, and any saved Final AI evaluation starts hidden until you reveal it"
+            ? "grade every active rubric row by eye — each Lamp mode shows its own visual rows plus source audio, and any saved AI evaluation starts hidden until you reveal it"
             : hasAutomatedResults
-              ? "compare each final video first, then use the aggregate view to calibrate the method"
-              : "your saved human grades — no final AI results are available to compare"}
+              ? "compare each graded video first, then use the aggregate view to calibrate the method"
+              : "your saved human grades — no AI results are available to compare"}
         </p>
         <span className="ml-auto flex items-center gap-3">
           {mode === "grade" ? (
@@ -579,7 +734,7 @@ export function GradeView(
         </p>
       ) : mode === "grade" ? (
         requestedRunId &&
-        appliedRequestedRunId.current !== requestedRunId &&
+        appliedRequestedSelection.current !== requestedSelectionKey &&
         !requestedUngraded ? (
           requestedRunChanged || feedStatus === "loading" ? (
             <p className="py-10 text-center text-2xs text-faint">
@@ -638,7 +793,7 @@ export function GradeView(
             }
             hint={
               inFlightCount > 0
-                ? "Finished outputs land here automatically when their server-verified Final is ready for human grading."
+                ? "Finished outputs land here automatically when their server-verified grading target is ready."
                 : runs.length === 0
                   ? "This workspace has no runs yet. Runs are graded where they were created — the deployed app and a local studio keep separate libraries, so a batch run locally will not appear here."
                   : "Finish any Lamp workflow first. Generated deliveries arrive with their saved AI evaluation hidden; an approved exceptional no-op arrives as the unchanged source without one."
@@ -679,12 +834,29 @@ export function GradeView(
               </span>
             </div>
             <ClipGrader
-              key={current.id}
+              key={`${current.id}:${currentCombinedCandidateIteration ?? "delivered"}`}
               run={current}
+              combinedCandidateIteration={
+                currentCombinedCandidateIteration
+              }
               remaining={queue.length}
-              draft={draft?.clips[current.id] ?? emptyClipDraft()}
+              draft={currentDraft}
               draftSaveState={saveState}
-              onDraftChange={(update) => updateClipDraft(current.id, update)}
+              onDraftChange={(update) =>
+                updateClipDraft(current.id, (saved) =>
+                  update(
+                    currentCombinedCandidateIteration &&
+                      saved.combinedCandidateIteration !==
+                        currentCombinedCandidateIteration
+                      ? {
+                          ...emptyClipDraft(),
+                          combinedCandidateIteration:
+                            currentCombinedCandidateIteration,
+                        }
+                      : saved
+                  )
+                )
+              }
               onRetryDraftSave={retry}
               onSubmitted={(runId) => {
                 const nextRunId = queue.find((run) => run.id !== runId)?.id;

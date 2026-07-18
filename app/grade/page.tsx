@@ -15,11 +15,25 @@ export const metadata: Metadata = {
 export default async function GradePage({
   searchParams,
 }: {
-  searchParams: Promise<{ run?: string | string[] }>;
+  searchParams: Promise<{
+    run?: string | string[];
+    candidate?: string | string[];
+  }>;
 }) {
   const params = await searchParams;
   const requestedRunId =
     typeof params.run === "string" ? params.run : undefined;
+  const requestedCombinedCandidateIteration =
+    params.candidate === "1" || params.candidate === "2"
+      ? (Number(params.candidate) as 1 | 2)
+      : undefined;
 
-  return <GradeView requestedRunId={requestedRunId} />;
+  return (
+    <GradeView
+      requestedRunId={requestedRunId}
+      requestedCombinedCandidateIteration={
+        requestedCombinedCandidateIteration
+      }
+    />
+  );
 }

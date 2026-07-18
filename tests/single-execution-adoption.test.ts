@@ -68,3 +68,19 @@ test("approved generation plans remain eligible for durable adoption", () => {
     assert.equal(needsSingleExecutionAdoption(run), true);
   }
 });
+
+test("Combined runs never enter the unsupported generic recovery path", () => {
+  const run = {
+    ...fixture("background"),
+    id: "run-combined",
+    workflowId: "lamp-combined-v1",
+    workflowMode: "combined",
+    backgroundCleanupPlan: undefined,
+    combinedPlan: {
+      runId: "run-combined",
+      approval: { status: "approved", approvedAt: 2, approvedBy: "human" },
+    },
+  } as Run;
+
+  assert.equal(needsSingleExecutionAdoption(run), false);
+});

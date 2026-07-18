@@ -9,6 +9,31 @@ import { PROVIDER_LOST_INTERACTION_MARKER } from "../lost-interaction.ts";
 
 export type DeadWorkflowState = "missing" | "failed" | "cancelled";
 
+export type WorkflowRunLiveness =
+  | DeadWorkflowState
+  | "alive"
+  | "completed"
+  | "unknown";
+
+export type ObservedWorkflowRunStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/** Keep terminal completion distinct from a Workflow that may still write. */
+export function classifyWorkflowRunLiveness(
+  exists: boolean,
+  status: ObservedWorkflowRunStatus
+): Exclude<WorkflowRunLiveness, "unknown"> {
+  if (!exists) return "missing";
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  if (status === "cancelled") return "cancelled";
+  return "alive";
+}
+
 function describeState(state: DeadWorkflowState): string {
   return state === "missing" ? "no longer exists" : `was ${state}`;
 }

@@ -45,8 +45,10 @@ export function LostGenerationRecovery({ run }: { run: Run }) {
   }
 
   const workflowMode = workflowModeFromExecutionId(execution.executionId);
+  const combinedRecoveryUnsupported = workflowMode === "combined";
   const lostGeneration =
     workflowMode !== "flora" &&
+    !combinedRecoveryUnsupported &&
     isProviderLostInteractionError(execution.error);
   // Prefer the canonical journal entry; fall back to the archived :lost:
   // entry so an acknowledgment that crashed between its two durable writes
@@ -173,8 +175,9 @@ export function LostGenerationRecovery({ run }: { run: Run }) {
         </>
       ) : (
         <p className="text-2xs text-faint">
-          Inspect the provider journal before any re-run; nothing is re-billed
-          automatically.
+          {combinedRecoveryUnsupported
+            ? "Combined preserves its aggregate plan and both candidate journal sets, but browser recovery is intentionally unavailable. Inspect the journals before any operator action; no provider work is replayed automatically."
+            : "Inspect the provider journal before any re-run; nothing is re-billed automatically."}
         </p>
       )}
     </Card>

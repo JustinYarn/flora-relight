@@ -382,7 +382,13 @@ export interface WorkflowDefinition {
  * interpreted from their workflow id so existing Flora and Lamp runs keep
  * their original execution semantics after Lamp Background is introduced.
  */
-export type WorkflowMode = "flora" | "lamp" | "background" | "beautify" | "iris";
+export type WorkflowMode =
+  | "flora"
+  | "lamp"
+  | "background"
+  | "beautify"
+  | "iris"
+  | "combined";
 
 export type NodeRunStatus =
   | "idle"
@@ -475,6 +481,8 @@ export interface RunExecution {
   renderedPrompt: string;
   /** Plan-based modes only: completed planner journal bound to this execution. */
   planOperationId?: string;
+  /** Lamp Combined only: exact ordered journals for every enabled planner. */
+  combinedPlanOperationIds?: string[];
   /** Plan-based modes only: SHA-256 of the exact human-approved plan content. */
   approvedPlanHash?: string;
   /** Lamp relight-strength target bound into renderedPrompt; absent on legacy records. */
@@ -484,6 +492,14 @@ export interface RunExecution {
    * legitimate silent-source skip both journal here; absence never means pass.
    */
   candidateSyncVerdict?: import("./v2-sync").V2CandidateSyncVerdict;
+  /**
+   * Lamp Combined only: explicit, append-only eligibility evidence for both
+   * human-selectable takes. Final may append one exact Lipsync repair proof.
+   */
+  combinedCandidateReceipts?: {
+    initial?: import("./lamp-combined-candidate").LampCombinedCandidateQualificationReceipt;
+    final?: import("./lamp-combined-candidate").LampCombinedCandidateQualificationReceipt;
+  };
   source: "single" | "batch";
   batchId?: string;
   status: RunExecutionStatus;
@@ -537,6 +553,10 @@ export interface HumanGrade {
   /** The gut call: would you ship this cut as-is? */
   shipIt: boolean;
   overallNote?: string;
+  /** Combined only: the human-selected take this grade actually judged. */
+  gradedIteration?: 1 | 2;
+  /** Exact provider/repaired artifact identity selected for Combined grading. */
+  gradedCandidateArtifactIdentityHash?: string;
 }
 
 export interface VideoGenerationOperationResult {
@@ -652,7 +672,9 @@ export interface SpendApproval {
     | "beautify_plan"
     | "beautify_two_pass"
     | "iris_plan"
-    | "iris_two_pass";
+    | "iris_two_pass"
+    | "combined_plan"
+    | "combined_two_pass";
   batchId?: string;
   /** Canonical durable ingest identity and facts this approval was priced for. */
   runId: string;
@@ -664,6 +686,8 @@ export interface SpendApproval {
   maxUsd: number;
   /** Zero for planner-only approval; otherwise the generation-attempt ceiling. */
   maxIterations: number;
+  /** Exact Combined control set covered by this approval, when applicable. */
+  combinedControls?: import("./lamp-combined").LampCombinedControls;
 }
 
 /** One in-progress answer in the grading workspace. */
@@ -678,6 +702,8 @@ export interface GradeClipDraft {
   answers: Record<string, GradeDraftAnswer>;
   shipIt?: boolean;
   overallNote: string;
+  /** Combined only: durable pre-grade winner choice for this exact draft. */
+  combinedCandidateIteration?: 1 | 2;
 }
 
 /**
@@ -712,6 +738,8 @@ export interface Run {
    * Missing legacy values resolve to the historical Lamp default.
    */
   relightIntensity?: number;
+  /** Lamp Combined's run-bound controls, separate from relight intensity. */
+  combinedControls?: import("./lamp-combined").LampCombinedControls;
   createdAt: number;
   originalVideo: VideoAsset;
   status: RunStatus;
@@ -732,6 +760,8 @@ export interface Run {
   backgroundCleanupPlan?: import("./lamp-background").LampBackgroundCleanupPlan;
   beautifyPlan?: import("./lamp-beautify").LampBeautifyPlan;
   irisPlan?: import("./lamp-iris").LampIrisPlan;
+  /** One aggregate draft/approval for the Combined product. */
+  combinedPlan?: import("./lamp-combined").LampCombinedPlan;
   iterations: Iteration[];
   /** Legacy best-of tracking. Lamp leaves this unset because v2 is always Final. */
   bestIterationIndex?: number;

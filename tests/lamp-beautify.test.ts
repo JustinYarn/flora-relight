@@ -24,6 +24,10 @@ import {
   renderLampBeautifyHolisticEvaluatorPrompt,
 } from "../lib/lamp-beautify-evaluation.ts";
 import {
+  persistedLampBeautifyInitialExecutionPromptForRun,
+  persistedLampBeautifyPromptForRun,
+} from "../lib/lamp-beautify-read.ts";
+import {
   compileLampBeautifyFinalPrompt,
   compileLampBeautifyFinalPromptCandidates,
   initialLampBeautifyMegaPrompt,
@@ -757,6 +761,34 @@ test("hair-tidy era runs stay valid through the frozen first generation", () => 
   // still prove the binding.
   assert.throws(() => initialLampBeautifyMegaPrompt(plan), /no longer offered/);
   assert.equal(isPersistedInitialLampBeautifyPrompt(plan, legacyV1), true);
+  assert.equal(
+    persistedLampBeautifyPromptForRun({
+      plan,
+      version: 1,
+      rendered: legacyV1,
+    }).rendered,
+    legacyV1,
+    "read recovery must project saved bytes without invoking the retired current renderer"
+  );
+
+  // Before a generation completes there is no completed provider operation for
+  // the runs route to recover. Its queued/in-flight/reconcile projection must
+  // read the execution's exact bytes directly instead of calling the retired
+  // current write compiler and returning a 500.
+  for (const status of ["queued", "running", "reconcile_required"] as const) {
+    const projected = persistedLampBeautifyInitialExecutionPromptForRun({
+      plan,
+      execution: {
+        executionId: "lamp-beautify:run-retired-read",
+        renderedPrompt: legacyV1,
+      },
+    });
+    assert.equal(
+      projected.rendered,
+      legacyV1,
+      `${status} execution reads must preserve the exact frozen Initial bytes`
+    );
+  }
 
   // The v2 compiler — replayed on every read of an old run — accepts them.
   const artifact = buildLampBeautifyEvaluationArtifact({

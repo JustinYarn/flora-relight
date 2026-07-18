@@ -20,11 +20,13 @@ import {
   perCheckStats,
   shipRatePct,
 } from "@/components/grade/derive";
+import { combinedWinnerResultCopy } from "@/components/grade/result-copy";
 
 /*
  * "Compare with AI" — the calibration read-out over every graded clip.
- * The AI side of every number is the final v2 evaluation. Human answers stay
- * blind until save, then this view reveals both sides video by video.
+ * The AI side of every number is the evaluation for the exact artifact the
+ * human graded. Human answers stay blind until save, then this view reveals
+ * both sides video by video.
  */
 
 function Stat({
@@ -68,6 +70,7 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
   const relit = finalLampVideo(run);
   // Lamp Iris best-of-two delivered the Initial take; label it honestly.
   const bestOfTwoInitial = deliveredInitialBestOfTwo(run);
+  const combinedCopy = combinedWinnerResultCopy(run, final?.index);
   const aiResults = final?.evalResults ?? [];
   const definitions = evalDefsForRun(run);
   const definitionIds = new Set(definitions.map((definition) => definition.id));
@@ -89,9 +92,10 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
           {run.originalVideo.label}
         </span>
         <span className="text-2xs tabular-nums text-muted">
-          {bestOfTwoInitial
-            ? `Delivered v${final?.index ?? 1} · best of two`
-            : `Final v${final?.index ?? 2}`}{" "}
+          {combinedCopy?.summaryLabel ??
+            (bestOfTwoInitial
+              ? `Delivered v${final?.index ?? 1} · best of two`
+              : `Final v${final?.index ?? 2}`)}{" "}
           · {availableCount} of {definitions.length} AI results
         </span>
         <span
@@ -114,9 +118,10 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
             relit={relit}
             audible="relit"
             relitLabel={
-              bestOfTwoInitial
+              combinedCopy?.playerLabel ??
+              (bestOfTwoInitial
                 ? `DELIVERED VIDEO · v${final?.index ?? 1} · BEST OF TWO`
-                : `FINAL VIDEO · v${final?.index ?? 2}`
+                : `FINAL VIDEO · v${final?.index ?? 2}`)
             }
           />
         </div>
@@ -127,7 +132,7 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
           <div className="grid grid-cols-[minmax(160px,1fr)_minmax(145px,0.8fr)_minmax(170px,0.9fr)_64px] gap-x-4 border-b border-edge pb-2 text-2xs uppercase tracking-[0.14em] text-faint">
           <span>check</span>
           <span>your grade</span>
-          <span>final AI</span>
+          <span>{combinedCopy?.aiColumnLabel ?? "final AI"}</span>
           <span className="text-right">gap</span>
         </div>
           <div className="divide-y divide-edge">
@@ -177,7 +182,7 @@ function VideoComparison({ run, defaultOpen }: { run: Run; defaultOpen: boolean 
               href={`/runs/${run.id}`}
               className="inline-flex min-h-10 items-center text-xs text-accent transition-[transform,filter] duration-150 ease-out hover:brightness-110 active:scale-[0.96]"
             >
-              Review final video →
+              {combinedCopy?.reviewLabel ?? "Review final video →"}
             </Link>
           </div>
         </div>
@@ -225,14 +230,14 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         />
         <Stat
           value={pct(aiPassRate)}
-          label="final AI pass rate"
+          label="delivered AI pass rate"
           title="among videos with a complete delivered evaluation, the share that passed their method's automated gate"
         />
       </div>
 
       {!hasComparisons ? (
         <p className="border-b border-edge py-4 text-sm text-muted">
-          Your human responses are saved, but these final videos have no
+          Your human responses are saved, but these delivered videos have no
           returned AI results to compare with them.
         </p>
       ) : null}
@@ -241,9 +246,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         <SectionTitle
           right={
             <span className="text-2xs text-faint">
-              {gradedRuns.some(deliveredInitialBestOfTwo)
-                ? "human grade vs the delivered take's AI evaluation"
-                : "human grade vs final v2 AI evaluation"}
+              human grade vs the delivered take&apos;s AI evaluation
             </span>
           }
         >
@@ -311,7 +314,7 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
                     {def?.name ?? s.evalId}
                   </span>
                   <span className="flex-1 text-2xs text-faint">
-                    no final AI result was returned for a graded video
+                    no AI result was returned for a graded video
                   </span>
                 </div>
               );

@@ -45,6 +45,7 @@ const COMPACT_PLAN_WORKFLOW_IDS = new Set([
   "lamp-background-v1",
   "lamp-beautify-v1",
   "lamp-iris-v1",
+  "lamp-combined-v1",
 ]);
 
 function isCompactPlanWorkflow(workflow: WorkflowDefinition): boolean {

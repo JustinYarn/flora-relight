@@ -365,7 +365,11 @@ export async function enqueueBatchExecution(
     // writing keeps its binding.
     if (execution.workflowRunId !== undefined) {
       const liveness = await workflowRunLiveness(execution.workflowRunId);
-      if (liveness === "alive" || liveness === "unknown") {
+      if (
+        liveness === "alive" ||
+        liveness === "completed" ||
+        liveness === "unknown"
+      ) {
         return { execution, enqueued: false };
       }
       const released = await storage.advanceBatchExecution(

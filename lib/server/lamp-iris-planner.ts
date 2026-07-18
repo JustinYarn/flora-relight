@@ -21,6 +21,7 @@ import {
   type LampIrisPlan,
 } from "@/lib/lamp-iris";
 import { lampIrisPlanOperationId } from "@/lib/lamp-iris-operations";
+import { LAMP_COMBINED_IRIS_PLAN_OPERATION_ID } from "@/lib/lamp-combined-operations";
 import {
   beginPaidOperation,
   completePaidOperation,
@@ -314,15 +315,24 @@ export function isLampIrisPlanArtifact(
 }
 
 export async function runLampIrisPlanner(
-  runId: string
+  runId: string,
+  combined?: {
+    workflowMode: "combined";
+    operationId: typeof LAMP_COMBINED_IRIS_PLAN_OPERATION_ID;
+  }
 ): Promise<LampIrisPlanArtifact> {
   const storage = getStorage();
   const run = await storage.getRun(runId);
   if (!run) throw new Error("Run not found for Lamp Iris planning.");
-  if (runWorkflowMode(run) !== "iris") {
-    throw new Error("Only Lamp Iris runs may create a gaze-correction plan.");
+  const expectedMode = combined?.workflowMode ?? "iris";
+  if (runWorkflowMode(run) !== expectedMode) {
+    throw new Error(
+      combined
+        ? "Only Lamp Combined runs may create this Combined gaze subplan."
+        : "Only Lamp Iris runs may create a gaze-correction plan."
+    );
   }
-  const operationId = lampIrisPlanOperationId();
+  const operationId = combined?.operationId ?? lampIrisPlanOperationId();
   const claim = await beginPaidOperation({
     run,
     id: operationId,

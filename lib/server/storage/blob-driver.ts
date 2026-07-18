@@ -111,6 +111,10 @@ import type {
   RunPageCursor,
   StorageDriver,
 } from "./types";
+import {
+  lampCombinedApprovalDisposition,
+  validateLampCombinedApprovalMutation,
+} from "./lamp-combined-approval";
 
 /** One persisted media file: the blob URL plus what statMedia() reports. */
 interface BlobMediaEntry {
@@ -806,6 +810,115 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
         RETURNING id
       `) as Array<{ id: string }>;
       if (!rows[0]) throw new Error(`Run ${run.id} was permanently deleted`);
+    },
+
+    async approveLampCombinedRun(runId, input) {
+      await ensureSchema();
+      const id = assertRunId(runId);
+      const validated = await validateLampCombinedApprovalMutation(id, input);
+      const expectedPlanJson = JSON.stringify(validated.expectedDraftPlan);
+      const approvedPlanJson = JSON.stringify(validated.approvedPlan);
+      const approvalJson = JSON.stringify(validated.spendApproval);
+      const controlsJson = JSON.stringify(validated.approvedPlan.controls);
+      const rows = (await sql`
+        UPDATE runs
+        SET data =
+          (data - 'combinedPlan' - 'spendApproval')
+          || jsonb_build_object(
+               'combinedPlan', ${approvedPlanJson}::jsonb,
+               'spendApproval', ${approvalJson}::jsonb
+             )
+        WHERE id = ${id}
+          AND data IS NOT NULL
+          AND deleted_at IS NULL
+          AND (
+            data->>'workflowMode' = 'combined'
+            OR data->>'workflowId' = 'lamp-combined-v1'
+          )
+          AND data->'combinedPlan' = ${expectedPlanJson}::jsonb
+          AND data->'combinedControls' = ${controlsJson}::jsonb
+          AND data->'originalVideo'->>'url' = ${validated.spendApproval.sourceUrl}
+          AND data->'originalVideo'->'durationSec' =
+            to_jsonb(${validated.spendApproval.durationSec}::double precision)
+        RETURNING data
+      `) as Array<{ data: Run }>;
+      if (rows[0]) {
+        return {
+          ok: true as const,
+          run: await projectRunMedia(rows[0].data),
+        };
+      }
+      const current = await this.getRun(id);
+      const disposition = current
+        ? await lampCombinedApprovalDisposition(current, validated)
+        : "conflict";
+      if (current && disposition === "already_approved") {
+        return { ok: true as const, run: current };
+      }
+      if (current && disposition === "renew_approval") {
+        const currentPlanJson = JSON.stringify(validated.approvedPlan);
+        const renewalRows = current.spendApproval
+          ? ((await sql`
+              UPDATE runs
+              SET data =
+                (data - 'spendApproval')
+                || jsonb_build_object(
+                     'spendApproval', ${approvalJson}::jsonb
+                   )
+              WHERE id = ${id}
+                AND data IS NOT NULL
+                AND deleted_at IS NULL
+                AND (
+                  data->>'workflowMode' = 'combined'
+                  OR data->>'workflowId' = 'lamp-combined-v1'
+                )
+                AND data->'combinedPlan' = ${currentPlanJson}::jsonb
+                AND data->'combinedControls' = ${controlsJson}::jsonb
+                AND data->'originalVideo'->>'url' = ${validated.spendApproval.sourceUrl}
+                AND data->'originalVideo'->'durationSec' =
+                  to_jsonb(${validated.spendApproval.durationSec}::double precision)
+                AND data->'spendApproval' =
+                  ${JSON.stringify(current.spendApproval)}::jsonb
+              RETURNING data
+            `) as Array<{ data: Run }>)
+          : ((await sql`
+              UPDATE runs
+              SET data =
+                data || jsonb_build_object(
+                  'spendApproval', ${approvalJson}::jsonb
+                )
+              WHERE id = ${id}
+                AND data IS NOT NULL
+                AND deleted_at IS NULL
+                AND (
+                  data->>'workflowMode' = 'combined'
+                  OR data->>'workflowId' = 'lamp-combined-v1'
+                )
+                AND data->'combinedPlan' = ${currentPlanJson}::jsonb
+                AND data->'combinedControls' = ${controlsJson}::jsonb
+                AND data->'originalVideo'->>'url' = ${validated.spendApproval.sourceUrl}
+                AND data->'originalVideo'->'durationSec' =
+                  to_jsonb(${validated.spendApproval.durationSec}::double precision)
+                AND NOT (data ? 'spendApproval')
+              RETURNING data
+            `) as Array<{ data: Run }>);
+        if (renewalRows[0]) {
+          return {
+            ok: true as const,
+            run: await projectRunMedia(renewalRows[0].data),
+          };
+        }
+        const latest = await this.getRun(id);
+        if (
+          latest &&
+          (await lampCombinedApprovalDisposition(latest, validated)) ===
+            "already_approved"
+        ) {
+          return { ok: true as const, run: latest };
+        }
+        return { ok: false as const, current: latest };
+      }
+      return { ok: false as const, current };
     },
 
     async getRunExecution(runId) {

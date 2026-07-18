@@ -55,6 +55,23 @@ import {
 } from "@/lib/server/lamp-iris-execution";
 import { runLampIrisHolisticEvaluation } from "@/lib/server/lamp-iris-evaluator";
 import { runLampHolisticEvaluation } from "@/lib/server/lamp-evaluator";
+import {
+  hashLampCombinedPlan,
+  type LampCombinedPlan,
+} from "@/lib/lamp-combined";
+import { lampCombinedCandidateReceiptMatches } from "@/lib/lamp-combined-candidate";
+import {
+  parseLampCombinedEvaluationArtifact,
+  type LampCombinedEvaluationArtifact,
+} from "@/lib/lamp-combined-evaluation";
+import { lampCombinedEvaluationOperationId } from "@/lib/lamp-combined-operations";
+import { compileLampCombinedFinalPrompt } from "@/lib/prompts/lamp-combined";
+import {
+  appendLampCombinedFinalRepairReceipt,
+  qualifyLampCombinedCandidate,
+} from "@/lib/server/lamp-combined-candidate-qualification";
+import { validateLampCombinedExecutionBinding } from "@/lib/server/lamp-combined-execution";
+import { runLampCombinedHolisticEvaluation } from "@/lib/server/lamp-combined-evaluator";
 import type { PreparedLipsyncInputs } from "@/lib/server/replicate-lipsync";
 import { getStorage } from "@/lib/server/storage";
 import { recordV2CandidateSyncVerdict } from "@/lib/server/v2-sync-verdict-journal";
@@ -94,6 +111,7 @@ import {
   hasReusableLampBeautifyApproval,
   hasReusableLampIrisApproval,
   hasReusableLampApproval,
+  hasReusableLampCombinedApproval,
 } from "@/lib/server/spend-approval";
 import {
   markVideoGenerationWorkflowError,
@@ -107,10 +125,10 @@ import type { RunExecution, VideoGenerationOperationResult } from "@/lib/types";
 import {
   LIPSYNC_OPERATION_ID,
   v2SyncSettlementVerified,
-  v2SyncVerdict,
   type LipsyncOperationResult,
   type SyncNetMetrics,
 } from "@/lib/v2-sync";
+import { v2SyncVerdict } from "@/lib/v2-sync-verdict";
 import {
   isTwoPassExecutionId,
   workflowModeFromExecutionId,
@@ -160,6 +178,9 @@ export async function durableRelightRun(
     return { runId: input.runId, executionId: input.executionId, status: "not_owner" };
   }
   const workflowMode = workflowModeFromExecutionId(input.executionId);
+  if (workflowMode === "combined") {
+    return durableLampCombinedRun(input, workflowRunId);
+  }
 
   try {
     const backgroundPlan =
@@ -440,6 +461,196 @@ export async function durableRelightRun(
   }
 }
 
+async function durableLampCombinedRun(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<DurableRelightRunResult> {
+  try {
+    const plan = await readBoundCombinedPlan(input, workflowRunId);
+    await runGenerationAttempt(input, workflowRunId, 1, input.renderedPrompt);
+    await enterEvaluationPhaseWithRecovery(input, workflowRunId, 1);
+    const firstEvaluation = await evaluateCombinedAttemptWithRecovery(
+      input,
+      workflowRunId,
+      1,
+      plan
+    );
+    await qualifyCombinedCandidateStep(input, workflowRunId, 1);
+
+    const finalRenderedPrompt = await compileCombinedFinalPromptStep(
+      input,
+      workflowRunId,
+      plan,
+      firstEvaluation
+    );
+    const second = await runGenerationAttempt(
+      input,
+      workflowRunId,
+      2,
+      finalRenderedPrompt
+    );
+    await enterEvaluationPhaseWithRecovery(input, workflowRunId, 2);
+    await evaluateCombinedAttemptWithRecovery(
+      input,
+      workflowRunId,
+      2,
+      plan,
+      firstEvaluation
+    );
+    const finalQualification = await qualifyCombinedCandidateStep(
+      input,
+      workflowRunId,
+      2
+    );
+
+    if (finalQualification.needsRepair && finalQualification.syncCheck) {
+      const syncCheck = finalQualification.syncCheck;
+        try {
+          await finalizeV2WithSync(input, workflowRunId, syncCheck);
+          await appendCombinedFinalRepairReceiptStep(input, workflowRunId);
+        } catch (error) {
+          // A completed but definitively failing repair is still durable
+          // candidate evidence. Journal it and leave Final ineligible; only an
+          // ambiguous/missing repair is allowed to keep execution unsettled.
+          try {
+            await appendCombinedFinalRepairReceiptStep(input, workflowRunId);
+          } catch {
+            throw error;
+          }
+        }
+    }
+
+    await settleCombinedExecution(
+      input,
+      workflowRunId,
+      finalRenderedPrompt
+    );
+    return {
+      runId: input.runId,
+      executionId: input.executionId,
+      status: "awaiting_review",
+      // Both takes remain candidates. Returning Final as a winner here would
+      // silently violate Combined's blind human-selection contract.
+      audioVerified: second.audioVerified || undefined,
+    };
+  } catch (error) {
+    // Free settlement repair first: a response may have vanished after every
+    // provider artifact and receipt was already committed.
+    try {
+      const [plan, firstEvaluation] = await Promise.all([
+        readBoundCombinedPlan(input, workflowRunId),
+        readCompletedCombinedEvaluation(input.runId, 1),
+      ]);
+      const finalRenderedPrompt = await compileCombinedFinalPromptStep(
+        input,
+        workflowRunId,
+        plan,
+        firstEvaluation
+      );
+      await settleCombinedExecution(
+        input,
+        workflowRunId,
+        finalRenderedPrompt
+      );
+      return {
+        runId: input.runId,
+        executionId: input.executionId,
+        status: "awaiting_review",
+      };
+    } catch {
+      // Missing/ambiguous evidence is classified by the shared durable
+      // failure recorder below; never infer completion from media alone.
+    }
+
+    const safeError =
+      error instanceof Error
+        ? error.message
+        : "Durable Lamp Combined execution failed.";
+    const failure = await recordExecutionFailure(
+      input,
+      workflowRunId,
+      safeError
+    );
+    if (failure === "awaiting_review") {
+      return {
+        runId: input.runId,
+        executionId: input.executionId,
+        status: "awaiting_review",
+      };
+    }
+    if (failure === "two_pass_completed") {
+      // Exact receipts prove the paid work finished, but that is not the same
+      // as a durable settlement. Never let the Workflow become `completed`
+      // while RunExecution still says `running`.
+      const [plan, firstEvaluation] = await Promise.all([
+        readBoundCombinedPlan(input, workflowRunId),
+        readCompletedCombinedEvaluation(input.runId, 1),
+      ]);
+      const finalRenderedPrompt = await compileCombinedFinalPromptStep(
+        input,
+        workflowRunId,
+        plan,
+        firstEvaluation
+      );
+      await settleCombinedExecution(
+        input,
+        workflowRunId,
+        finalRenderedPrompt
+      );
+      return {
+        runId: input.runId,
+        executionId: input.executionId,
+        status: "awaiting_review",
+      };
+    }
+    throw new Error(
+      failure === "user_action_required"
+        ? "Lamp Combined paused until its exact spend approval is renewed."
+        : failure === "reconcile_required"
+          ? "Lamp Combined requires provider reconciliation."
+          : "Lamp Combined stopped before both candidate states were durably qualified."
+    );
+  }
+}
+
+async function readBoundCombinedPlan(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<LampCombinedPlan> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    execution.executionId !== `lamp-combined:${input.runId}`
+  ) {
+    throw new Error(
+      "Durable run execution no longer owns the approved Lamp Combined aggregate."
+    );
+  }
+  const planOperations = await Promise.all(
+    (execution.combinedPlanOperationIds ?? []).map(async (operationId) => {
+      const operation = await storage.getPaidOperation(input.runId, operationId);
+      if (!operation) throw new Error(`Missing Combined planner ${operationId}.`);
+      return operation;
+    })
+  );
+  return validateLampCombinedExecutionBinding({
+    run,
+    execution,
+    planOperations,
+  });
+}
+
+readBoundCombinedPlan.maxRetries = 2;
+
 async function readBoundBackgroundPlan(
   input: DurableRelightRunInput,
   workflowRunId: string
@@ -558,7 +769,8 @@ interface EffectiveV2 {
 
 async function finalizeV2WithSync(
   input: DurableRelightRunInput,
-  workflowRunId: string
+  workflowRunId: string,
+  precomputedCandidate?: V2CandidateSyncCheck
 ): Promise<EffectiveV2> {
   let checkpoint = await readV2SyncCheckpointStep(input, workflowRunId);
   if (checkpoint.state === "blocked") throw new Error(checkpoint.reason);
@@ -584,7 +796,7 @@ async function finalizeV2WithSync(
     };
   }
 
-  if (checkpoint.state === "unclaimed") {
+  if (checkpoint.state === "unclaimed" && !precomputedCandidate) {
     const journaledCandidateUrl = await readAcceptedV2CandidateStep(
       input,
       workflowRunId
@@ -597,7 +809,9 @@ async function finalizeV2WithSync(
     }
   }
 
-  const candidate = await analyzeV2CandidateStep(input, workflowRunId);
+  const candidate =
+    precomputedCandidate ??
+    (await analyzeV2CandidateStep(input, workflowRunId));
   if (candidate.skipped) {
     if (checkpoint.state === "started") {
       throw new Error("A started Lipsync repair no longer has source audio.");
@@ -1209,8 +1423,26 @@ async function prepareAttempt(
   if (
     workflowMode === "background" ||
     workflowMode === "beautify" ||
-    workflowMode === "iris"
+    workflowMode === "iris" ||
+    workflowMode === "combined"
   ) {
+    if (workflowMode === "combined") {
+      const planOperations = await Promise.all(
+        (execution.combinedPlanOperationIds ?? []).map(async (operationId) => {
+          const operation = await getStorage().getPaidOperation(
+            input.runId,
+            operationId
+          );
+          if (!operation) throw new Error(`Missing Combined planner ${operationId}.`);
+          return operation;
+        })
+      );
+      await validateLampCombinedExecutionBinding({
+        run,
+        execution,
+        planOperations,
+      });
+    } else {
     const planOperation = execution.planOperationId
       ? await getStorage().getPaidOperation(
           input.runId,
@@ -1236,6 +1468,7 @@ async function prepareAttempt(
         planOperation,
       });
     }
+    }
   }
   try {
     assertVideoGenerationAuthorized(run, iteration);
@@ -1244,7 +1477,13 @@ async function prepareAttempt(
     // example, a missing prior completion), not something another user click
     // can repair. Only an absent/expired/mismatched Lamp grant is resumable.
     const reusableApproval =
-      workflowMode === "iris"
+      workflowMode === "combined"
+        ? hasReusableLampCombinedApproval(
+            run,
+            execution.source,
+            execution.batchId
+          )
+      : workflowMode === "iris"
         ? hasReusableLampIrisApproval(
             run,
             execution.source,
@@ -2246,6 +2485,271 @@ async function evaluateIrisAttemptWithRecovery(
   );
 }
 
+async function evaluateCombinedAttempt(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  plan: LampCombinedPlan,
+  previousArtifact?: LampCombinedEvaluationArtifact
+): Promise<LampCombinedEvaluationArtifact> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.status !== "running" ||
+    execution.phase !== "evaluating" ||
+    execution.iteration !== iteration ||
+    execution.executionId !== `lamp-combined:${input.runId}`
+  ) {
+    throw new Error(
+      "Durable run execution no longer owns Lamp Combined evaluation."
+    );
+  }
+  const operations = await Promise.all(
+    (execution.combinedPlanOperationIds ?? []).map(async (operationId) => {
+      const operation = await storage.getPaidOperation(input.runId, operationId);
+      if (!operation) throw new Error(`Missing Combined planner ${operationId}.`);
+      return operation;
+    })
+  );
+  const boundPlan = await validateLampCombinedExecutionBinding({
+    run,
+    execution,
+    planOperations: operations,
+  });
+  if (
+    boundPlan.id !== plan.id ||
+    (await hashLampCombinedPlan(boundPlan)) !==
+      (await hashLampCombinedPlan(plan))
+  ) {
+    throw new Error(
+      "Lamp Combined evaluation aggregate changed after Workflow binding."
+    );
+  }
+  try {
+    return await runLampCombinedHolisticEvaluation({
+      runId: input.runId,
+      iteration,
+      plan: boundPlan,
+      previousArtifact,
+    });
+  } catch (error) {
+    if (error instanceof PaidOperationAuthorizationError) {
+      throw new Error(`${LAMP_USER_ACTION_REQUIRED_PREFIX}${error.message}`);
+    }
+    throw error;
+  }
+}
+
+evaluateCombinedAttempt.maxRetries = 0;
+
+type CombinedEvaluationCheckpoint =
+  | { state: "unclaimed" }
+  | { state: "completed"; result: LampCombinedEvaluationArtifact }
+  | { state: "ambiguous" };
+
+async function readCombinedEvaluationCheckpoint(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  plan: LampCombinedPlan
+): Promise<CombinedEvaluationCheckpoint> {
+  "use step";
+  const storage = getStorage();
+  const [execution, operation] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getPaidOperation(
+      input.runId,
+      lampCombinedEvaluationOperationId(iteration)
+    ),
+  ]);
+  if (
+    !execution ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.status !== "running" ||
+    execution.phase !== "evaluating" ||
+    execution.iteration !== iteration ||
+    execution.executionId !== `lamp-combined:${input.runId}`
+  ) {
+    return { state: "ambiguous" };
+  }
+  if (!operation) return { state: "unclaimed" };
+  if (operation.status !== "completed") return { state: "ambiguous" };
+  try {
+    return {
+      state: "completed",
+      result: await parseLampCombinedEvaluationArtifact(operation.result, {
+        plan,
+        iteration,
+      }),
+    };
+  } catch {
+    return { state: "ambiguous" };
+  }
+}
+
+readCombinedEvaluationCheckpoint.maxRetries = 2;
+
+async function readCombinedEvaluationCheckpointWithRecovery(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  plan: LampCombinedPlan
+): Promise<CombinedEvaluationCheckpoint> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS; attempt += 1) {
+    try {
+      return await readCombinedEvaluationCheckpoint(
+        input,
+        workflowRunId,
+        iteration,
+        plan
+      );
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep("5m");
+  }
+  throw (lastError instanceof Error
+    ? lastError
+    : new Error(
+        `Lamp Combined evaluation ${iteration} checkpoint could not be read within seven days.`
+      ));
+}
+
+async function evaluateCombinedAttemptWithRecovery(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  plan: LampCombinedPlan,
+  previousArtifact?: LampCombinedEvaluationArtifact
+): Promise<LampCombinedEvaluationArtifact> {
+  let checkpoint = await readCombinedEvaluationCheckpointWithRecovery(
+    input,
+    workflowRunId,
+    iteration,
+    plan
+  );
+  for (
+    let attempt = 0;
+    checkpoint.state === "unclaimed" &&
+    attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      return await evaluateCombinedAttempt(
+        input,
+        workflowRunId,
+        iteration,
+        plan,
+        previousArtifact
+      );
+    } catch (error) {
+      if (error instanceof Error && isLampUserActionRequiredError(error)) {
+        throw error;
+      }
+      checkpoint = await readCombinedEvaluationCheckpointWithRecovery(
+        input,
+        workflowRunId,
+        iteration,
+        plan
+      );
+      if (checkpoint.state === "completed") return checkpoint.result;
+      if (checkpoint.state === "ambiguous") throw error;
+      await sleep("5m");
+    }
+  }
+  if (checkpoint.state === "completed") return checkpoint.result;
+  throw new Error(
+    checkpoint.state === "ambiguous"
+      ? `Lamp Combined evaluation ${iteration} has an ambiguous paid operation and requires reconciliation.`
+      : `Lamp Combined evaluation ${iteration} could not cross its pre-claim boundary within seven days.`
+  );
+}
+
+async function qualifyCombinedCandidateStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2
+) {
+  "use step";
+  const qualified = await qualifyLampCombinedCandidate({
+    runId: input.runId,
+    executionId: input.executionId,
+    workflowRunId,
+    iteration,
+  });
+  const needsRepair = Boolean(
+    iteration === 2 &&
+      qualified.syncCheck &&
+      !qualified.syncCheck.skipped &&
+      !v2SyncVerdict(
+        qualified.syncCheck.metrics,
+        qualified.syncCheck.sourceSync
+      ).pass
+  );
+  return {
+    needsRepair,
+    ...(needsRepair && qualified.syncCheck
+      ? { syncCheck: qualified.syncCheck }
+      : {}),
+  };
+}
+
+qualifyCombinedCandidateStep.maxRetries = 2;
+
+async function appendCombinedFinalRepairReceiptStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+) {
+  "use step";
+  return appendLampCombinedFinalRepairReceipt({
+    runId: input.runId,
+    executionId: input.executionId,
+    workflowRunId,
+  });
+}
+
+appendCombinedFinalRepairReceiptStep.maxRetries = 2;
+
+async function compileCombinedFinalPromptStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  plan: LampCombinedPlan,
+  firstEvaluation: LampCombinedEvaluationArtifact
+): Promise<string> {
+  "use step";
+  const execution = await getStorage().getRunExecution(input.runId);
+  if (
+    !execution ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.executionId !== `lamp-combined:${input.runId}` ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    execution.relightIntensity === undefined
+  ) {
+    throw new Error("Lamp Combined execution binding disappeared.");
+  }
+  return (
+    await compileLampCombinedFinalPrompt(
+      input.renderedPrompt,
+      plan,
+      execution.relightIntensity,
+      firstEvaluation
+    )
+  ).rendered;
+}
+
+compileCombinedFinalPromptStep.maxRetries = 2;
+
 async function recordProviderWorkflowRunning(
   input: DurableRelightRunInput,
   workflowRunId: string,
@@ -2473,6 +2977,32 @@ async function readCompletedIrisEvaluation(
 
 readCompletedIrisEvaluation.maxRetries = 2;
 
+async function readCompletedCombinedEvaluation(
+  runId: string,
+  iteration: 1 | 2
+): Promise<LampCombinedEvaluationArtifact> {
+  "use step";
+  const storage = getStorage();
+  const [run, operation] = await Promise.all([
+    storage.getRun(runId),
+    storage.getPaidOperation(
+      runId,
+      lampCombinedEvaluationOperationId(iteration)
+    ),
+  ]);
+  if (!run?.combinedPlan || operation?.status !== "completed") {
+    throw new Error(
+      `Completed Lamp Combined evaluation ${iteration} could not be recovered.`
+    );
+  }
+  return parseLampCombinedEvaluationArtifact(operation.result, {
+    plan: run.combinedPlan,
+    iteration,
+  });
+}
+
+readCompletedCombinedEvaluation.maxRetries = 2;
+
 async function settleLegacyFirstCut(
   input: DurableRelightRunInput,
   workflowRunId: string
@@ -2504,6 +3034,130 @@ async function settleLegacyFirstCut(
 }
 
 settleLegacyFirstCut.maxRetries = 4;
+
+async function settleCombinedExecution(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  finalRenderedPrompt: string
+): Promise<void> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run, firstEvaluation, finalEvaluation, lipsync] =
+    await Promise.all([
+      storage.getRunExecution(input.runId),
+      storage.getRun(input.runId),
+      storage.getPaidOperation(
+        input.runId,
+        lampCombinedEvaluationOperationId(1)
+      ),
+      storage.getPaidOperation(
+        input.runId,
+        lampCombinedEvaluationOperationId(2)
+      ),
+      storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+    ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.executionId !== `lamp-combined:${input.runId}` ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    execution.inputHash !== runExecutionInputHash(input.renderedPrompt) ||
+    execution.deliveredIteration !== undefined
+  ) {
+    throw new Error(
+      "Lamp Combined settlement no longer owns its durable execution."
+    );
+  }
+  const plannerOperations = await Promise.all(
+    (execution.combinedPlanOperationIds ?? []).map(async (operationId) => {
+      const operation = await storage.getPaidOperation(input.runId, operationId);
+      if (!operation) throw new Error(`Missing Combined planner ${operationId}.`);
+      return operation;
+    })
+  );
+  const plan = await validateLampCombinedExecutionBinding({
+    run,
+    execution,
+    planOperations: plannerOperations,
+  });
+  const planHash = await hashLampCombinedPlan(plan);
+  const [firstArtifact, finalArtifact] = await Promise.all([
+    parseLampCombinedEvaluationArtifact(firstEvaluation?.result, {
+      plan,
+      iteration: 1,
+    }),
+    parseLampCombinedEvaluationArtifact(finalEvaluation?.result, {
+      plan,
+      iteration: 2,
+    }),
+  ]);
+  const expectedFinal = await compileLampCombinedFinalPrompt(
+    input.renderedPrompt,
+    plan,
+    execution.relightIntensity,
+    firstArtifact
+  );
+  if (expectedFinal.rendered !== finalRenderedPrompt) {
+    throw new Error(
+      "Lamp Combined Final prompt no longer reproduces from persisted v1 and Initial evaluation."
+    );
+  }
+  const initialGeneration = run.providerOperations?.find(
+    (operation) => operation.id === videoGenerationOperationId(1)
+  );
+  const finalGeneration = run.providerOperations?.find(
+    (operation) => operation.id === videoGenerationOperationId(2)
+  );
+  const initialReceipt = execution.combinedCandidateReceipts?.initial;
+  const finalReceipt = execution.combinedCandidateReceipts?.final;
+  if (
+    !initialGeneration ||
+    !finalGeneration ||
+    initialGeneration.renderedPrompt !== input.renderedPrompt ||
+    finalGeneration.renderedPrompt !== finalRenderedPrompt ||
+    firstEvaluation?.status !== "completed" ||
+    finalEvaluation?.status !== "completed" ||
+    firstArtifact.planHash !== planHash ||
+    finalArtifact.planHash !== planHash ||
+    !initialReceipt ||
+    !finalReceipt ||
+    !lampCombinedCandidateReceiptMatches({
+      receipt: initialReceipt,
+      generationOperation: initialGeneration,
+      evaluationOperation: firstEvaluation,
+      planId: plan.id,
+      planHash,
+      sourceHasAudio: run.originalVideo.hasAudio,
+      canonicalSourceSync: run.originalVideo.syncBaseline,
+      lipsyncOperation: null,
+    }) ||
+    !lampCombinedCandidateReceiptMatches({
+      receipt: finalReceipt,
+      generationOperation: finalGeneration,
+      evaluationOperation: finalEvaluation,
+      planId: plan.id,
+      planHash,
+      sourceHasAudio: run.originalVideo.hasAudio,
+      canonicalSourceSync: run.originalVideo.syncBaseline,
+      lipsyncOperation: lipsync,
+    })
+  ) {
+    throw new Error(
+      "Lamp Combined requires exact generation, evaluation, audio, and SyncNet receipts for both candidates."
+    );
+  }
+  await settleExecutionRecord(execution, workflowRunId, 2, input.executionId);
+  await setVideoGenerationWorkflowState(
+    input.runId,
+    2,
+    workflowRunId,
+    "completed"
+  );
+}
+
+settleCombinedExecution.maxRetries = 4;
 
 async function settleLampExecution(
   input: DurableRelightRunInput,
@@ -3003,6 +3657,11 @@ async function recordExecutionFailure(
                 input.runId,
                 lampIrisEvaluationOperationId(1)
               )
+            : workflowMode === "combined"
+              ? storage.getPaidOperation(
+                  input.runId,
+                  lampCombinedEvaluationOperationId(1)
+                )
             : Promise.resolve(null),
       workflowMode === "background"
         ? storage.getPaidOperation(
@@ -3019,6 +3678,11 @@ async function recordExecutionFailure(
                 input.runId,
                 lampIrisEvaluationOperationId(2)
               )
+            : workflowMode === "combined"
+              ? storage.getPaidOperation(
+                  input.runId,
+                  lampCombinedEvaluationOperationId(2)
+                )
             : storage.getPaidOperation(
                 input.runId,
                 lampEvaluationOperationId(2)
@@ -3029,6 +3693,86 @@ async function recordExecutionFailure(
     workflowMode === "lamp" &&
     finalEvaluation?.status === "completed" &&
     isLampEvaluationArtifact(finalEvaluation.result, 2);
+  let combinedCandidateProofsComplete = false;
+  if (
+    workflowMode === "combined" &&
+    run &&
+    firstPlanEvaluation?.status === "completed" &&
+    finalEvaluation?.status === "completed"
+  ) {
+    try {
+      const plannerOperations = await Promise.all(
+        (execution.combinedPlanOperationIds ?? []).map(async (operationId) => {
+          const operation = await storage.getPaidOperation(
+            input.runId,
+            operationId
+          );
+          if (!operation) throw new Error("Missing Combined planner journal.");
+          return operation;
+        })
+      );
+      const plan = await validateLampCombinedExecutionBinding({
+        run,
+        execution,
+        planOperations: plannerOperations,
+      });
+      const [planHash, firstArtifact, finalArtifact] = await Promise.all([
+        hashLampCombinedPlan(plan),
+        parseLampCombinedEvaluationArtifact(firstPlanEvaluation.result, {
+          plan,
+          iteration: 1,
+        }),
+        parseLampCombinedEvaluationArtifact(finalEvaluation.result, {
+          plan,
+          iteration: 2,
+        }),
+      ]);
+      const expectedFinalPrompt = await compileLampCombinedFinalPrompt(
+        input.renderedPrompt,
+        plan,
+        execution.relightIntensity,
+        firstArtifact
+      );
+      const initialGeneration = run.providerOperations?.find(
+        (operation) => operation.id === videoGenerationOperationId(1)
+      );
+      const initialReceipt = execution.combinedCandidateReceipts?.initial;
+      const finalReceipt = execution.combinedCandidateReceipts?.final;
+      finalEvaluationComplete =
+        finalArtifact.planHash === planHash &&
+        final?.renderedPrompt === expectedFinalPrompt.rendered;
+      combinedCandidateProofsComplete = Boolean(
+        finalEvaluationComplete &&
+          initialGeneration &&
+          final &&
+          initialReceipt &&
+          finalReceipt &&
+          lampCombinedCandidateReceiptMatches({
+            receipt: initialReceipt,
+            generationOperation: initialGeneration,
+            evaluationOperation: firstPlanEvaluation,
+            planId: plan.id,
+            planHash,
+            sourceHasAudio: run.originalVideo.hasAudio,
+            canonicalSourceSync: run.originalVideo.syncBaseline,
+            lipsyncOperation: null,
+          }) &&
+          lampCombinedCandidateReceiptMatches({
+            receipt: finalReceipt,
+            generationOperation: final,
+            evaluationOperation: finalEvaluation,
+            planId: plan.id,
+            planHash,
+            sourceHasAudio: run.originalVideo.hasAudio,
+            canonicalSourceSync: run.originalVideo.syncBaseline,
+            lipsyncOperation: lipsync,
+          })
+      );
+    } catch {
+      finalEvaluationComplete = false;
+      combinedCandidateProofsComplete = false;
+    }
+  }
   if (
     workflowMode === "background" &&
     run &&
@@ -3131,8 +3875,10 @@ async function recordExecutionFailure(
       finalEvaluationComplete = false;
     }
   }
-  const finalSyncVerified = Boolean(
-    final?.renderedPrompt &&
+  const finalSyncVerified =
+    workflowMode === "combined"
+      ? combinedCandidateProofsComplete
+      : Boolean(final?.renderedPrompt &&
       v2SyncSettlementVerified({
         runId: input.runId,
         candidateVerdict: execution.candidateSyncVerdict,
@@ -3140,8 +3886,7 @@ async function recordExecutionFailure(
         lipsync,
         canonicalSourceSync: run?.originalVideo.syncBaseline,
         sourceHasAudio: run?.originalVideo.hasAudio,
-      })
-  );
+      }));
   if (
     twoPass &&
     final?.status === "completed" &&
@@ -3163,6 +3908,10 @@ async function recordExecutionFailure(
               ? lampBeautifyEvaluationOperationId(execution.iteration)
               : workflowMode === "iris"
                 ? lampIrisEvaluationOperationId(execution.iteration)
+                : workflowMode === "combined"
+                  ? lampCombinedEvaluationOperationId(
+                      execution.iteration as 1 | 2
+                    )
                 : lampEvaluationOperationId(execution.iteration)
         )
       : null;
@@ -3171,7 +3920,7 @@ async function recordExecutionFailure(
       final?.status === "completed" &&
       final.result?.audioVerified &&
       finalEvaluationComplete &&
-      lipsync === null &&
+      (workflowMode === "combined" || lipsync === null) &&
       !finalSyncVerified
   );
   const evaluationAmbiguous = Boolean(

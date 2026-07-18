@@ -53,6 +53,13 @@ import {
 } from "@/lib/lamp-iris";
 import { lampIrisNoOpPromptForRun } from "@/lib/lamp-iris-read";
 import {
+  approveLampCombinedPlan,
+  assertLampCombinedPlanBinding,
+  hashLampCombinedPlan,
+  parseLampCombinedControls,
+  type LampCombinedControls,
+} from "@/lib/lamp-combined";
+import {
   isRecoverableBatchRun,
   isTerminalRun,
   summarizeBatchRecovery,
@@ -160,6 +167,7 @@ interface AppStore {
       approvePlanSpend?: boolean;
       workflowMode?: WorkflowMode;
       relightIntensity?: number;
+      combinedControls?: LampCombinedControls;
       prepareOnly?: boolean;
     }
   ): Promise<string>;
@@ -183,6 +191,11 @@ interface AppStore {
     }
   ): Promise<void>;
   approveBackgroundPlan(
+    runId: string,
+    opts?: { approveLiveSpend?: boolean }
+  ): Promise<void>;
+  /** Approve the one aggregate Combined plan and launch its fixed two-pass run. */
+  approveCombinedPlan(
     runId: string,
     opts?: { approveLiveSpend?: boolean }
   ): Promise<void>;
@@ -792,6 +805,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       approvePlanSpend?: boolean;
       workflowMode?: WorkflowMode;
       relightIntensity?: number;
+      combinedControls?: LampCombinedControls;
       prepareOnly?: boolean;
     }
   ) => {
@@ -815,6 +829,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         workflowMode,
         mock,
         relightIntensity,
+        combinedControls: opts?.combinedControls,
+        prepareOnly: opts?.prepareOnly,
       }),
     });
     const payload = (await response.json().catch(() => null)) as
@@ -862,6 +878,102 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       );
     }
     return run.id;
+  },
+
+  approveCombinedPlan: async (runId, opts) => {
+    const run = get().runs.find((item) => item.id === runId);
+    if (!run || run.workflowMode !== "combined") {
+      throw new Error("Lamp Combined run not found.");
+    }
+    const plan = run.combinedPlan;
+    if (!plan) {
+      throw new Error("This run does not have a Combined plan to approve.");
+    }
+    const controls = parseLampCombinedControls(
+      run.combinedControls ?? plan.controls
+    );
+    const relightIntensity = normalizeRelightIntensity(run.relightIntensity);
+    assertLampCombinedPlanBinding(plan, {
+      runId,
+      controls,
+      relightIntensity,
+    });
+    const liveRun = run.live === true;
+    const resumingPausedLiveCombined =
+      liveRun &&
+      plan.approval.status === "approved" &&
+      (run.serverExecution?.status === "user_action_required" ||
+        run.serverExecution === undefined);
+    if (plan.approval.status === "approved" && !resumingPausedLiveCombined) {
+      return;
+    }
+
+    if (liveRun) {
+      const planHash = await hashLampCombinedPlan(plan);
+      const response = await fetch("/api/combined-plan/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runId,
+          planHash,
+          controls,
+          relightIntensity,
+          approveLiveSpend: opts?.approveLiveSpend === true,
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { run?: Run; serverOwned?: boolean; error?: string }
+        | null;
+      if (!response.ok || !payload?.run) {
+        throw new Error(
+          payload?.error ??
+            `Combined-plan approval failed (${response.status}).`
+        );
+      }
+      if (payload.serverOwned !== true) {
+        throw new Error(
+          "The live server did not claim the approved Combined run, so browser execution was refused."
+        );
+      }
+      set((state) => ({
+        runs: state.runs.map((item) =>
+          item.id === runId ? payload.run! : item
+        ),
+      }));
+      return;
+    }
+
+    const approvedPlan = approveLampCombinedPlan(plan, Date.now());
+    set((state) => ({
+      runs: state.runs.map((item) =>
+        item.id === runId
+          ? {
+              ...item,
+              combinedControls: controls,
+              combinedPlan: approvedPlan,
+              nodeStates: {
+                ...item.nodeStates,
+                plan: {
+                  nodeId: "plan",
+                  status: "succeeded",
+                  detail: "one aggregate plan approved",
+                },
+              },
+              log: [
+                ...item.log,
+                {
+                  at: Date.now(),
+                  nodeId: "plan",
+                  level: "info" as const,
+                  message:
+                    "Combined plan approved. Starting two separately source-rooted demo takes.",
+                },
+              ],
+            }
+          : item
+      ),
+    }));
+    void runWorkflow(runId);
   },
 
   approveBeautifyPlan: async (runId, opts) => {

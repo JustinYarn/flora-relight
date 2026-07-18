@@ -17,6 +17,10 @@ import type {
 } from "@/lib/types";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { LAMP_BACKGROUND_EVAL_IDS } from "@/lib/lamp-background-evaluation";
+import { LAMP_BEAUTIFY_EVAL_IDS } from "@/lib/lamp-beautify-evaluation";
+import { LAMP_IRIS_EVAL_IDS } from "@/lib/lamp-iris-evaluation";
+import { LAMP_COMBINED_EVAL_IDS } from "@/lib/lamp-combined-evaluation";
+import { LAMP_EVAL_IDS } from "@/lib/lamp-evaluation";
 import { isValidRunId } from "@/lib/server/runstore";
 import { getStorage } from "@/lib/server/storage";
 
@@ -29,7 +33,11 @@ const MAX_NOTE_LENGTH = 4_000;
 const MAX_OVERALL_NOTE_LENGTH = 8_000;
 const EVAL_IDS = new Set([
   ...EVAL_DEFS.map((definition) => definition.id),
+  ...LAMP_EVAL_IDS,
   ...LAMP_BACKGROUND_EVAL_IDS,
+  ...LAMP_BEAUTIFY_EVAL_IDS,
+  ...LAMP_IRIS_EVAL_IDS,
+  ...LAMP_COMBINED_EVAL_IDS,
 ]);
 
 function noStoreJson(body: unknown, init?: { status?: number }): NextResponse {
@@ -87,7 +95,10 @@ function parseClipDraft(value: unknown): GradeClipDraft | null {
   if (
     typeof value.overallNote !== "string" ||
     value.overallNote.length > MAX_OVERALL_NOTE_LENGTH ||
-    (value.shipIt !== undefined && typeof value.shipIt !== "boolean")
+    (value.shipIt !== undefined && typeof value.shipIt !== "boolean") ||
+    (value.combinedCandidateIteration !== undefined &&
+      value.combinedCandidateIteration !== 1 &&
+      value.combinedCandidateIteration !== 2)
   ) {
     return null;
   }
@@ -96,6 +107,10 @@ function parseClipDraft(value: unknown): GradeClipDraft | null {
     answers,
     ...(typeof value.shipIt === "boolean" ? { shipIt: value.shipIt } : {}),
     overallNote: value.overallNote,
+    ...(value.combinedCandidateIteration === 1 ||
+    value.combinedCandidateIteration === 2
+      ? { combinedCandidateIteration: value.combinedCandidateIteration }
+      : {}),
   };
 }
 

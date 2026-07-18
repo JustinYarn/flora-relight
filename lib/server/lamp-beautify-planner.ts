@@ -21,6 +21,7 @@ import {
   type LampBeautifyPlan,
 } from "@/lib/lamp-beautify";
 import { lampBeautifyPlanOperationId } from "@/lib/lamp-beautify-operations";
+import { LAMP_COMBINED_BEAUTIFY_PLAN_OPERATION_ID } from "@/lib/lamp-combined-operations";
 import {
   beginPaidOperation,
   completePaidOperation,
@@ -314,15 +315,24 @@ export function isLampBeautifyPlanArtifact(
 }
 
 export async function runLampBeautifyPlanner(
-  runId: string
+  runId: string,
+  combined?: {
+    workflowMode: "combined";
+    operationId: typeof LAMP_COMBINED_BEAUTIFY_PLAN_OPERATION_ID;
+  }
 ): Promise<LampBeautifyPlanArtifact> {
   const storage = getStorage();
   const run = await storage.getRun(runId);
   if (!run) throw new Error("Run not found for Lamp Beautify planning.");
-  if (runWorkflowMode(run) !== "beautify") {
-    throw new Error("Only Lamp Beautify runs may create an enhancement plan.");
+  const expectedMode = combined?.workflowMode ?? "beautify";
+  if (runWorkflowMode(run) !== expectedMode) {
+    throw new Error(
+      combined
+        ? "Only Lamp Combined runs may create this Combined enhancement subplan."
+        : "Only Lamp Beautify runs may create an enhancement plan."
+    );
   }
-  const operationId = lampBeautifyPlanOperationId();
+  const operationId = combined?.operationId ?? lampBeautifyPlanOperationId();
   const claim = await beginPaidOperation({
     run,
     id: operationId,

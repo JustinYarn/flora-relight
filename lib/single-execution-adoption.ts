@@ -8,6 +8,11 @@ import { isPlanWorkflowMode, runWorkflowMode } from "./workflow-mode.ts";
  */
 export function needsSingleExecutionAdoption(run: Run): boolean {
   const workflowMode = runWorkflowMode(run);
+  // Combined recovery intentionally refuses provider replay because safe
+  // adoption would need to reconstruct the exact aggregate planner journals,
+  // frozen plan, and both candidate prompts together. Keep those records
+  // visible for manual reconciliation instead of scheduling a known 409.
+  if (workflowMode === "combined") return false;
   if (isPlanWorkflowMode(workflowMode)) {
     const plan =
       workflowMode === "background"

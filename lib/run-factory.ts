@@ -7,10 +7,10 @@ import type {
 import {
   DEFAULT_RELIGHT_INTENSITY,
   normalizeRelightIntensity,
-} from "@/lib/relight-intensity";
-import { workflowForMode } from "@/lib/workflow-def";
-import { DEFAULT_WORKFLOW_MODE } from "@/lib/workflow-mode";
-import { uid } from "@/lib/util";
+} from "./relight-intensity.ts";
+import { workflowForMode } from "./workflow-def.ts";
+import { DEFAULT_WORKFLOW_MODE } from "./workflow-mode.ts";
+import { uid } from "./util.ts";
 
 export function freshNodeStates(
   workflowMode: WorkflowMode = DEFAULT_WORKFLOW_MODE
@@ -36,7 +36,7 @@ export function buildRun(
     id: video.runId ?? uid("run"),
     workflowId: workflow.id,
     workflowMode,
-    ...(workflowMode === "lamp"
+    ...(workflowMode === "lamp" || workflowMode === "combined"
       ? { relightIntensity: normalizeRelightIntensity(relightIntensity) }
       : {}),
     createdAt: now,

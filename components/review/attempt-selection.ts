@@ -40,6 +40,7 @@ export function reviewAttemptKey(run: Run, iteration: Iteration): string {
 
 export function reviewAttemptLabel(run: Run, iteration: Iteration): string {
   if (isApprovedPlanNoOp(run)) return "Exact source";
+  if (runWorkflowMode(run) === "combined") return `Take ${iteration.index}`;
   if (!isTwoPassWorkflowMode(runWorkflowMode(run))) return `v${iteration.index}`;
   if (deliveredInitialBestOfTwo(run) && iteration.index === 1) {
     return "Delivered";

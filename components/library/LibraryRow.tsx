@@ -18,6 +18,7 @@ import {
   isApprovedPlanNoOp,
   isTwoPassWorkflowMode,
   runWorkflowMode,
+  workflowModeLabel,
   workflowOutputLabel,
 } from "@/lib/workflow-mode";
 import {
@@ -29,6 +30,7 @@ import {
   shippedIteration,
   shippedVideo,
 } from "@/components/library/derive";
+import { isLampCombinedRun } from "@/lib/lamp-combined-read";
 
 /*
  * One Library entry — progressive disclosure:
@@ -97,6 +99,8 @@ function AttemptChips({
   iterations,
   bestIndex,
   fixedTwoPass,
+  combined,
+  winnerIndex,
   noOp,
   selected,
   onSelect,
@@ -104,6 +108,8 @@ function AttemptChips({
   iterations: Iteration[];
   bestIndex?: number;
   fixedTwoPass: boolean;
+  combined: boolean;
+  winnerIndex?: 1 | 2;
   noOp: boolean;
   selected: number | undefined;
   onSelect: (index: number) => void;
@@ -135,6 +141,8 @@ function AttemptChips({
           />
           {noOp
             ? "Exact source"
+            : combined
+              ? `Take ${it.index}`
             : fixedTwoPass
             ? it.index === 1
               ? "Initial"
@@ -144,6 +152,11 @@ function AttemptChips({
             : `a${it.index}`}
           {!fixedTwoPass && bestIndex === it.index ? (
             <span className="text-2xs text-accent" title="shipped attempt">
+              ★
+            </span>
+          ) : null}
+          {combined && winnerIndex === it.index ? (
+            <span className="text-2xs text-pass" title="human-graded winner">
               ★
             </span>
           ) : null}
@@ -167,6 +180,7 @@ function RowBody({ run }: { run: Run }) {
   const relit = shippedVideo(run);
   const fixedTwoPass =
     isTwoPassWorkflowMode(runWorkflowMode(run));
+  const combined = isLampCombinedRun(run);
   const outputLabel = workflowOutputLabel(runWorkflowMode(run));
   const approvedPlanNoOp = isApprovedPlanNoOp(run);
   const needsHumanGrade = needsLampHumanGrade(run);
@@ -179,6 +193,8 @@ function RowBody({ run }: { run: Run }) {
         relitLabel={
           approvedPlanNoOp
             ? "UNCHANGED SOURCE · APPROVED NO-OP"
+            : combined && shipped
+              ? `${outputLabel} · WINNER v${shipped.index}`
             : deliveredInitialBestOfTwo(run) && shipped?.index === 1
             ? `${outputLabel} v1 · BEST OF TWO`
             : fixedTwoPass && shipped?.index === 2
@@ -197,6 +213,8 @@ function RowBody({ run }: { run: Run }) {
             iterations={ordered}
             bestIndex={run.bestIterationIndex}
             fixedTwoPass={fixedTwoPass}
+            combined={combined}
+            winnerIndex={run.humanGrade?.gradedIteration}
             noOp={approvedPlanNoOp}
             selected={selected?.index}
             onSelect={setSelectedIndex}
@@ -218,7 +236,11 @@ function RowBody({ run }: { run: Run }) {
       {fixes.length > 0 ? (
         <div>
           <p className="mb-1.5 text-2xs uppercase tracking-[0.14em] text-faint">
-            {fixedTwoPass ? "Corrections applied to Final" : "Fixes that drove the final attempt"}
+            {combined
+              ? "Corrections applied to Take 2"
+              : fixedTwoPass
+                ? "Corrections applied to Final"
+                : "Fixes that drove the final attempt"}
           </p>
           <ul className="space-y-1.5">
             {fixes.map((f) => (
@@ -245,12 +267,27 @@ function RowBody({ run }: { run: Run }) {
           Open journey →
         </Link>
         <span className="ml-auto flex items-center gap-2">
-          {needsHumanGrade ? (
+          {combined ? (
+            run.humanGrade ? (
+              <span className="text-2xs text-pass">
+                winner v{run.humanGrade.gradedIteration} graded and locked
+              </span>
+            ) : run.status === "awaiting-review" ? (
+              <Link
+                href={`/runs/${run.id}`}
+                className="inline-flex min-h-10 items-center rounded-lg bg-accent px-3.5 py-1.5 text-sm font-semibold text-[#0b0d10] transition-[transform,filter] duration-150 ease-out hover:brightness-110 active:scale-[0.96]"
+              >
+                Compare &amp; choose winner
+              </Link>
+            ) : null
+          ) : needsHumanGrade ? (
             <Link
               href={`/grade?run=${encodeURIComponent(run.id)}`}
               className="inline-flex min-h-10 items-center rounded-lg bg-pass px-3.5 py-1.5 text-sm font-medium text-canvas transition-transform active:scale-[0.96]"
             >
-              Grade Final
+              {deliveredInitialBestOfTwo(run)
+                ? "Grade delivered take"
+                : "Grade Final"}
             </Link>
           ) : run.status === "awaiting-review" ? (
             <>
@@ -300,6 +337,7 @@ export function LibraryRow({
   const relit = shippedVideo(run);
   const attempts = run.iterations.length;
   const fixedTwoPass = isTwoPassWorkflowMode(runWorkflowMode(run));
+  const combined = isLampCombinedRun(run);
   const approvedPlanNoOp = isApprovedPlanNoOp(run);
   const actualUsd = run.cost?.actualUsd ?? 0;
 
@@ -375,6 +413,9 @@ export function LibraryRow({
             <span className="min-w-0 truncate text-sm font-medium text-ink">
               {run.originalVideo.label}
             </span>
+            <Badge color="var(--muted)">
+              {workflowModeLabel(runWorkflowMode(run))}
+            </Badge>
             {!run.live ? <Badge color="var(--accent)">simulated</Badge> : null}
             {relit?.simulatedFilter && run.live ? (
               <Badge color="var(--accent)">simulated</Badge>
@@ -393,7 +434,11 @@ export function LibraryRow({
           className="w-20 shrink-0"
           title={
             fixedTwoPass
-              ? deliveredInitialBestOfTwo(run)
+              ? combined
+                ? run.humanGrade
+                  ? `Overall score of human-graded winner v${run.humanGrade.gradedIteration}`
+                  : "No winner score until you choose and grade a take"
+                : deliveredInitialBestOfTwo(run)
                 ? "Overall score of the delivered Initial (best of two)"
                 : "Overall score of Final"
               : "Overall score of the shipped cut"

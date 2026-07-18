@@ -36,6 +36,19 @@ import {
 } from "@/lib/lamp-iris-operations";
 import { compileLampIrisFinalPrompt } from "@/lib/prompts/lamp-iris";
 import {
+  hashLampCombinedPlan,
+  type LampCombinedPlan,
+} from "@/lib/lamp-combined";
+import { lampCombinedCandidateReceiptMatches } from "@/lib/lamp-combined-candidate";
+import { parseLampCombinedEvaluationArtifact } from "@/lib/lamp-combined-evaluation";
+import { lampCombinedEvaluationOperationId } from "@/lib/lamp-combined-operations";
+import { compileLampCombinedFinalPrompt } from "@/lib/prompts/lamp-combined";
+import {
+  validateLampCombinedExecutionBinding,
+  validateLampCombinedPlanBinding,
+} from "@/lib/server/lamp-combined-execution";
+import { readCompletedCombinedPlannerEvidence } from "@/lib/server/completed-workflow-recovery";
+import {
   validateLampIrisPlanBinding,
 } from "@/lib/server/lamp-iris-execution";
 import { getStorage } from "@/lib/server/storage";
@@ -48,6 +61,7 @@ import {
   hasReusableLampBeautifyApproval,
   hasReusableLampIrisApproval,
   hasReusableLampApproval,
+  hasReusableLampCombinedApproval,
 } from "@/lib/server/spend-approval";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
 import {
@@ -70,6 +84,8 @@ export interface EnqueueRunExecutionInput {
   renderedPrompt?: string;
   /** Plan-first modes bind the exact approved planning journal and plan hash. */
   planOperationId?: string;
+  /** Combined binds every enabled planner journal in canonical order. */
+  combinedPlanOperationIds?: string[];
   approvedPlanHash?: string;
   /** Auditable Lamp target represented by renderedPrompt. */
   relightIntensity?: number;
@@ -89,6 +105,7 @@ export interface RepairCompletedRunExecutionInput {
   batchId?: string;
   renderedPrompt: string;
   planOperationId?: string;
+  combinedPlanOperationIds?: string[];
   approvedPlanHash?: string;
 }
 
@@ -114,6 +131,8 @@ export async function repairCompletedRunExecution(
       execution.batchId !== input.batchId ||
       execution.renderedPrompt !== input.renderedPrompt ||
       execution.planOperationId !== input.planOperationId ||
+      JSON.stringify(execution.combinedPlanOperationIds) !==
+        JSON.stringify(input.combinedPlanOperationIds) ||
       execution.approvedPlanHash !== input.approvedPlanHash ||
       execution.inputHash !== runExecutionInputHash(input.renderedPrompt)
     ) {
@@ -128,6 +147,7 @@ export async function repairCompletedRunExecution(
     );
     let expectedPrompt = input.renderedPrompt;
     let finalEvaluationComplete = true;
+    let combinedSyncVerified: boolean | undefined;
     if (workflowMode === "lamp") {
       const [firstEvaluation, finalEvaluation] = await Promise.all([
         storage.getPaidOperation(input.runId, lampEvaluationOperationId(1)),
@@ -296,6 +316,99 @@ export async function repairCompletedRunExecution(
         finalEvaluation?.status === "completed" &&
         isLampIrisEvaluationArtifact(finalEvaluation.result, 2) &&
         finalEvaluation.result.planId === irisPlan.id;
+    } else if (workflowMode === "combined") {
+      const [plannerOperations, firstEvaluation, finalEvaluation, lipsync] =
+        await Promise.all([
+          readCompletedCombinedPlannerEvidence(
+            execution.combinedPlanOperationIds,
+            (operationId) =>
+              storage.getPaidOperation(input.runId, operationId)
+          ),
+          storage.getPaidOperation(
+            input.runId,
+            lampCombinedEvaluationOperationId(1)
+          ),
+          storage.getPaidOperation(
+            input.runId,
+            lampCombinedEvaluationOperationId(2)
+          ),
+          storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+        ]);
+      if (!plannerOperations) return execution;
+      let combinedPlan: LampCombinedPlan;
+      try {
+        combinedPlan = await validateLampCombinedExecutionBinding({
+          run,
+          execution,
+          planOperations: plannerOperations,
+        });
+      } catch {
+        return execution;
+      }
+      if (
+        firstEvaluation?.status !== "completed" ||
+        finalEvaluation?.status !== "completed"
+      ) {
+        return execution;
+      }
+      try {
+        const [planHash, firstArtifact, finalArtifact] = await Promise.all([
+          hashLampCombinedPlan(combinedPlan),
+          parseLampCombinedEvaluationArtifact(firstEvaluation.result, {
+            plan: combinedPlan,
+            iteration: 1,
+          }),
+          parseLampCombinedEvaluationArtifact(finalEvaluation.result, {
+            plan: combinedPlan,
+            iteration: 2,
+          }),
+        ]);
+        expectedPrompt = (
+          await compileLampCombinedFinalPrompt(
+            input.renderedPrompt,
+            combinedPlan,
+            execution.relightIntensity,
+            firstArtifact
+          )
+        ).rendered;
+        const initialGeneration = run.providerOperations?.find(
+          (item) => item.id === videoGenerationOperationId(1)
+        );
+        const finalGeneration = run.providerOperations?.find(
+          (item) => item.id === videoGenerationOperationId(2)
+        );
+        const initialReceipt = execution.combinedCandidateReceipts?.initial;
+        const finalReceipt = execution.combinedCandidateReceipts?.final;
+        finalEvaluationComplete = finalArtifact.planHash === planHash;
+        combinedSyncVerified = Boolean(
+          initialGeneration &&
+            finalGeneration &&
+            initialReceipt &&
+            finalReceipt &&
+            lampCombinedCandidateReceiptMatches({
+              receipt: initialReceipt,
+              generationOperation: initialGeneration,
+              evaluationOperation: firstEvaluation,
+              planId: combinedPlan.id,
+              planHash,
+              sourceHasAudio: run.originalVideo.hasAudio,
+              canonicalSourceSync: run.originalVideo.syncBaseline,
+              lipsyncOperation: null,
+            }) &&
+            lampCombinedCandidateReceiptMatches({
+              receipt: finalReceipt,
+              generationOperation: finalGeneration,
+              evaluationOperation: finalEvaluation,
+              planId: combinedPlan.id,
+              planHash,
+              sourceHasAudio: run.originalVideo.hasAudio,
+              canonicalSourceSync: run.originalVideo.syncBaseline,
+              lipsyncOperation: lipsync,
+            })
+        );
+      } catch {
+        return execution;
+      }
     }
     // The Final holistic evaluation now runs BEFORE the sync gate, so a
     // completed final evaluation no longer implies the gate passed. Any
@@ -314,14 +427,17 @@ export async function repairCompletedRunExecution(
     ) {
       return execution;
     }
-    const syncVerified = v2SyncSettlementVerified({
-      runId: input.runId,
-      candidateVerdict: execution.candidateSyncVerdict,
-      finalGeneration: operation,
-      lipsync,
-      canonicalSourceSync: run.originalVideo.syncBaseline,
-      sourceHasAudio: run.originalVideo.hasAudio,
-    });
+    const syncVerified =
+      workflowMode === "combined"
+        ? combinedSyncVerified === true
+        : v2SyncSettlementVerified({
+            runId: input.runId,
+            candidateVerdict: execution.candidateSyncVerdict,
+            finalGeneration: operation,
+            lipsync,
+            canonicalSourceSync: run.originalVideo.syncBaseline,
+            sourceHasAudio: run.originalVideo.hasAudio,
+          });
     if (
       v2CompletedRunRecoveryDecision(syncVerified) ===
       "hold_for_live_sync_gate"
@@ -388,13 +504,22 @@ export async function enqueueRunExecution(
   if (!run) throw new Error("Run not found.");
   const workflowMode = workflowModeFromExecutionId(input.executionId);
   const lamp = workflowMode === "lamp";
-  const relightIntensity = lamp
+  const relightBound = lamp || workflowMode === "combined";
+  if (
+    workflowMode === "combined" &&
+    (input.executionId !== `lamp-combined:${input.runId}` ||
+      input.source !== "single" ||
+      input.batchId !== undefined)
+  ) {
+    throw new Error("Lamp Combined execution is single-run only.");
+  }
+  const relightIntensity = relightBound
     ? normalizeRelightIntensity(
         input.relightIntensity ?? run.relightIntensity
       )
     : undefined;
   if (
-    lamp &&
+    relightBound &&
     input.relightIntensity !== undefined &&
     relightIntensity !== normalizeRelightIntensity(run.relightIntensity)
   ) {
@@ -405,12 +530,15 @@ export async function enqueueRunExecution(
     input.renderedPrompt ?? current?.renderedPrompt;
   const boundPlanOperationId =
     input.planOperationId ?? current?.planOperationId;
+  const boundCombinedPlanOperationIds =
+    input.combinedPlanOperationIds ?? current?.combinedPlanOperationIds;
   const boundApprovedPlanHash =
     input.approvedPlanHash ?? current?.approvedPlanHash;
   const planMode =
     workflowMode === "background" ||
     workflowMode === "beautify" ||
     workflowMode === "iris";
+  const combinedMode = workflowMode === "combined";
   if (
     planMode &&
     (!boundRenderedPrompt ||
@@ -419,6 +547,16 @@ export async function enqueueRunExecution(
   ) {
     throw new Error(
       "Plan-based Lamp execution requires the server-compiled prompt and exact approved-plan binding."
+    );
+  }
+  if (
+    combinedMode &&
+    (!boundRenderedPrompt ||
+      !boundCombinedPlanOperationIds ||
+      !boundApprovedPlanHash)
+  ) {
+    throw new Error(
+      "Lamp Combined execution requires the compiled prompt and exact aggregate planner binding."
     );
   }
   if (workflowMode === "background") {
@@ -457,6 +595,25 @@ export async function enqueueRunExecution(
       approvedPlanHash: boundApprovedPlanHash,
       renderedPrompt: boundRenderedPrompt!,
     });
+  } else if (workflowMode === "combined") {
+    const operations = await Promise.all(
+      boundCombinedPlanOperationIds!.map(async (operationId) => {
+        const operation = await storage.getPaidOperation(
+          input.runId,
+          operationId
+        );
+        if (!operation) throw new Error(`Missing Combined planner ${operationId}.`);
+        return operation;
+      })
+    );
+    await validateLampCombinedPlanBinding({
+      run,
+      renderedPrompt: boundRenderedPrompt!,
+      approvedPlanHash: boundApprovedPlanHash,
+      combinedPlanOperationIds: boundCombinedPlanOperationIds,
+      planOperations: operations,
+      relightIntensity,
+    });
   }
   if (current) {
     if (
@@ -465,6 +622,14 @@ export async function enqueueRunExecution(
       current.batchId !== input.batchId
     ) {
       throw new Error("A different durable execution already owns this run.");
+    }
+    if (
+      JSON.stringify(current.combinedPlanOperationIds) !==
+      JSON.stringify(boundCombinedPlanOperationIds)
+    ) {
+      throw new Error(
+        "A different aggregate planner set is already bound to this execution."
+      );
     }
     if (
       input.renderedPrompt !== undefined &&
@@ -481,7 +646,7 @@ export async function enqueueRunExecution(
       );
     }
     if (
-      lamp &&
+      relightBound &&
       normalizeRelightIntensity(current.relightIntensity) !== relightIntensity
     ) {
       throw new Error(
@@ -506,6 +671,12 @@ export async function enqueueRunExecution(
           )) ||
         (workflowMode === "iris" &&
           !hasReusableLampIrisApproval(
+            run,
+            input.source,
+            input.batchId
+          )) ||
+        (workflowMode === "combined" &&
+          !hasReusableLampCombinedApproval(
             run,
             input.source,
             input.batchId
@@ -555,6 +726,12 @@ export async function enqueueRunExecution(
           ...(current.planOperationId
             ? { planOperationId: current.planOperationId }
             : {}),
+          ...(current.combinedPlanOperationIds
+            ? {
+                combinedPlanOperationIds:
+                  current.combinedPlanOperationIds,
+              }
+            : {}),
           ...(current.approvedPlanHash
             ? { approvedPlanHash: current.approvedPlanHash }
             : {}),
@@ -590,6 +767,12 @@ export async function enqueueRunExecution(
                 input.source,
                 input.batchId
               )
+            : workflowMode === "combined"
+              ? hasReusableLampCombinedApproval(
+                  run,
+                  input.source,
+                  input.batchId
+                )
             : hasReusableFirstCutApproval(
               run,
               input.source === "batch" ? "batch" : "single",
@@ -618,6 +801,9 @@ export async function enqueueRunExecution(
         ...(boundPlanOperationId
           ? { planOperationId: boundPlanOperationId }
           : {}),
+        ...(boundCombinedPlanOperationIds
+          ? { combinedPlanOperationIds: boundCombinedPlanOperationIds }
+          : {}),
         ...(boundApprovedPlanHash
           ? { approvedPlanHash: boundApprovedPlanHash }
           : {}),
@@ -639,6 +825,8 @@ export async function enqueueRunExecution(
     created.execution.source !== input.source ||
     created.execution.batchId !== input.batchId ||
     created.execution.planOperationId !== boundPlanOperationId ||
+    JSON.stringify(created.execution.combinedPlanOperationIds) !==
+      JSON.stringify(boundCombinedPlanOperationIds) ||
     created.execution.approvedPlanHash !== boundApprovedPlanHash
   ) {
     throw new Error("A different durable execution won this run.");

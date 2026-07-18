@@ -101,9 +101,10 @@ function validateBody(body: StartBody): string | null {
     body.workflowMode !== "lamp" &&
     body.workflowMode !== "background" &&
     body.workflowMode !== "beautify" &&
-    body.workflowMode !== "iris"
+    body.workflowMode !== "iris" &&
+    body.workflowMode !== "combined"
   ) {
-    return 'workflowMode must be "flora", "lamp", "background", "beautify", or "iris".';
+    return 'workflowMode must be "flora", "lamp", "background", "beautify", "iris", or "combined".';
   }
   if (
     body.relightIntensity !== undefined &&
@@ -341,6 +342,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const validationError = validateBody(body);
   if (validationError) {
     return NextResponse.json({ error: validationError }, { status: 400 });
+  }
+  if (body.workflowMode === "combined") {
+    return NextResponse.json(
+      {
+        error:
+          "Lamp Combined supports one clip at a time because its approved plan, two qualified takes, winner choice, and human grade must all stay bound to one exact source. Combined batches are not started.",
+      },
+      { status: 409 }
+    );
   }
   if (body.workflowMode === "background") {
     return NextResponse.json(

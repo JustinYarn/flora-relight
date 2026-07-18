@@ -3,7 +3,7 @@
 import type { Iteration, Run, Verdict } from "@/lib/types";
 import { Badge, verdictColor } from "@/components/ui";
 import { formatUsd } from "@/lib/cost";
-import { isApprovedPlanNoOp } from "@/lib/workflow-mode";
+import { isApprovedPlanNoOp, runWorkflowMode } from "@/lib/workflow-mode";
 
 /**
  * One flat horizontal strip under the hero: the composite number, the
@@ -34,8 +34,11 @@ export function VerdictLine({
 
   const videosGenerated = run.iterations.length;
   const approvedPlanNoOp = isApprovedPlanNoOp(run);
+  const combined = runWorkflowMode(run) === "combined";
   const scoreLabel =
-    iteration?.index === 2
+    combined && iteration
+      ? `Take ${iteration.index} AI score`
+      : iteration?.index === 2
       ? "Final AI score"
       : iteration?.index === 1
         ? "Initial critique score"
@@ -95,7 +98,7 @@ export function VerdictLine({
                 "evaluation stopped before a score was recorded"
               )
             ) : (
-              "waiting for the initial video"
+              combined ? "waiting for Take 1" : "waiting for the initial video"
             )}
           </span>
         </span>
@@ -105,6 +108,12 @@ export function VerdictLine({
         <span className="tabular-nums">
           {approvedPlanNoOp
             ? "Exact source · no generation"
+            : combined && videosGenerated >= 2
+              ? "Take 1 + Take 2 generated"
+            : combined && videosGenerated === 1
+              ? "Take 1 generated"
+            : combined
+              ? "Preparing Take 1"
             : videosGenerated >= 2
             ? "Initial + Final generated"
             : videosGenerated === 1

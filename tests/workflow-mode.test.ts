@@ -26,12 +26,15 @@ import {
   RELIGHT_WORKFLOW,
   workflowForMode,
 } from "../lib/workflow-def.ts";
+import { buildRun } from "../lib/run-factory.ts";
+import type { VideoAsset } from "../lib/types.ts";
 
 test("workflow mode accepts the current mode plus both historical product modes", () => {
   assert.equal(parseWorkflowMode("flora"), "flora");
   assert.equal(parseWorkflowMode("lamp"), "lamp");
   assert.equal(parseWorkflowMode("background"), "background");
   assert.equal(parseWorkflowMode("iris"), "iris");
+  assert.equal(parseWorkflowMode("combined"), "combined");
   assert.equal(parseWorkflowMode("live"), null);
   assert.equal(parseWorkflowMode(undefined), null);
 });
@@ -44,10 +47,30 @@ test("new browser selections default to Lamp and retain historical labels", () =
   assert.equal(workflowModeLabel("background"), "Lamp Background");
   assert.equal(workflowModeLabel("beautify"), "Lamp Beautify");
   assert.equal(workflowModeLabel("iris"), "Lamp Iris");
+  assert.equal(workflowModeLabel("combined"), "Lamp Combined");
   assert.equal(workflowOutputLabel("lamp"), "RELIT");
   assert.equal(workflowOutputLabel("background"), "CLEANED");
   assert.equal(workflowOutputLabel("beautify"), "ENHANCED");
   assert.equal(workflowOutputLabel("iris"), "GAZE-CORRECTED");
+  assert.equal(workflowOutputLabel("combined"), "FINISHED");
+});
+
+test("Combined run construction freezes the exact selected relight strength", () => {
+  const video = {
+    id: "video-combined",
+    runId: "run-combined",
+    kind: "original",
+    url: "/api/media/run-combined/original.mp4",
+    label: "combined-source.mp4",
+    durationSec: 10,
+    width: 1920,
+    height: 1080,
+    hasAudio: true,
+  } satisfies VideoAsset;
+
+  assert.equal(buildRun(video, 1, "combined", 25).relightIntensity, 25);
+  assert.equal(buildRun(video, 1, "combined", 100).relightIntensity, 100);
+  assert.equal(buildRun(video, 1, "background", 25).relightIntensity, undefined);
 });
 
 test("the saved new-run preference can never resurrect legacy Flora", () => {
@@ -55,6 +78,7 @@ test("the saved new-run preference can never resurrect legacy Flora", () => {
   assert.equal(parseSelectableWorkflowMode("background"), "background");
   assert.equal(parseSelectableWorkflowMode("beautify"), "beautify");
   assert.equal(parseSelectableWorkflowMode("iris"), "iris");
+  assert.equal(parseSelectableWorkflowMode("combined"), "combined");
   assert.equal(parseSelectableWorkflowMode("flora"), null);
   assert.equal(parseSelectableWorkflowMode("combo"), null);
 });
@@ -133,6 +157,16 @@ test("plan-mode helpers cover Background, Beautify, and Iris symmetrically", () 
 
 test("Lamp Iris joins the fixed two-pass plumbing end to end", () => {
   assert.equal(isTwoPassWorkflowMode("iris"), true);
+  assert.equal(isTwoPassWorkflowMode("combined"), true);
+  assert.equal(
+    workflowModeFromExecutionId("lamp-combined:run-x"),
+    "combined"
+  );
+  assert.equal(
+    runWorkflowMode({ workflowId: "lamp-combined-v1" }),
+    "combined"
+  );
+  assert.equal(workflowForMode("combined").id, "lamp-combined-v1");
   assert.equal(workflowModeFromExecutionId("lamp-iris:run-x"), "iris");
   assert.equal(workflowModeFromExecutionId("lamp-iris-batch:batch-x"), "iris");
   assert.equal(runWorkflowMode({ workflowId: "lamp-iris-v1" }), "iris");

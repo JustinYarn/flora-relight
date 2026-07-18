@@ -63,7 +63,8 @@ const BACKGROUND_NODE_STAGES: Array<{ id: string; stage: StageId }> = [
  * nodes), fall back to the furthest settled node so the line never blanks.
  */
 export function currentStage(run: Run): StageId {
-  const stages = isPlanWorkflowMode(runWorkflowMode(run))
+  const workflowMode = runWorkflowMode(run);
+  const stages = isPlanWorkflowMode(workflowMode) || workflowMode === "combined"
     ? BACKGROUND_NODE_STAGES
     : NODE_STAGES;
   let running: StageId | null = null;
@@ -150,7 +151,7 @@ function CheckChips({
 export function GenerationTheater({ run }: { run: Run }) {
   const stage = currentStage(run);
   const workflowMode = runWorkflowMode(run);
-  const planMode = isPlanWorkflowMode(workflowMode);
+  const planMode = isPlanWorkflowMode(workflowMode) || workflowMode === "combined";
   const methodLabel = workflowModeLabel(workflowMode);
   const wholeVideoCheckDefs = evalDefsForRun(run).filter(
     (definition) => definition.method !== "deterministic"
@@ -205,9 +206,14 @@ export function GenerationTheater({ run }: { run: Run }) {
       break;
     case "brief":
       if (previous) {
-        headline = `The initial critique found ${prevFailedChecks} failed check${
-          prevFailedChecks === 1 ? "" : "s"
-        } — compiling the final prompt…`;
+        headline =
+          workflowMode === "combined"
+            ? `The Take 1 quality check found ${prevFailedChecks} failed check${
+                prevFailedChecks === 1 ? "" : "s"
+              } — compiling the Take 2 prompt…`
+            : `The initial critique found ${prevFailedChecks} failed check${
+                prevFailedChecks === 1 ? "" : "s"
+              } — compiling the final prompt…`;
         subline = "the whole-video feedback gets one correction pass";
       } else {
         headline =
@@ -217,36 +223,52 @@ export function GenerationTheater({ run }: { run: Run }) {
               ? "Locking the approved enhancement plan…"
               : workflowMode === "iris"
                 ? "Locking the approved gaze plan…"
+                : workflowMode === "combined"
+                  ? "Locking the approved Combined plan…"
                 : "Compiling the mega prompt…";
         subline =
           workflowMode === "background"
             ? "only approved removal targets may change"
             : workflowMode === "beautify"
               ? "only approved on-camera enhancement zones may change"
-              : workflowMode === "iris"
-                ? "only approved gaze corrections may change"
-                : "what may change and what must remain source-faithful";
+            : workflowMode === "iris"
+              ? "only approved gaze corrections may change"
+              : workflowMode === "combined"
+                ? "both source-rooted takes use the same human-approved scope"
+              : "what may change and what must remain source-faithful";
       }
       break;
     case "videogen":
       headline =
         attempt >= 2
-          ? "Regenerating the final video from the original…"
-          : "Generating the initial video from the mega prompt…";
+          ? workflowMode === "combined"
+            ? "Generating Take 2 separately from the original…"
+            : "Regenerating the final video from the original…"
+          : workflowMode === "combined"
+            ? "Generating Take 1 from the approved Combined prompt…"
+            : "Generating the initial video from the mega prompt…";
       subline = null; // rendered below with the elapsed clock
       break;
     case "checks":
       headline =
         attempt >= 2
-          ? "Evaluating the final video as one complete result…"
-          : "Critiquing the initial video as one complete result…";
+          ? workflowMode === "combined"
+            ? "Evaluating Take 2 as one complete result…"
+            : "Evaluating the final video as one complete result…"
+          : workflowMode === "combined"
+            ? "Evaluating Take 1 as one complete result…"
+            : "Critiquing the initial video as one complete result…";
       subline = null; // rendered below with the live count
       break;
     case "decide":
       headline =
         attempt >= 2
-          ? "Saving the final AI evaluation…"
-          : "Turning the critique into one final revision…";
+          ? workflowMode === "combined"
+            ? "Saving both candidate receipts for your blind choice…"
+            : "Saving the final AI evaluation…"
+          : workflowMode === "combined"
+            ? "Turning Take 1 feedback into the one Take 2 correction pass…"
+            : "Turning the critique into one final revision…";
       subline = `${methodLabel} stops after the fixed second generation`;
       break;
     case "remux":
@@ -257,7 +279,7 @@ export function GenerationTheater({ run }: { run: Run }) {
   if (pausedForApproval) {
     headline = `${methodLabel} is safely paused for approval`;
     subline =
-      `${planMode ? "return to Create to renew the exact plan" : "return to Create to renew the exact run approval"}; completed provider work will be reused`;
+      `${planMode ? "use the approval panel above to renew the exact plan" : "return to Create to renew the exact run approval"}; completed provider work will be reused`;
   }
 
   const landedCount = wholeVideoCheckDefs.filter((def) =>
@@ -270,7 +292,9 @@ export function GenerationTheater({ run }: { run: Run }) {
     <div className="relative flex h-full w-full flex-col overflow-hidden bg-surface">
       {/* Lamp pass + live spend, top-right. */}
       <div className="absolute right-2 top-2 z-10 text-right text-2xs tabular-nums text-faint">
-        {attempt >= 2 ? "final" : "initial"} video · v{attempt}
+        {workflowMode === "combined"
+          ? `Take ${attempt} video`
+          : `${attempt >= 2 ? "final" : "initial"} video · v${attempt}`}
         {run.cost ? (
           <span>
             {" · "}
