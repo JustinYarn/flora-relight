@@ -9,7 +9,11 @@ import { PipelineCanvas } from "@/components/canvas/PipelineCanvas";
 import { NodeInspector } from "@/components/canvas/NodeInspector";
 import { StageProgressStrip } from "@/components/canvas/StageProgressStrip";
 import { STAGE_LANES } from "@/components/canvas/layout";
-import { runWorkflowMode } from "@/lib/workflow-mode";
+import {
+  isPlanWorkflowMode,
+  runWorkflowMode,
+  workflowModeLabel,
+} from "@/lib/workflow-mode";
 import { workflowForMode } from "@/lib/workflow-def";
 
 /**
@@ -64,14 +68,14 @@ export default function PipelinePage() {
   }, []);
   const closeInspector = useCallback(() => selectNode(null), [selectNode]);
 
-  /* Default to the newest run (runs are newest-first). */
+  /* Default to the newest run for the selected method, never an unrelated door. */
   const activeRun = useMemo(() => {
     if (selectedRunId) {
       const found = runs.find((r) => r.id === selectedRunId);
       if (found) return found;
     }
-    return runs[0];
-  }, [runs, selectedRunId]);
+    return runs.find((run) => runWorkflowMode(run) === workflowMode);
+  }, [runs, selectedRunId, workflowMode]);
   const displayedWorkflowMode = activeRun
     ? runWorkflowMode(activeRun)
     : workflowMode;
@@ -150,7 +154,7 @@ export default function PipelinePage() {
 
         {/* Lane-oriented legend: stage names, not raw kind colors. */}
         <div className="ml-auto hidden items-center gap-2.5 xl:flex">
-          {(workflow.id === "lamp-background-v1" ? [] : STAGE_LANES).map((lane) => (
+          {(isPlanWorkflowMode(displayedWorkflowMode) ? [] : STAGE_LANES).map((lane) => (
             <span
               key={lane.id}
               className="flex items-center gap-1 text-2xs text-faint"
@@ -172,10 +176,16 @@ export default function PipelinePage() {
             aria-label="Select run"
             className="rounded-lg border border-edge bg-raised px-2 py-1.5 text-xs text-ink focus:outline-none disabled:opacity-40"
           >
-            {runs.length === 0 ? <option value="">no runs yet</option> : null}
+            {runs.length === 0 ? (
+              <option value="">no runs yet</option>
+            ) : !activeRun ? (
+              <option value="">
+                {workflowModeLabel(workflowMode)} definition
+              </option>
+            ) : null}
             {runs.map((r) => (
               <option key={r.id} value={r.id}>
-                run …{r.id.slice(-6)} · {r.status}
+                {workflowModeLabel(runWorkflowMode(r))} · run …{r.id.slice(-6)} · {r.status}
               </option>
             ))}
           </select>
@@ -213,6 +223,7 @@ export default function PipelinePage() {
         <div className="relative min-w-0 flex-1">
           <PipelineCanvas
             workflow={workflow}
+            workflowMode={displayedWorkflowMode}
             run={activeRun}
             selectedNodeId={selectedNodeId}
             onSelectNode={selectNode}

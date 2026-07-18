@@ -10,8 +10,7 @@ import type {
 } from "@/lib/types";
 import { useAppStore } from "@/lib/store";
 import { markServerRunObserved } from "@/lib/persist";
-import { evalDefsForRun, isLampRun } from "@/lib/lamp-evaluation";
-import { isLampBackgroundRun } from "@/lib/lamp-background-read";
+import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { Button, verdictColor } from "@/components/ui";
 import { PairPlayer } from "@/components/library/PairPlayer";
 import { formatRunDate } from "@/components/library/derive";
@@ -21,11 +20,18 @@ import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
 import { IrisPlanReview } from "@/components/review/IrisPlanReview";
 import {
   deliveredInitialBestOfTwo,
+  deliveredVideoLabel,
   finalLampIteration,
   finalLampVideo,
+  revealedDeliveredEvaluation,
   SCALE,
   scalePoint,
 } from "@/components/grade/derive";
+import {
+  isApprovedPlanNoOp,
+  isTwoPassWorkflowMode,
+  runWorkflowMode,
+} from "@/lib/workflow-mode";
 import type { GradeDraftSaveState } from "@/components/grade/useGradeDraft";
 
 /*
@@ -141,13 +147,12 @@ export function ClipGrader({
   const relit = finalLampVideo(run);
   // Lamp Iris best-of-two delivered the Initial take; label it honestly.
   const bestOfTwoInitial = deliveredInitialBestOfTwo(run);
-  const lampRun = isLampRun(run);
-  const backgroundRun = isLampBackgroundRun(run);
-  const exceptionalBackgroundNoOp =
-    backgroundRun &&
-    run.backgroundCleanupPlan?.decision === "exceptional-no-op";
+  const aiEvaluationName = bestOfTwoInitial
+    ? "Delivered AI evaluation"
+    : "Final AI evaluation";
+  const exceptionalPlanNoOp = isApprovedPlanNoOp(run);
   const savedAiEvaluationExpected =
-    lampRun || (backgroundRun && !exceptionalBackgroundNoOp);
+    isTwoPassWorkflowMode(runWorkflowMode(run)) && !exceptionalPlanNoOp;
   const gradeDefs = evalDefsForRun(run);
   const aiHeadingId = `final-ai-heading-${run.id}`;
   const aiPanelId = `final-ai-panel-${run.id}`;
@@ -192,12 +197,12 @@ export function ClipGrader({
         | null;
       if (!response.ok || !payload?.run) {
         throw new Error(
-          payload?.error ?? `Final AI evaluation could not be read (${response.status}).`
+          payload?.error ?? `${aiEvaluationName} could not be read (${response.status}).`
         );
       }
-      const final = finalLampIteration(payload.run);
-      if (final?.index !== 2 || final.evalResults.length === 0) {
-        throw new Error("The saved Final AI evaluation is not available yet.");
+      const final = revealedDeliveredEvaluation(run, payload.run);
+      if (!final) {
+        throw new Error("The saved delivered-take AI evaluation is not available yet.");
       }
       if (controller.signal.aborted) return;
       setRevealedFinal(final);
@@ -208,7 +213,7 @@ export function ClipGrader({
       setAiRevealError(
         error instanceof Error
           ? error.message
-          : "The saved Final AI evaluation could not be read."
+          : `The saved ${aiEvaluationName.toLowerCase()} could not be read.`
       );
     } finally {
       if (revealRequest.current === controller) revealRequest.current = null;
@@ -331,15 +336,7 @@ export function ClipGrader({
           original={run.originalVideo}
           relit={relit}
           audible="relit"
-          relitLabel={
-            run.finalVideo
-              ? `FINAL VIDEO${shipped ? ` · v${shipped.index}` : ""}`
-              : shipped
-                ? bestOfTwoInitial
-                  ? `DELIVERED VIDEO · v${shipped.index} · BEST OF TWO`
-                  : `FINAL VIDEO · v${shipped.index}`
-                : "FINAL VIDEO"
-          }
+          relitLabel={deliveredVideoLabel(run)}
         />
       </div>
 
@@ -371,12 +368,12 @@ export function ClipGrader({
                 className="block text-sm font-medium text-ink"
               >
                 {aiRevealState === "shown"
-                  ? "Final AI evaluation is visible"
-                  : "Final AI evaluation is ready"}
+                  ? `${aiEvaluationName} is visible`
+                  : `${aiEvaluationName} is ready`}
               </span>
               <span className="mt-0.5 block text-pretty text-2xs leading-relaxed text-muted">
                 {aiRevealState === "shown"
-                  ? "These are the stored results for Final. Hiding them does not change your grading draft."
+                  ? `These are the stored results for ${bestOfTwoInitial ? "the delivered Initial" : "Final"}. Hiding them does not change your grading draft.`
                   : "Hidden by default so you can grade independently. Showing it only reads the saved result — no AI call runs again."}
               </span>
             </span>
@@ -399,7 +396,7 @@ export function ClipGrader({
           </div>
           {aiRevealState === "loading" ? (
             <span className="sr-only" role="status" aria-live="polite">
-              Loading the saved Final AI evaluation.
+              Loading the saved {aiEvaluationName.toLowerCase()}.
             </span>
           ) : null}
           {aiRevealError ? (
@@ -418,15 +415,15 @@ export function ClipGrader({
             </div>
           ) : null}
         </section>
-      ) : exceptionalBackgroundNoOp ? (
+      ) : exceptionalPlanNoOp ? (
         <section className="mt-4 rounded-xl bg-surface px-4 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.16)]">
           <p className="text-sm font-medium text-ink">
-            No Final AI evaluation was run
+            No AI evaluation was run
           </p>
           <p className="mt-0.5 text-pretty text-2xs leading-relaxed text-muted">
             You approved the strict exceptional no-op, so this is the exact
             source video. Grade whether leaving it unchanged was the right
-            background-cleanup decision.
+            plan decision.
           </p>
         </section>
       ) : null}

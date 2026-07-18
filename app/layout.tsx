@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import localFont from "next/font/local";
 import "./globals.css";
 import { NavLinks } from "@/components/shell/nav-links";
@@ -18,7 +19,7 @@ const geistMono = localFont({
 export const metadata: Metadata = {
   title: "Flora + Lamp",
   description:
-    "One-pass Flora and exact two-pass Lamp video relight workflows",
+    "Internal source-faithful video finishing workspace for Lamp workflows",
 };
 
 export default function RootLayout({
@@ -32,14 +33,18 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} font-[family-name:var(--font-geist-sans)] antialiased`}
       >
         <header className="sticky top-0 z-40 flex min-h-14 flex-wrap items-center gap-x-4 border-b border-edge bg-surface px-4 sm:flex-nowrap sm:items-stretch sm:gap-x-5 sm:px-5">
-          <div className="flex h-14 items-center gap-2 self-center">
+          <Link
+            href="/"
+            aria-label="Go to the Lamp home"
+            className="flex h-14 items-center gap-2 self-center rounded-lg pr-2 transition-[opacity,scale] duration-150 ease-out hover:opacity-[0.85] active:scale-[0.96]"
+          >
             <span className="text-sm font-semibold text-ink">
               <span className="text-accent">◐</span> Flora + Lamp
             </span>
             <span className="hidden text-2xs text-faint sm:inline">
-              relight workspace
+              video finishing workspace
             </span>
-          </div>
+          </Link>
           <div className="order-3 flex h-12 w-full items-stretch justify-start overflow-hidden sm:order-none sm:h-auto sm:w-auto sm:flex-1 sm:justify-center">
             <NavLinks />
           </div>

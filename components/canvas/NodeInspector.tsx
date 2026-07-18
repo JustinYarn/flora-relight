@@ -13,9 +13,12 @@ import type {
 import { EVAL_DEFS, getEvalDef } from "@/lib/prompts/eval-defs";
 import {
   LAMP_EVAL_DEFS,
+  evalDefsForRun,
   isLampRun,
 } from "@/lib/lamp-evaluation";
 import { LAMP_BACKGROUND_UI_EVAL_DEFS } from "@/lib/lamp-background-read";
+import { LAMP_BEAUTIFY_UI_EVAL_DEFS } from "@/lib/lamp-beautify-read";
+import { LAMP_IRIS_UI_EVAL_DEFS } from "@/lib/lamp-iris-read";
 import {
   lampBackgroundDisplayPrompt,
   sampleApprovedLampBackgroundPlan,
@@ -38,6 +41,11 @@ import {
 } from "@/components/ui";
 import { kindColor, PROVIDER_MODELS } from "@/components/canvas/PipelineNode";
 import { promptRoleForNode } from "@/components/canvas/prompt-map";
+import {
+  isVersionAPlanMode,
+  planModeDisplayPrompt,
+} from "@/lib/plan-mode-display";
+import { runWorkflowMode, workflowModeLabel } from "@/lib/workflow-mode";
 
 type Mode = "mock" | "live";
 type Iteration = Run["iterations"][number];
@@ -54,10 +62,21 @@ function evalName(id: string): string {
   return (
     LAMP_BACKGROUND_UI_EVAL_DEFS.find((definition) => definition.id === id)
       ?.name ??
+    LAMP_BEAUTIFY_UI_EVAL_DEFS.find((definition) => definition.id === id)
+      ?.name ??
+    LAMP_IRIS_UI_EVAL_DEFS.find((definition) => definition.id === id)?.name ??
     LAMP_EVAL_DEFS.find((definition) => definition.id === id)?.name ??
     EVAL_DEFS.find((definition) => definition.id === id)?.name ??
     id
   );
+}
+
+function evalDefinitionsForMode(workflowMode: WorkflowMode) {
+  if (workflowMode === "lamp") return LAMP_EVAL_DEFS;
+  if (workflowMode === "background") return LAMP_BACKGROUND_UI_EVAL_DEFS;
+  if (workflowMode === "beautify") return LAMP_BEAUTIFY_UI_EVAL_DEFS;
+  if (workflowMode === "iris") return LAMP_IRIS_UI_EVAL_DEFS;
+  return EVAL_DEFS;
 }
 
 function DeltaChip({ delta }: { delta: number }) {
@@ -294,8 +313,8 @@ function codeCheckSpecificationNote(
   workflowMode: WorkflowMode
 ): string {
   if (evalId === "audio-integrity") {
-    if (workflowMode === "background") {
-      return "No model prompt. Lamp Background verifies source-audio restoration and complete timeline agreement deterministically after generation; Audio Integrity is not included in the nine-row visual evaluator call.";
+    if (isVersionAPlanMode(workflowMode)) {
+      return `No model prompt. ${workflowModeLabel(workflowMode)} verifies source-audio restoration and complete timeline agreement deterministically after generation; Audio Integrity is not included in the visual evaluator call.`;
     }
     return "No model prompt. Lamp verifies audio presence, complete source/generated/remuxed timeline agreement, and the restored source-audio fingerprint. Any mismatch fails closed before visual evaluation.";
   }
@@ -317,14 +336,13 @@ function promptViewFor(
   source: string;
 } {
   const workflowMode =
-    run?.workflowMode ??
-    (run?.workflowId === "lamp-v1" ? "lamp" : selectedWorkflowMode);
-  const backgroundView =
-    workflowMode === "background"
-      ? lampBackgroundDisplayPrompt(run, iteration)
-      : undefined;
-  const definitionPrompt =
-    backgroundView?.prompt ?? initialMegaPrompt(workflowMode);
+    (run ? runWorkflowMode(run) : undefined) ?? selectedWorkflowMode;
+  const planModeView = isVersionAPlanMode(workflowMode)
+    ? planModeDisplayPrompt(workflowMode, run, iteration)
+    : undefined;
+  const definitionPrompt = planModeView
+    ? planModeView.prompt
+    : initialMegaPrompt(workflowMode);
   const attempt = iteration?.index ?? Math.max(1, run?.serverExecution?.iteration ?? 1);
   const operation = run?.providerOperations?.find(
     (item) =>
@@ -388,10 +406,10 @@ function promptViewFor(
   return {
     prompt,
     attempt: 1,
-    runBound: backgroundView?.runBound ?? false,
+    runBound: planModeView?.runBound ?? false,
     consumed: false,
     source:
-      backgroundView?.source ??
+      planModeView?.source ??
       "lib/prompts/mega-prompt.ts",
   };
 }
@@ -403,14 +421,14 @@ function generationBriefNote(
   workflowMode: WorkflowMode
 ): string {
   if (!runBound) {
-    if (workflowMode === "background") {
-      return "Definition-only cleanup brief compiled from the clearly labeled sample approved plan. It is not attached to a real video.";
+    if (isVersionAPlanMode(workflowMode)) {
+      return `Definition-only ${workflowModeLabel(workflowMode)} brief compiled from a clearly labeled synthetic approved plan. It is not attached to a real video.`;
     }
     return "This is the current baseline render before a run adds any eval-driven fixes. It is an example, not a historical request.";
   }
   if (!consumed) {
-    if (workflowMode === "background") {
-      return "These exact cleanup-prompt bytes are bound to the selected run or its approved plan. Provider consumption is not confirmed yet.";
+    if (isVersionAPlanMode(workflowMode)) {
+      return `These exact ${workflowModeLabel(workflowMode)} prompt bytes are bound to the selected run or its approved plan. Provider consumption is not confirmed yet.`;
     }
     return "These exact bytes are bound to the selected video. Provider consumption is not confirmed yet, so this is not labeled as a prompt the model already consumed.";
   }
@@ -432,20 +450,15 @@ function EvalSection({
   mode: Mode;
   workflowMode: WorkflowMode;
 }) {
-  const lamp = run ? isLampRun(run) : workflowMode === "lamp";
-  const background =
-    run?.workflowMode === "background" || (!run && workflowMode === "background");
-  // The node's evalId comes from the store-selected workflow graph while
-  // `lamp` follows the selected run — the two can disagree (Flora canvas,
-  // newest run is Lamp). Resolve from the Lamp registry only when the id
-  // exists there; otherwise fall back to the full library instead of
-  // crashing the Engine page on Flora-only nodes.
-  const definition = background
-    ? (LAMP_BACKGROUND_UI_EVAL_DEFS.find((item) => item.id === evalId) ??
-      getEvalDef(evalId))
-    : lamp
-    ? (LAMP_EVAL_DEFS.find((item) => item.id === evalId) ?? getEvalDef(evalId))
-    : getEvalDef(evalId);
+  const effectiveMode = run ? runWorkflowMode(run) : workflowMode;
+  const lamp = effectiveMode === "lamp";
+  const background = effectiveMode === "background";
+  const planMode = isVersionAPlanMode(effectiveMode);
+  const definitions = run
+    ? evalDefsForRun(run)
+    : evalDefinitionsForMode(effectiveMode);
+  const definition =
+    definitions.find((item) => item.id === evalId) ?? getEvalDef(evalId);
   const attempts =
     run?.iterations.flatMap((iteration) => {
       const result = iteration.evalResults.find((item) => item.evalId === evalId);
@@ -728,16 +741,20 @@ function EvalSection({
         }
         note={
           isRubric
-            ? background
-              ? "This is today's code-owned Lamp Background rubric. All nine visual rubrics are composed into one approved-plan-bound Gemini request over the complete source and candidate videos. Historical rubric text is not archived per run."
+            ? planMode
+              ? `This is today's code-owned ${workflowModeLabel(effectiveMode)} rubric. Its visual rubrics are composed into one approved-plan-bound Gemini request over the complete source and candidate videos. Historical rubric text is not archived per run.`
               : lamp
               ? "This is today's code-owned Lamp rubric. Lamp sends all eight visual rubrics in one Gemini request over the complete source and candidate videos. Historical rubric text is not archived per run."
               : "This is today's code-owned Flora rubric. Historical rubric text is not archived per run."
             : codeCheckSpecificationNote(evalId, workflowMode)
         }
         source={
-          background
+          effectiveMode === "background"
             ? "lib/lamp-background-evaluation.ts"
+            : effectiveMode === "beautify"
+              ? "lib/lamp-beautify-evaluation.ts"
+              : effectiveMode === "iris"
+                ? "lib/lamp-iris-evaluation.ts"
             : lamp && evalId === "skin-texture-age"
               ? "lib/lamp-evaluation.ts"
               : "lib/prompts/eval-defs.ts"
@@ -1335,35 +1352,51 @@ function GenerateSection({
   workflowMode: WorkflowMode;
   onSelectNode: (nodeId: string) => void;
 }) {
-  const background = workflowMode === "background";
-  const requestedBackgroundAttempt =
+  const planMode = isVersionAPlanMode(workflowMode);
+  const requestedPlanAttempt =
     node.id === "initial" ? 1 : node.id === "final" ? 2 : undefined;
   const iteration =
-    background && requestedBackgroundAttempt
+    planMode && requestedPlanAttempt
       ? run?.iterations.find(
-          (candidate) => candidate.index === requestedBackgroundAttempt
+          (candidate) => candidate.index === requestedPlanAttempt
         )
       : run?.iterations[run.iterations.length - 1];
   const promptView = promptViewFor(run, iteration, workflowMode);
   const megaPrompt = promptView.prompt;
   const exceptionalNoOp =
-    background &&
-    run?.backgroundCleanupPlan?.approval.status === "approved" &&
-    run.backgroundCleanupPlan.decision === "exceptional-no-op";
+    workflowMode === "background"
+      ? run?.backgroundCleanupPlan?.approval.status === "approved" &&
+        run.backgroundCleanupPlan.decision === "exceptional-no-op"
+      : workflowMode === "beautify"
+        ? run?.beautifyPlan?.approval.status === "approved" &&
+          run.beautifyPlan.decision === "exceptional-no-op"
+        : workflowMode === "iris"
+          ? run?.irisPlan?.approval.status === "approved" &&
+            run.irisPlan.decision === "exceptional-no-op"
+          : false;
   const videoLabel =
     exceptionalNoOp
       ? "Exceptional no-op"
-      : background && requestedBackgroundAttempt
-      ? requestedBackgroundAttempt === 1
+      : planMode && requestedPlanAttempt
+      ? requestedPlanAttempt === 1
         ? "Initial"
         : "Final"
       : promptView.attempt === 1
         ? "Initial"
         : "Final";
   const requestedPromptMissing =
-    background &&
+    planMode &&
+    Boolean(run) &&
     node.id === "final" &&
     iteration === undefined;
+  const outputKind =
+    workflowMode === "background"
+      ? "background-cleanup"
+      : workflowMode === "beautify"
+        ? "touch-up"
+        : workflowMode === "iris"
+          ? "eye-contact"
+          : "relit";
 
   return (
     <>
@@ -1405,7 +1438,7 @@ function GenerateSection({
             },
             {
               label: "Instructions",
-              value: `${background ? "Approved-plan cleanup prompt" : "Mega prompt"} v${megaPrompt.version}`,
+              value: `${planMode ? `Approved-plan ${workflowModeLabel(workflowMode)} prompt` : "Mega prompt"} v${megaPrompt.version}`,
               color: "var(--accent)",
             },
             {
@@ -1424,7 +1457,7 @@ function GenerateSection({
               label: "Output",
               value: exceptionalNoOp
                 ? "Exact source delivery · generation skipped"
-                : `${videoLabel} ${background ? "background-cleanup" : "relit"} video`,
+                : `${videoLabel} ${outputKind} video`,
               color: "var(--pass)",
             },
           ]}
@@ -1436,7 +1469,7 @@ function GenerateSection({
           exceptionalNoOp
             ? "Approved exact-source delivery instruction"
             : requestedPromptMissing
-            ? "Latest available cleanup brief · Final not compiled yet"
+            ? `Latest available ${workflowModeLabel(workflowMode)} brief · Final not compiled yet`
             : promptView.runBound
             ? `${promptView.consumed ? "Prompt consumed" : "Prompt bound"} for ${videoLabel}`
             : "Mega prompt for Initial"
@@ -1460,17 +1493,17 @@ function GenerateSection({
       {requestedPromptMissing ? (
         <p className="text-pretty text-2xs leading-relaxed text-borderline">
           The selected run has no saved Final prompt yet. The disclosure above
-          shows the latest available approved-plan-bound cleanup brief as
+          shows the latest available approved-plan-bound brief as
           context and does not claim Final was compiled or consumed.
         </p>
       ) : null}
-      {background ? (
+      {planMode ? (
         <button
           type="button"
           onClick={() => onSelectNode("plan")}
           className="inline-flex min-h-10 items-center text-xs text-faint transition-colors duration-150 hover:text-ink"
         >
-          Inspect the approved cleanup plan →
+          Inspect the approved plan →
         </button>
       ) : (
         <button
@@ -1766,36 +1799,34 @@ export function NodeInspector({
   onClose: () => void;
 }) {
   const inspectorRun =
-    workflowMode === "background" && run?.workflowMode !== "background"
-      ? undefined
-      : run;
+    run && runWorkflowMode(run) === workflowMode ? run : undefined;
   const state = inspectorRun?.nodeStates[node.id];
-  const backgroundPromptRole =
-    workflowMode !== "background"
+  const planModePromptRole =
+    !isVersionAPlanMode(workflowMode)
       ? null
       : node.id === "plan"
         ? {
             label: "planning prompt",
             color: "var(--running)",
             description:
-              "Proposes the source-specific remove / preserve / uncertain plan; it cannot approve itself.",
+              `Proposes the source-specific ${workflowModeLabel(workflowMode)} plan; it cannot approve itself.`,
           }
         : node.id === "initial" || node.id === "final"
           ? {
-              label: "cleanup mega prompt",
+              label: "approved-plan prompt",
               color: "var(--accent)",
               description:
-                "Consumes an approved-plan-bound cleanup brief with lighting and camera locked.",
+                `Consumes an approved-plan-bound ${workflowModeLabel(workflowMode)} brief with every out-of-scope region locked.`,
             }
           : node.id === "critique"
             ? {
                 label: "plan-bound rubrics",
                 color: "var(--running)",
-                description:
-                  "Composes nine visual checks into one whole-video evaluator; audio is deterministic.",
+              description:
+                  "Composes the mode's visual checks into one approved-plan-bound whole-video evaluator; audio is deterministic.",
               }
             : null;
-  const promptRole = backgroundPromptRole ?? promptRoleForNode(node);
+  const promptRole = planModePromptRole ?? promptRoleForNode(node);
   const runMode: Mode = inspectorRun
     ? inspectorRun.live
       ? "live"

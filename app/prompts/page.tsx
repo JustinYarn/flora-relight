@@ -11,6 +11,7 @@ import type { EvalDefinition, EvalMethod, WorkflowMode } from "@/lib/types";
 import { workflowForMode } from "@/lib/workflow-def";
 import { LAMP_EVAL_DEFS } from "@/lib/lamp-evaluation";
 import { LAMP_BACKGROUND_UI_EVAL_DEFS } from "@/lib/lamp-background-read";
+import { LAMP_BEAUTIFY_UI_EVAL_DEFS } from "@/lib/lamp-beautify-read";
 import { LAMP_IRIS_UI_EVAL_DEFS } from "@/lib/lamp-iris-read";
 import {
   lampBackgroundDisplayPrompt,
@@ -21,6 +22,14 @@ import {
   type LampBackgroundCleanupPlan,
 } from "@/lib/lamp-background";
 import { renderLampBackgroundHolisticEvaluatorPrompt } from "@/lib/lamp-background-evaluation";
+import { LAMP_BEAUTIFY_PLAN_PROMPT } from "@/lib/lamp-beautify";
+import { LAMP_IRIS_PLAN_PROMPT } from "@/lib/lamp-iris";
+import {
+  isVersionAPlanMode,
+  lampBeautifyDisplayPrompt,
+  lampIrisDisplayPrompt,
+} from "@/lib/plan-mode-display";
+import { runWorkflowMode, workflowModeLabel } from "@/lib/workflow-mode";
 
 type CheckFilter = "all" | "rubric" | "code";
 
@@ -39,8 +48,23 @@ const FILTERS: Array<{ id: CheckFilter; label: string }> = [
 function definitionsForMode(workflowMode: WorkflowMode): EvalDefinition[] {
   if (workflowMode === "lamp") return LAMP_EVAL_DEFS;
   if (workflowMode === "background") return LAMP_BACKGROUND_UI_EVAL_DEFS;
+  if (workflowMode === "beautify") return LAMP_BEAUTIFY_UI_EVAL_DEFS;
   if (workflowMode === "iris") return LAMP_IRIS_UI_EVAL_DEFS;
   return EVAL_DEFS;
+}
+
+function planningPromptForMode(workflowMode: WorkflowMode): string | undefined {
+  if (workflowMode === "background") return LAMP_BACKGROUND_CLEANUP_PLAN_PROMPT;
+  if (workflowMode === "beautify") return LAMP_BEAUTIFY_PLAN_PROMPT;
+  if (workflowMode === "iris") return LAMP_IRIS_PLAN_PROMPT;
+  return undefined;
+}
+
+function planEditLabel(workflowMode: WorkflowMode): string {
+  if (workflowMode === "background") return "cleanup";
+  if (workflowMode === "beautify") return "enhancement";
+  if (workflowMode === "iris") return "gaze correction";
+  return "edit";
 }
 
 function Pre({ children }: { children: string }) {
@@ -57,8 +81,8 @@ function Pre({ children }: { children: string }) {
 
 function codeCheckCaveat(evalId: string, workflowMode: WorkflowMode): string {
   if (evalId === "audio-integrity") {
-    if (workflowMode === "background") {
-      return "Lamp Background restores and verifies source audio on each generated cut. Audio is deterministic and never part of the nine-row visual model request.";
+    if (isVersionAPlanMode(workflowMode)) {
+      return `${workflowModeLabel(workflowMode)} restores and verifies source audio on each generated cut. Audio is deterministic and never part of the visual model request.`;
     }
     return workflowMode === "lamp"
       ? "Lamp verifies the restored original audio after each generation. This broader specification remains reference material; the selected run's node status is the operational truth."
@@ -333,7 +357,7 @@ function CheckRow({
                 </DefinitionLine>
                 <DefinitionLine label="Category">{def.category}</DefinitionLine>
                 <DefinitionLine label="Method">
-                  {workflowMode === "background" &&
+                  {isVersionAPlanMode(workflowMode) &&
                   def.method !== "deterministic"
                     ? "holistic Gemini · one shared request"
                     : def.method}
@@ -387,8 +411,8 @@ function CheckRow({
                     Current canonical rubric
                   </SectionTitle>
                   <p className="mb-3 text-pretty text-xs leading-relaxed text-faint">
-                    {workflowMode === "background"
-                      ? "This is the canonical Lamp Background criterion library. Nine visual rubrics are composed into one approved-plan-bound whole-video Gemini request; Audio Integrity remains deterministic."
+                    {isVersionAPlanMode(workflowMode)
+                      ? `This is the canonical ${workflowModeLabel(workflowMode)} criterion library. Its visual rubrics are composed into one approved-plan-bound whole-video Gemini request; Audio Integrity remains deterministic.`
                       : workflowMode === "lamp"
                       ? "This is the canonical criterion library. Lamp removes the older frame-grid input/output boilerplate and composes the applicable criteria into one full-video Gemini request. It is not a snapshot of a past run."
                       : "This is the canonical criterion library used by Flora's full-loop evaluation path. It is current source text, not a snapshot of a past run."}
@@ -423,24 +447,27 @@ function CheckRow({
 export default function PromptsPage() {
   const workflowMode = useAppStore((state) => state.workflowMode);
   const runs = useAppStore((state) => state.runs);
-  const [selectedBackgroundRunId, setSelectedBackgroundRunId] = useState<
+  const [selectedPlanRunId, setSelectedPlanRunId] = useState<
     string | null
   >(null);
-  const backgroundRuns = useMemo(
-    () => runs.filter((run) => run.workflowMode === "background"),
-    [runs]
-  );
-  const selectedBackgroundRun = useMemo(
+  const planModeRuns = useMemo(
     () =>
-      backgroundRuns.find((run) => run.id === selectedBackgroundRunId) ??
-      backgroundRuns[0],
-    [backgroundRuns, selectedBackgroundRunId]
+      isVersionAPlanMode(workflowMode)
+        ? runs.filter((run) => runWorkflowMode(run) === workflowMode)
+        : [],
+    [runs, workflowMode]
+  );
+  const selectedPlanRun = useMemo(
+    () =>
+      planModeRuns.find((run) => run.id === selectedPlanRunId) ??
+      planModeRuns[0],
+    [planModeRuns, selectedPlanRunId]
   );
   const modeMap = useMemo(() => {
     const workflow = workflowForMode(workflowMode);
     const definitions = definitionsForMode(workflowMode);
     const evalNodeIds =
-      workflowMode === "background"
+      isVersionAPlanMode(workflowMode)
         ? new Map(
             definitions.map(
               (definition) => [definition.id, "critique"] as const
@@ -464,13 +491,37 @@ export default function PromptsPage() {
     return { workflow, evalNodeIds, orderedEvalDefs };
   }, [workflowMode]);
   const backgroundPromptView = useMemo(
-    () => lampBackgroundDisplayPrompt(selectedBackgroundRun),
-    [selectedBackgroundRun]
+    () =>
+      lampBackgroundDisplayPrompt(
+        workflowMode === "background" ? selectedPlanRun : undefined
+      ),
+    [selectedPlanRun, workflowMode]
+  );
+  const beautifyPromptView = useMemo(
+    () =>
+      lampBeautifyDisplayPrompt(
+        workflowMode === "beautify" ? selectedPlanRun : undefined
+      ),
+    [selectedPlanRun, workflowMode]
+  );
+  const irisPromptView = useMemo(
+    () =>
+      lampIrisDisplayPrompt(
+        workflowMode === "iris" ? selectedPlanRun : undefined
+      ),
+    [selectedPlanRun, workflowMode]
   );
   const mega = useMemo(() => {
     if (workflowMode === "background") return backgroundPromptView.prompt;
+    if (workflowMode === "beautify") return beautifyPromptView.prompt;
+    if (workflowMode === "iris") return irisPromptView.prompt;
     return initialMegaPrompt(workflowMode);
-  }, [backgroundPromptView.prompt, workflowMode]);
+  }, [
+    backgroundPromptView.prompt,
+    beautifyPromptView.prompt,
+    irisPromptView.prompt,
+    workflowMode,
+  ]);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<CheckFilter>("all");
   const [openId, setOpenId] = useState<string | null>(null);
@@ -478,6 +529,20 @@ export default function PromptsPage() {
   const base = mega.base;
   const isLamp = workflowMode === "lamp";
   const isBackground = workflowMode === "background";
+  const isBeautify = workflowMode === "beautify";
+  const isIris = workflowMode === "iris";
+  const isPlanMode = isVersionAPlanMode(workflowMode);
+  const activePlanPromptView = isBackground
+    ? backgroundPromptView
+    : isBeautify
+      ? beautifyPromptView
+      : isIris
+        ? irisPromptView
+        : undefined;
+  const selectedBackgroundRun = isBackground ? selectedPlanRun : undefined;
+  const planningPrompt = planningPromptForMode(workflowMode);
+  const editLabel = planEditLabel(workflowMode);
+  const modeLabel = workflowModeLabel(workflowMode);
   const visibleBackgroundPlan =
     selectedBackgroundRun?.backgroundCleanupPlan ??
     sampleApprovedLampBackgroundPlan();
@@ -488,6 +553,12 @@ export default function PromptsPage() {
     isBackground &&
     !backgroundPromptView.sample &&
     backgroundPromptView.promptPlan.decision === "exceptional-no-op";
+  const selectedPlanNoOp =
+    isPlanMode &&
+    activePlanPromptView?.sample === false &&
+    activePlanPromptView.prompt.rendered.startsWith(
+      `=== ${modeLabel.toUpperCase()} APPROVED EXCEPTIONAL NO-OP ===`
+    );
   const rubricCount = modeMap.orderedEvalDefs.filter(
     (definition) => definition.promptTemplate
   ).length;
@@ -524,22 +595,22 @@ export default function PromptsPage() {
               Prompt &amp; check map
             </h1>
             <Badge color="var(--accent)">
-              {isBackground && backgroundPromptView.runBound
+              {isPlanMode && activePlanPromptView?.runBound
                 ? "run-bound prompt"
                 : "current definition"}
             </Badge>
           </div>
-          {isBackground && backgroundRuns.length > 0 ? (
+          {isPlanMode && planModeRuns.length > 0 ? (
             <label className="flex items-center gap-2 text-2xs text-faint">
-              Background run
+              {modeLabel} run
               <select
-                value={selectedBackgroundRun?.id ?? ""}
+                value={selectedPlanRun?.id ?? ""}
                 onChange={(event) =>
-                  setSelectedBackgroundRunId(event.target.value || null)
+                  setSelectedPlanRunId(event.target.value || null)
                 }
                 className="min-h-10 rounded-lg border border-edge bg-raised px-2.5 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-accent"
               >
-                {backgroundRuns.map((run) => (
+                {planModeRuns.map((run) => (
                   <option key={run.id} value={run.id}>
                     {run.originalVideo.label} · {run.status}
                   </option>
@@ -549,17 +620,17 @@ export default function PromptsPage() {
           ) : null}
         </div>
         <p className="mt-2 max-w-3xl text-pretty text-sm leading-relaxed text-muted">
-          {isBackground
-            ? "Inspect Lamp Background's planning instruction, the exact approved-plan-bound cleanup brief when a run has one, and every cleanup-specific evaluation definition."
+          {isPlanMode
+            ? `Inspect ${modeLabel}'s planning instruction, exact approved-plan-bound ${editLabel} brief, and mode-specific evaluation definitions.`
             : isLamp
             ? "See the mega prompt and evaluation criteria behind Lamp's fixed Initial → critique → Final method. Long source text stays folded away until you need it."
             : "See the mega prompt and evaluation criteria behind Flora's full iterative relight method. Long source text stays folded away until you need it."}
         </p>
         <p className="mt-2 max-w-3xl text-pretty text-2xs leading-relaxed text-faint">
-          {isBackground
-            ? backgroundPromptView.sample
-              ? "No generation-authorized background run is selected, so the cleanup brief uses a clearly labeled sample approved plan. Nine visual checks run together; Audio Integrity is deterministic."
-              : "The cleanup brief below prefers the selected run's exact saved iteration prompt and approved plan. Nine visual checks run together; Audio Integrity is deterministic."
+          {isPlanMode
+            ? activePlanPromptView?.sample
+              ? `No generation-authorized ${modeLabel} run is selected, so this definition view uses a clearly labeled synthetic approved plan. ${rubricCount} visual checks run together; Audio Integrity is deterministic.`
+              : `The brief below prefers the selected run's exact saved iteration prompt and approved plan. ${rubricCount} visual checks run together; Audio Integrity is deterministic.`
             : isLamp
             ? "Each generated video gets one whole-video evaluation covering eight visual rubrics plus deterministic audio."
             : "Flora's 11-row method combines nine visual rubrics with deterministic timing and audio checks."}
@@ -575,17 +646,22 @@ export default function PromptsPage() {
           }
         >
           <span id="workflow-map-title">
-            How instructions move through{" "}
-            {isBackground ? "Lamp Background" : isLamp ? "Lamp" : "Flora"}
+            How instructions move through {modeLabel}
           </span>
         </SectionTitle>
         <div className="overflow-x-auto pb-2">
-          {isBackground ? (
+          {isPlanMode ? (
             <div className="flex min-w-max items-center gap-2">
               <FlowNode
                 index={1}
-                title="Plan the cleanup"
-                detail="Inspect the full source and classify remove, preserve, and uncertain."
+                title={
+                  isBackground
+                    ? "Plan the cleanup"
+                    : isBeautify
+                      ? "Plan enhancements"
+                      : "Plan eye contact"
+                }
+                detail={`Inspect the full source and classify approved, declined, and uncertain ${editLabel} items.`}
                 nodeId="plan"
               />
               <span className="text-faint" aria-hidden="true">
@@ -603,7 +679,7 @@ export default function PromptsPage() {
               <FlowNode
                 index={3}
                 title="Generate Initial"
-                detail="Clean only approved targets from the immutable source."
+                detail={`Apply only the approved ${editLabel} plan to the immutable source.`}
                 nodeId="initial"
               />
               <span className="text-faint" aria-hidden="true">
@@ -611,8 +687,8 @@ export default function PromptsPage() {
               </span>
               <FlowNode
                 index={4}
-                title="Critique the cleanup"
-                detail="Run nine plan-bound visual checks and deterministic audio."
+                title={`Critique the ${editLabel}`}
+                detail={`Run ${rubricCount} plan-bound visual checks and deterministic audio.`}
                 nodeId="critique"
               />
               <span className="text-accent" aria-hidden="true">
@@ -721,6 +797,8 @@ export default function PromptsPage() {
           <span>
             {isBackground
               ? "Lamp Background has no relighting stage, scene-manifest extractor, or open-ended retry loop. The approved cleanup plan is the edit boundary."
+              : isPlanMode
+              ? `${modeLabel} has no relighting stage, scene-manifest extractor, or open-ended retry loop. Its approved ${editLabel} plan is the edit boundary.`
               : isLamp
               ? "Lamp evaluates the complete source and candidate directly; it does not create a scene manifest or Look Anchor."
               : "Flora extracts a scene inventory, approves a Look Anchor, and retains its full 11-check evaluation loop."}
@@ -733,10 +811,10 @@ export default function PromptsPage() {
           <span id="prompt-sources-title">Prompt sources</span>
         </SectionTitle>
         <div className="grid gap-3">
-          {isBackground ? (
+          {isPlanMode && planningPrompt ? (
             <SourceDisclosure
-              title="Cleanup-plan analyzer"
-              description="Current whole-video planning instruction that proposes remove, preserve, uncertain, or the rare exceptional no-op."
+              title={`${modeLabel} plan analyzer`}
+              description={`Current whole-video planning instruction that proposes bounded ${editLabel} work or the rare exceptional no-op.`}
               badge="planning prompt"
               badgeColor="var(--running)"
             >
@@ -748,13 +826,15 @@ export default function PromptsPage() {
                 </p>
                 <EngineLink nodeId="plan" />
               </div>
-              <div className="mb-4">
-                <CleanupPlanDefinition
-                  plan={visibleBackgroundPlan}
-                  sample={visibleBackgroundPlanIsSample}
-                />
-              </div>
-              <Pre>{LAMP_BACKGROUND_CLEANUP_PLAN_PROMPT}</Pre>
+              {isBackground ? (
+                <div className="mb-4">
+                  <CleanupPlanDefinition
+                    plan={visibleBackgroundPlan}
+                    sample={visibleBackgroundPlanIsSample}
+                  />
+                </div>
+              ) : null}
+              <Pre>{planningPrompt}</Pre>
             </SourceDisclosure>
           ) : (
             <SourceDisclosure
@@ -787,17 +867,17 @@ export default function PromptsPage() {
 
           <SourceDisclosure
             title={
-              isBackground
-                ? selectedBackgroundNoOp
+              isPlanMode
+                ? selectedPlanNoOp
                   ? "Approved exceptional no-op delivery"
-                  : "Approved-plan-bound cleanup brief"
+                  : `Approved-plan-bound ${editLabel} brief`
                 : "Generation brief compiler"
             }
             description={
-              isBackground
-                ? selectedBackgroundNoOp
-                  ? "The selected run delivers the exact source unchanged; no cleanup generation or Final AI evaluation is authorized."
-                  : "The exact cleanup authorization, preservation locks, reconstruction standard, structured corrections, and never-do constraints."
+              isPlanMode
+                ? selectedPlanNoOp
+                  ? `The selected run delivers the exact source unchanged; no ${editLabel} generation or Final AI evaluation is authorized.`
+                  : `The exact ${editLabel} authorization, preservation locks, structured corrections, and never-do constraints.`
                 : "Current base task, invariant locks, lighting specification, active fixes, and never-do constraints."
             }
             badge="compiler"
@@ -805,15 +885,15 @@ export default function PromptsPage() {
           >
             <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
               <p className="max-w-3xl text-pretty text-xs leading-relaxed text-faint">
-                {isBackground
-                  ? selectedBackgroundNoOp
+                {isPlanMode
+                  ? selectedPlanNoOp
                     ? "This is the selected run's saved exceptional no-op instruction. It records that the exact source is the delivery and does not claim a generation occurred."
-                    : backgroundPromptView.sample
-                    ? "This definition-only example is compiled from the clearly labeled sample approved cleanup plan. It is not attached to a real video."
-                    : "These are the selected run's exact saved cleanup-prompt bytes when an iteration exists; otherwise they are compiled from its approved plan."
+                    : activePlanPromptView?.sample
+                    ? `This definition-only example is compiled from a clearly labeled synthetic approved ${editLabel} plan. It is not attached to a real video.`
+                    : `These are the selected run's exact saved ${editLabel}-prompt bytes when an iteration exists; otherwise they are compiled from its approved plan.`
                   : "The compiler assembles structured source blocks into a generation brief. The example below is the current first-version render with an empty fix list, not a historical run snapshot."}
               </p>
-              <EngineLink nodeId={isBackground ? "initial" : "compile"} />
+              <EngineLink nodeId={isPlanMode ? "initial" : "compile"} />
             </div>
 
             {isBackground ? (
@@ -881,24 +961,24 @@ export default function PromptsPage() {
                   right={
                     <Badge>
                       v{mega.version}
-                      {isBackground
-                        ? backgroundPromptView.runBound
+                      {isPlanMode
+                        ? activePlanPromptView?.runBound
                           ? " · run bound"
                           : " · sample"
                         : " · no fixes"}
                     </Badge>
                   }
                 >
-                  {isBackground
-                    ? selectedBackgroundNoOp
+                  {isPlanMode
+                    ? selectedPlanNoOp
                       ? "Exact-source delivery instruction"
-                      : "Cleanup prompt sent to generation"
+                      : `${modeLabel} prompt sent to generation`
                     : "Current compiled example"}
                 </SectionTitle>
                 <Pre>{mega.rendered}</Pre>
-                {isBackground ? (
+                {isPlanMode && activePlanPromptView ? (
                   <p className="mt-2 font-[family-name:var(--font-geist-mono)] text-2xs text-faint">
-                    source · {backgroundPromptView.source}
+                    source · {activePlanPromptView.source}
                   </p>
                 ) : null}
               </div>
@@ -1009,8 +1089,8 @@ export default function PromptsPage() {
             Showing {filteredDefs.length} of {modeMap.orderedEvalDefs.length} checks
             {query || filter !== "all"
               ? ""
-              : isBackground
-                ? " · Lamp Background returns 9 visual results together and appends deterministic audio"
+              : isPlanMode
+                ? ` · ${modeLabel} returns ${rubricCount} visual results together and appends deterministic audio`
                 : isLamp
                 ? " · Lamp returns 8 visual results together and appends deterministic audio"
                 : " · Flora retains 9 visual rubrics and 2 deterministic checks"}

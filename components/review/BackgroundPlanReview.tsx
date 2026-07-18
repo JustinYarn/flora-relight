@@ -16,6 +16,7 @@ import { useAppStore } from "@/lib/store";
 import type { Run } from "@/lib/types";
 import { Badge, Button, Card } from "@/components/ui";
 import { ConfirmSpend } from "@/components/shell/ConfirmSpend";
+import { runWorkflowMode } from "@/lib/workflow-mode";
 
 function formatReservationUsd(usd: number): string {
   return `$${(Math.ceil(usd * 100) / 100).toFixed(2)}`;
@@ -121,7 +122,7 @@ export function BackgroundPlanReview({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const plan = run.backgroundCleanupPlan;
-  if (run.workflowMode !== "background" || !plan) return null;
+  if (runWorkflowMode(run) !== "background" || !plan) return null;
 
   const approved = plan.approval.status === "approved";
   const cleanup = plan.decision === "cleanup";

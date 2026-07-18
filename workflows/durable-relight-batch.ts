@@ -45,7 +45,7 @@ import type {
 import {
   isLipsyncOperationResult,
   LIPSYNC_OPERATION_ID,
-  v2SyncVerdict,
+  v2SyncSettlementVerified,
 } from "@/lib/v2-sync";
 
 export interface DurableRelightBatchInput {
@@ -155,6 +155,7 @@ function hasAnyProviderEvidence(
 
 function completedLampArtifacts(input: {
   batch: BatchExecution;
+  execution: RunExecution | null;
   run: Run;
   paid: LampPaidOperations;
 }): {
@@ -188,13 +189,14 @@ function completedLampArtifacts(input: {
     finalGeneration.renderedPrompt !== finalPrompt ||
     input.paid.final?.status !== "completed" ||
     !isLampEvaluationArtifact(input.paid.final.result, 2) ||
-    (input.paid.lipsync !== null &&
-      (input.paid.lipsync.status !== "completed" ||
-        !isLipsyncOperationResult(input.paid.lipsync.result) ||
-        !v2SyncVerdict(
-          input.paid.lipsync.result.postSync,
-          input.run.originalVideo.syncBaseline ?? null
-        ).pass))
+    !v2SyncSettlementVerified({
+      runId: input.run.id,
+      candidateVerdict: input.execution?.candidateSyncVerdict,
+      finalGeneration,
+      lipsync: input.paid.lipsync,
+      canonicalSourceSync: input.run.originalVideo.syncBaseline,
+      sourceHasAudio: input.run.originalVideo.hasAudio,
+    })
   ) {
     return null;
   }
@@ -863,7 +865,12 @@ async function reconcileBatchMembers(
             ? Boolean(
                 run &&
                   paid &&
-                  completedLampArtifacts({ batch: current, run, paid })
+                  completedLampArtifacts({
+                    batch: current,
+                    execution: child,
+                    run,
+                    paid,
+                  })
               )
             : Boolean(
                 isGradeableVideoGeneration(generationOperation(run, 1)) &&
@@ -1140,7 +1147,12 @@ function classifyLampMember(
     }
   }
 
-  const completed = completedLampArtifacts({ batch, run, paid });
+  const completed = completedLampArtifacts({
+    batch,
+    execution: child,
+    run,
+    paid,
+  });
   if (completed) {
     if (
       child?.status !== "awaiting_review" ||

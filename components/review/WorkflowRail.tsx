@@ -63,7 +63,7 @@ function availableEvalCount(iteration: Iteration | undefined, run: Run): number 
   );
 }
 
-function stateForBackgroundNode(
+function stateForPlanNode(
   run: Run,
   nodeId: "plan" | "initial" | "critique" | "final"
 ): StageState {
@@ -81,6 +81,40 @@ function stateForBackgroundNode(
   if (status === "skipped") return "skipped";
   if (status === "running" || status === "queued") return "active";
   return "idle";
+}
+
+function planSummary(run: Run): string | null {
+  if (run.backgroundCleanupPlan) {
+    const plan = run.backgroundCleanupPlan;
+    if (plan.approval.status !== "approved") return "awaiting your approval";
+    if (plan.decision === "exceptional-no-op") {
+      return "exceptional no-op approved";
+    }
+    return `${plan.remove.length} removal target${
+      plan.remove.length === 1 ? "" : "s"
+    } approved`;
+  }
+  if (run.beautifyPlan) {
+    const plan = run.beautifyPlan;
+    if (plan.approval.status !== "approved") return "awaiting your approval";
+    if (plan.decision === "exceptional-no-op") {
+      return "exceptional no-op approved";
+    }
+    return `${plan.enhance.length} enhancement${
+      plan.enhance.length === 1 ? "" : "s"
+    } approved`;
+  }
+  if (run.irisPlan) {
+    const plan = run.irisPlan;
+    if (plan.approval.status !== "approved") return "awaiting your approval";
+    if (plan.decision === "exceptional-no-op") {
+      return "exceptional no-op approved";
+    }
+    return `${plan.correct.length} gaze correction${
+      plan.correct.length === 1 ? "" : "s"
+    } approved`;
+  }
+  return null;
 }
 
 /**
@@ -105,6 +139,7 @@ export function WorkflowRail({ run }: { run: Run }) {
     (run.iterations.length > 1 ? run.iterations.at(-1) : undefined);
   const initialCritiqueCount = availableEvalCount(initial, run);
   const finalEvalCount = availableEvalCount(final, run);
+  const savedPlanSummary = planSummary(run);
 
   const gradeState: StageState = run.humanGrade
     ? "done"
@@ -113,10 +148,10 @@ export function WorkflowRail({ run }: { run: Run }) {
       : "idle";
   const states: StageState[] = background
     ? [
-        stateForBackgroundNode(run, "plan"),
-        stateForBackgroundNode(run, "initial"),
-        stateForBackgroundNode(run, "critique"),
-        stateForBackgroundNode(run, "final"),
+        stateForPlanNode(run, "plan"),
+        stateForPlanNode(run, "initial"),
+        stateForPlanNode(run, "critique"),
+        stateForPlanNode(run, "final"),
         gradeState,
       ]
     : [
@@ -191,18 +226,9 @@ export function WorkflowRail({ run }: { run: Run }) {
                 className={`min-w-0 text-pretty text-xs leading-snug ${LABEL_CLASS[state]}`}
               >
                 {stage.label}
-                {stage.id === "plan" && run.backgroundCleanupPlan ? (
+                {stage.id === "plan" && savedPlanSummary ? (
                   <span className="mt-1 block text-2xs text-faint">
-                    {run.backgroundCleanupPlan.approval.status === "approved"
-                      ? run.backgroundCleanupPlan.decision ===
-                        "exceptional-no-op"
-                        ? "exceptional no-op approved"
-                        : `${run.backgroundCleanupPlan.remove.length} removal target${
-                            run.backgroundCleanupPlan.remove.length === 1
-                              ? ""
-                              : "s"
-                          } approved`
-                      : "awaiting your approval"}
+                    {savedPlanSummary}
                   </span>
                 ) : null}
                 {stage.id === "critique" && initialCritiqueCount > 0 ? (

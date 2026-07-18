@@ -601,7 +601,7 @@ export function GradeView(
           ) : requestedRun ? (
             <EmptyState
               title="This video is not ready to grade"
-              hint="A generated cleanup enters Grade after Final and its saved AI evaluation is complete; an approved exceptional no-op enters as the exact source without an AI evaluation."
+              hint="A generated two-pass result enters Grade after its delivered take and saved AI evaluation are complete; an approved exceptional no-op enters as the exact source without an AI evaluation."
               action={
                 <Link
                   href={`/runs/${encodeURIComponent(requestedRun.id)}`}
@@ -641,7 +641,7 @@ export function GradeView(
                 ? "Finished outputs land here automatically when their server-verified Final is ready for human grading."
                 : runs.length === 0
                   ? "This workspace has no runs yet. Runs are graded where they were created — the deployed app and a local studio keep separate libraries, so a batch run locally will not appear here."
-                  : "Finish a Lamp Background or Lamp run first. Generated Finals arrive with their saved AI evaluation hidden; an approved exceptional no-op arrives as the unchanged source without one."
+                  : "Finish any Lamp workflow first. Generated deliveries arrive with their saved AI evaluation hidden; an approved exceptional no-op arrives as the unchanged source without one."
             }
             action={
               <Link

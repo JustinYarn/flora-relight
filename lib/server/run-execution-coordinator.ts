@@ -51,9 +51,9 @@ import {
 } from "@/lib/server/spend-approval";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
 import {
-  isLipsyncOperationResult,
   LIPSYNC_OPERATION_ID,
-  v2SyncVerdict,
+  v2CompletedRunRecoveryDecision,
+  v2SyncSettlementVerified,
 } from "@/lib/v2-sync";
 import { durableRelightRun } from "@/workflows/durable-relight-run";
 import type { RunExecution } from "@/lib/types";
@@ -310,15 +310,27 @@ export async function repairCompletedRunExecution(
       !operation.result ||
       operation.renderedPrompt !== expectedPrompt ||
       !isGradeableVideoGeneration(operation) ||
-      !finalEvaluationComplete ||
-      (lipsync !== null &&
-        (lipsync.status !== "completed" ||
-          !isLipsyncOperationResult(lipsync.result) ||
-          !v2SyncVerdict(
-            lipsync.result.postSync,
-            run.originalVideo.syncBaseline ?? null
-          ).pass))
+      !finalEvaluationComplete
     ) {
+      return execution;
+    }
+    const syncVerified = v2SyncSettlementVerified({
+      runId: input.runId,
+      candidateVerdict: execution.candidateSyncVerdict,
+      finalGeneration: operation,
+      lipsync,
+      canonicalSourceSync: run.originalVideo.syncBaseline,
+      sourceHasAudio: run.originalVideo.hasAudio,
+    });
+    if (
+      v2CompletedRunRecoveryDecision(syncVerified) ===
+      "hold_for_live_sync_gate"
+    ) {
+      // This repair helper is called by ordinary enqueue/status reads while a
+      // healthy Workflow may be between free SyncNet analysis and its receipt
+      // CAS. Holding the running record is fail-closed and leaves the live
+      // owner free to journal proof; only the Workflow's actual failure path
+      // may move a missing-proof execution to reconcile_required.
       return execution;
     }
     if (

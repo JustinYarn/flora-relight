@@ -50,12 +50,63 @@ const MAX_ACTIVE_CORRECTIONS = 12;
 
 const FLORA_PROMPT_PREFIX = "=== FLORA RELIGHT MEGA PROMPT";
 const LAMP_PROMPT_PREFIX = "=== LAMP RELIGHT MEGA PROMPT";
+const LAMP_BACKGROUND_PROMPT_PREFIX = "=== LAMP BACKGROUND";
+const LAMP_BEAUTIFY_PROMPT_PREFIX = "=== LAMP BEAUTIFY";
+const LAMP_IRIS_PROMPT_PREFIX = "=== LAMP IRIS";
+
+type GenericPromptOperation = "initial" | "next" | "render";
+
+const PLAN_MODE_PROMPT_ERRORS: Record<
+  Extract<WorkflowMode, "background" | "beautify" | "iris">,
+  Record<GenericPromptOperation, string>
+> = {
+  background: {
+    initial:
+      "Lamp Background prompts require a human-approved cleanup plan and must use initialLampBackgroundMegaPrompt.",
+    next:
+      "Lamp Background corrections must use the plan-bound compileLampBackgroundFinalPrompt.",
+    render:
+      "Lamp Background rendering requires the dedicated approved-plan compiler.",
+  },
+  beautify: {
+    initial:
+      "Lamp Beautify prompts require a human-approved enhancement plan and must use initialLampBeautifyMegaPrompt.",
+    next:
+      "Lamp Beautify corrections must use the plan-bound compileLampBeautifyFinalPrompt.",
+    render:
+      "Lamp Beautify rendering requires the dedicated approved-plan compiler.",
+  },
+  iris: {
+    initial:
+      "Lamp Iris prompts require a human-approved gaze plan and must use initialLampIrisMegaPrompt.",
+    next:
+      "Lamp Iris corrections must use the plan-bound compileLampIrisFinalPrompt.",
+    render:
+      "Lamp Iris rendering requires the dedicated approved-plan compiler.",
+  },
+};
+
+function assertGenericPromptMode(
+  workflowMode: WorkflowMode,
+  operation: GenericPromptOperation
+): asserts workflowMode is Extract<WorkflowMode, "flora" | "lamp"> {
+  if (
+    workflowMode === "background" ||
+    workflowMode === "beautify" ||
+    workflowMode === "iris"
+  ) {
+    throw new Error(PLAN_MODE_PROMPT_ERRORS[workflowMode][operation]);
+  }
+}
 
 /** Preserve the method already serialized into a prompt when recompiling it. */
 function serializedWorkflowMode(
   rendered: string,
   fallback: WorkflowMode = "lamp"
 ): WorkflowMode {
+  if (rendered.startsWith(LAMP_BACKGROUND_PROMPT_PREFIX)) return "background";
+  if (rendered.startsWith(LAMP_BEAUTIFY_PROMPT_PREFIX)) return "beautify";
+  if (rendered.startsWith(LAMP_IRIS_PROMPT_PREFIX)) return "iris";
   if (rendered.startsWith(FLORA_PROMPT_PREFIX)) return "flora";
   if (rendered.startsWith(LAMP_PROMPT_PREFIX)) return "lamp";
   return fallback;
@@ -91,11 +142,7 @@ export function initialMegaPrompt(
   workflowMode: WorkflowMode = "lamp",
   relightIntensity: number = DEFAULT_RELIGHT_INTENSITY
 ): MegaPrompt {
-  if (workflowMode === "background") {
-    throw new Error(
-      "Lamp Background prompts require a human-approved cleanup plan and must use initialLampBackgroundMegaPrompt."
-    );
-  }
+  assertGenericPromptMode(workflowMode, "initial");
   const normalizedIntensity = normalizeRelightIntensity(relightIntensity);
   // Keep the historical 75/100 prompt byte-identical so existing Lamp
   // behavior and hashes remain the experiment's stable control condition.
@@ -139,11 +186,7 @@ export function nextMegaPrompt(
   results: EvalResult[],
   workflowMode: WorkflowMode = serializedWorkflowMode(prev.rendered)
 ): MegaPrompt {
-  if (workflowMode === "background") {
-    throw new Error(
-      "Lamp Background corrections must use the plan-bound compileLampBackgroundFinalPrompt."
-    );
-  }
+  assertGenericPromptMode(workflowMode, "next");
   const version = prev.version + 1;
 
   // 1. Index the latest violations by ledger key, keeping the most severe
@@ -228,11 +271,7 @@ export function renderMegaPrompt(
   mp: MegaPrompt,
   workflowMode: WorkflowMode = serializedWorkflowMode(mp.rendered)
 ): string {
-  if (workflowMode === "background") {
-    throw new Error(
-      "Lamp Background rendering requires the dedicated approved-plan compiler."
-    );
-  }
+  assertGenericPromptMode(workflowMode, "render");
   const { base } = mp;
 
   const locks = [

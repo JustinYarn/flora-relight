@@ -5,11 +5,13 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useAppStore } from "@/lib/store";
 import { useRunDetails } from "@/lib/useRunDetails";
-import type { Iteration, Run, RunStatus } from "@/lib/types";
-import { isLampRun } from "@/lib/lamp-evaluation";
-import { isLampBackgroundRun } from "@/lib/lamp-background-read";
+import type { RunStatus } from "@/lib/types";
 import { workflowForMode } from "@/lib/workflow-def";
-import { runWorkflowMode } from "@/lib/workflow-mode";
+import {
+  isTwoPassWorkflowMode,
+  runWorkflowMode,
+  workflowModeLabel,
+} from "@/lib/workflow-mode";
 import { Badge, EmptyState } from "@/components/ui";
 import { DownloadSideBySide } from "@/components/review/DownloadSideBySide";
 import { RunTabs } from "@/components/review/RunTabs";
@@ -28,6 +30,14 @@ import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
 import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
 import { IrisPlanReview } from "@/components/review/IrisPlanReview";
+import {
+  deliveredInitialBestOfTwo,
+  deliveredVideoLabel,
+} from "@/components/grade/derive";
+import {
+  DELIVERED_ATTEMPT_KEY,
+  reviewAttemptSelection,
+} from "@/components/review/attempt-selection";
 
 const STATUS_COLOR: Record<RunStatus, string> = {
   running: "var(--running)",
@@ -44,22 +54,6 @@ const STATUS_LABEL: Record<RunStatus, string> = {
   "needs-changes": "needs changes",
   failed: "failed",
 };
-
-/** Resolve the evaluation attached to the delivered artifact for either workflow. */
-function finalIteration(run: Run): Iteration | undefined {
-  const last = run.iterations[run.iterations.length - 1];
-  if (isLampRun(run) || isLampBackgroundRun(run)) {
-    return run.iterations.find((iteration) => iteration.index === 2) ?? last;
-  }
-
-  const bestIndex = run.bestIterationIndex;
-  if (bestIndex === undefined) return last;
-  return (
-    run.iterations.find((iteration) => iteration.index === bestIndex) ??
-    run.iterations[bestIndex] ??
-    last
-  );
-}
 
 /**
  * The Review page: two videos + workflow-scoped eval rows. Everything else — prompt
@@ -91,46 +85,36 @@ export default function RunReviewPage() {
     );
   }
 
-  const workflow = workflowForMode(runWorkflowMode(run));
+  const workflowMode = runWorkflowMode(run);
+  const workflow = workflowForMode(workflowMode);
   const latest = run.iterations[run.iterations.length - 1];
-  const lampRun = isLampRun(run);
-  const backgroundRun = isLampBackgroundRun(run);
-  const twoPassRun = lampRun || backgroundRun;
-  const backgroundNoOp =
-    backgroundRun &&
-    run.backgroundCleanupPlan?.approval.status === "approved" &&
-    run.backgroundCleanupPlan.decision === "exceptional-no-op";
+  const twoPassRun = isTwoPassWorkflowMode(workflowMode);
   const planAwaitingApproval =
-    (backgroundRun && run.backgroundCleanupPlan?.approval.status === "draft") ||
-    (run.workflowMode === "beautify" &&
+    (workflowMode === "background" &&
+      run.backgroundCleanupPlan?.approval.status === "draft") ||
+    (workflowMode === "beautify" &&
       run.beautifyPlan?.approval.status === "draft") ||
-    (run.workflowMode === "iris" &&
+    (workflowMode === "iris" &&
       run.irisPlan?.approval.status === "draft");
-  // Default to the delivered v2 final; mid-flight, follow the newest stage.
-  const autoKey = run.finalVideo ? "final" : latest ? `iter-${latest.index}` : null;
+  // Default to the server-selected delivery; mid-flight, follow the newest stage.
+  const autoKey = run.finalVideo || deliveredInitialBestOfTwo(run)
+    ? DELIVERED_ATTEMPT_KEY
+    : latest
+      ? `iter-${latest.index}`
+      : null;
   const activeKey = userSelected ?? autoKey;
-  const isFinal = activeKey === "final" && Boolean(run.finalVideo);
-
-  const selectedIteration: Iteration | undefined = isFinal
-    ? finalIteration(run)
-    : (run.iterations.find((it) => `iter-${it.index}` === activeKey) ?? latest);
-
-  const relitVideo = isFinal ? run.finalVideo : selectedIteration?.generatedVideo;
-  const relitLabel = isFinal
-    ? backgroundNoOp
-      ? "EXACT SOURCE · APPROVED NO-OP"
-      : `${twoPassRun ? "FINAL VIDEO" : "FLORA VIDEO"}${selectedIteration ? ` · v${selectedIteration.index}` : ""}`
+  const selectedAttempt = reviewAttemptSelection(run, activeKey);
+  const selectedIteration = selectedAttempt.iteration;
+  const relitVideo = selectedAttempt.video;
+  const relitLabel = selectedAttempt.delivered
+    ? deliveredVideoLabel(run)
     : selectedIteration
       ? twoPassRun && selectedIteration.index === 1
         ? "INITIAL VIDEO · v1"
         : twoPassRun && selectedIteration.index === 2
           ? "FINAL VIDEO · v2"
           : `VIDEO · v${selectedIteration.index}`
-      : backgroundRun
-        ? "LAMP BACKGROUND VIDEO"
-        : lampRun
-          ? "LAMP VIDEO"
-        : "FLORA VIDEO";
+      : `${workflowModeLabel(workflowMode).toUpperCase()} VIDEO`;
 
   const shortId = run.id.length > 12 ? `${run.id.slice(0, 12)}…` : run.id;
 

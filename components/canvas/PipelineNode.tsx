@@ -9,6 +9,7 @@ import type {
   NodeRunStatus,
   PipelineNode,
   ProviderInfo,
+  WorkflowMode,
 } from "@/lib/types";
 import { Badge, statusColor, VerdictBadge, verdictColor } from "@/components/ui";
 import { promptRoleForNode } from "@/components/canvas/prompt-map";
@@ -23,6 +24,7 @@ export type GateSnapshot = {
 /** Data carried by every canvas node; synced from the active run by PipelineCanvas. */
 export type PipelineNodeData = {
   pipelineNode: PipelineNode;
+  workflowMode: WorkflowMode;
   status: NodeRunStatus;
   /** Latest EvalResult for this node's evalId in the active run (evaluate nodes only). */
   evalResult: EvalResult | null;
@@ -93,7 +95,7 @@ export const PipelineNodeView = memo(function PipelineNodeView({
   const { pipelineNode: node, status, evalResult, iteration, seed, anchorThumb, gateInfo } =
     data;
   const color = kindColor(node.kind);
-  const promptRole = promptRoleForNode(node);
+  const promptRole = promptRoleForNode(node, data.workflowMode);
   const glyph = STATUS_GLYPH[status];
   /** Evaluate nodes carry their verdict on the trailing edge of the card. */
   const verdictEdge =

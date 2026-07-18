@@ -18,6 +18,7 @@ import { useAppStore } from "@/lib/store";
 import type { Run } from "@/lib/types";
 import { Badge, Button, Card } from "@/components/ui";
 import { ConfirmSpend } from "@/components/shell/ConfirmSpend";
+import { runWorkflowMode } from "@/lib/workflow-mode";
 
 function formatReservationUsd(usd: number): string {
   return `$${(Math.ceil(usd * 100) / 100).toFixed(2)}`;
@@ -207,7 +208,7 @@ export function IrisPlanReview({
     LampIrisIntensity | null
   >(null);
   const plan = run.irisPlan;
-  if (run.workflowMode !== "iris" || !plan) return null;
+  if (runWorkflowMode(run) !== "iris" || !plan) return null;
 
   const approved = plan.approval.status === "approved";
   const correct = plan.decision === "correct";

@@ -16,6 +16,7 @@ import {
 } from "@/lib/server/run-execution-resume";
 import { isTwoPassExecutionId } from "@/lib/workflow-mode";
 import { isRelightIntensity } from "../../relight-intensity.ts";
+import { isV2CandidateSyncVerdict } from "../../v2-sync.ts";
 import { createHash } from "node:crypto";
 
 const EXECUTION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
@@ -188,6 +189,29 @@ export function assertRunExecution(execution: unknown): RunExecution {
       "deliveredIteration is a Lamp Iris best-of-two field and is invalid on other executions"
     );
   }
+  if (
+    candidate.candidateSyncVerdict !== undefined &&
+    !isV2CandidateSyncVerdict(candidate.candidateSyncVerdict)
+  ) {
+    throw new Error("Run execution candidateSyncVerdict is invalid");
+  }
+  if (
+    candidate.candidateSyncVerdict !== undefined &&
+    (!isTwoPassExecutionId(candidate.executionId) || candidate.iteration < 2)
+  ) {
+    throw new Error(
+      "candidateSyncVerdict is valid only after a two-pass Final exists"
+    );
+  }
+  if (
+    candidate.candidateSyncVerdict !== undefined &&
+    (candidate.candidateSyncVerdict.recordedAt < candidate.startedAt ||
+      candidate.candidateSyncVerdict.recordedAt > candidate.updatedAt)
+  ) {
+    throw new Error(
+      "candidateSyncVerdict timestamp must fall inside the execution timeline"
+    );
+  }
 
   const planFirst =
     candidate.executionId.startsWith("lamp-background:") ||
@@ -240,7 +264,8 @@ export function assertNewRunExecution(execution: RunExecution): RunExecution {
     execution.revision !== 1 ||
     execution.status !== "queued" ||
     execution.phase !== "queued" ||
-    execution.iteration !== 0
+    execution.iteration !== 0 ||
+    execution.candidateSyncVerdict !== undefined
   ) {
     throw new Error(
       "A new run execution must start queued at iteration 0 and revision 1"
@@ -287,6 +312,24 @@ export function assertRunExecutionTransition(
     candidate.workflowRunId !== current.workflowRunId
   ) {
     throw new Error("Run execution workflowRunId is immutable after binding");
+  }
+  if (current.candidateSyncVerdict !== undefined) {
+    if (
+      JSON.stringify(candidate.candidateSyncVerdict) !==
+      JSON.stringify(current.candidateSyncVerdict)
+    ) {
+      throw new Error("Run execution candidateSyncVerdict is immutable");
+    }
+  } else if (
+    candidate.candidateSyncVerdict !== undefined &&
+    (current.status !== "running" ||
+      candidate.status !== "running" ||
+      current.iteration !== 2 ||
+      candidate.iteration !== 2)
+  ) {
+    throw new Error(
+      "candidateSyncVerdict may only be journaled on the active Final"
+    );
   }
   if (candidate.updatedAt < current.updatedAt) {
     throw new Error("Run execution updatedAt cannot move backwards");

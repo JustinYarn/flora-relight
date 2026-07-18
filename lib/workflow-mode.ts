@@ -1,7 +1,14 @@
 import type { Run, WorkflowMode } from "@/lib/types";
 
-/** This branch focuses on the eye-contact method, so Iris is the default. */
-export const DEFAULT_WORKFLOW_MODE: WorkflowMode = "iris";
+/** Flora remains readable for history, but only these methods may start new work. */
+export type SelectableWorkflowMode = Exclude<WorkflowMode, "flora">;
+export type PlanWorkflowMode = Extract<
+  WorkflowMode,
+  "background" | "beautify" | "iris"
+>;
+
+/** Lamp is the familiar, source-faithful default for a new browser. */
+export const DEFAULT_WORKFLOW_MODE: SelectableWorkflowMode = "lamp";
 export const LAMP_BACKGROUND_EXECUTION_PREFIX = "lamp-background:";
 export const LAMP_BACKGROUND_BATCH_EXECUTION_PREFIX =
   "lamp-background-batch:";
@@ -20,6 +27,46 @@ export function parseWorkflowMode(value: unknown): WorkflowMode | null {
     : null;
 }
 
+export function parseSelectableWorkflowMode(
+  value: unknown
+): SelectableWorkflowMode | null {
+  const mode = parseWorkflowMode(value);
+  return mode && mode !== "flora" ? mode : null;
+}
+
+export function isPlanWorkflowMode(
+  mode: WorkflowMode
+): mode is PlanWorkflowMode {
+  return mode === "background" || mode === "beautify" || mode === "iris";
+}
+
+/** True only for the strict, human-approved exact-source delivery contract. */
+export function isApprovedPlanNoOp(run: Run): boolean {
+  const mode = runWorkflowMode(run);
+  if (mode === "background") {
+    return (
+      run.backgroundCleanupPlan?.approval.status === "approved" &&
+      run.backgroundCleanupPlan.runId === run.id &&
+      run.backgroundCleanupPlan.decision === "exceptional-no-op"
+    );
+  }
+  if (mode === "beautify") {
+    return (
+      run.beautifyPlan?.approval.status === "approved" &&
+      run.beautifyPlan.runId === run.id &&
+      run.beautifyPlan.decision === "exceptional-no-op"
+    );
+  }
+  if (mode === "iris") {
+    return (
+      run.irisPlan?.approval.status === "approved" &&
+      run.irisPlan.runId === run.id &&
+      run.irisPlan.decision === "exceptional-no-op"
+    );
+  }
+  return false;
+}
+
 export function workflowModeLabel(
   mode: WorkflowMode
 ): "Flora" | "Lamp" | "Lamp Background" | "Lamp Beautify" | "Lamp Iris" {
@@ -28,6 +75,14 @@ export function workflowModeLabel(
   if (mode === "background") return "Lamp Background";
   if (mode === "iris") return "Lamp Iris";
   return "Lamp Beautify";
+}
+
+/** Short artifact verb for compact players and library thumbnails. */
+export function workflowOutputLabel(mode: WorkflowMode): string {
+  if (mode === "background") return "CLEANED";
+  if (mode === "beautify") return "ENHANCED";
+  if (mode === "iris") return "GAZE-CORRECTED";
+  return "RELIT";
 }
 
 /**

@@ -22,6 +22,8 @@ import { markServerRunObserved } from "@/lib/persist";
 import { isProviderLostInteractionError } from "@/lib/lost-interaction";
 import {
   estimateLampBackgroundTwoPass,
+  estimateLampBeautifyTwoPass,
+  estimateLampIrisTwoPass,
   estimateLampRun,
   formatUsd,
 } from "@/lib/cost";
@@ -65,6 +67,10 @@ export function LostGenerationRecovery({ run }: { run: Run }) {
   const estimate =
     workflowMode === "background"
       ? estimateLampBackgroundTwoPass(run.originalVideo.durationSec)
+      : workflowMode === "beautify"
+        ? estimateLampBeautifyTwoPass(run.originalVideo.durationSec)
+        : workflowMode === "iris"
+          ? estimateLampIrisTwoPass(run.originalVideo.durationSec)
       : estimateLampRun(run.originalVideo.durationSec);
   // Iteration 1 lost → the whole plan still runs; iteration 2 lost → only the
   // final generation and its evaluation remain (earlier journals replay free,

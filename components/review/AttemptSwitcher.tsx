@@ -1,7 +1,16 @@
 "use client";
 
 import type { Iteration, Run } from "@/lib/types";
-import { isTwoPassWorkflowMode, runWorkflowMode } from "@/lib/workflow-mode";
+import {
+  isApprovedPlanNoOp,
+  isTwoPassWorkflowMode,
+  runWorkflowMode,
+} from "@/lib/workflow-mode";
+import {
+  DELIVERED_ATTEMPT_KEY,
+  reviewAttemptKey,
+  reviewAttemptLabel,
+} from "@/components/review/attempt-selection";
 
 function dotColor(status: Iteration["status"]): string {
   return status === "running"
@@ -38,33 +47,15 @@ export function AttemptSwitcher({
     }`;
 
   const lampRun = isTwoPassWorkflowMode(runWorkflowMode(run));
-  const backgroundNoOp =
-    runWorkflowMode(run) === "background" &&
-    run.backgroundCleanupPlan?.approval.status === "approved" &&
-    run.backgroundCleanupPlan.decision === "exceptional-no-op";
-  // Older single-cut runs have one delivered artifact. Name that output Final
-  // instead of rendering duplicate Initial/Final controls for the same file.
-  const singleDelivered = run.iterations.length === 1 && Boolean(run.finalVideo);
-
+  const approvedPlanNoOp = isApprovedPlanNoOp(run);
   return (
     <div className="flex flex-wrap items-center gap-1">
       <span className="mr-2 text-2xs uppercase tracking-[0.14em] text-faint">
-        {backgroundNoOp ? "Delivery" : "Videos"}
+        {approvedPlanNoOp ? "Delivery" : "Videos"}
       </span>
       {run.iterations.map((it) => {
-        const lampFinal = lampRun && (singleDelivered || it.index === 2);
-        const key = lampFinal && run.finalVideo ? "final" : `iter-${it.index}`;
-        const label = backgroundNoOp
-          ? "Exact source"
-          : lampRun
-          ? singleDelivered
-            ? "Final"
-            : it.index === 1
-              ? "Initial"
-              : it.index === 2
-                ? "Final"
-                : `v${it.index}`
-          : `v${it.index}`;
+        const key = reviewAttemptKey(run, it);
+        const label = reviewAttemptLabel(run, it);
         return (
           <button
             key={key}
@@ -90,9 +81,9 @@ export function AttemptSwitcher({
         <>
           <span className="px-1 text-faint">·</span>
           <button
-            onClick={() => onSelect("final")}
-            className={chipClass(activeKey === "final")}
-            aria-pressed={activeKey === "final"}
+            onClick={() => onSelect(DELIVERED_ATTEMPT_KEY)}
+            className={chipClass(activeKey === DELIVERED_ATTEMPT_KEY)}
+            aria-pressed={activeKey === DELIVERED_ATTEMPT_KEY}
           >
             <span
               className="h-1.5 w-1.5 rounded-full"

@@ -41,6 +41,7 @@ import {
   lampBackgroundCompositeForResults,
   LAMP_BACKGROUND_UI_EVAL_DEFS,
 } from "../../lib/lamp-background-read.ts";
+import { isApprovedPlanNoOp } from "../../lib/workflow-mode.ts";
 
 // ---------------------------------------------------------------------------
 // The 5-point scale
@@ -86,33 +87,14 @@ export function isGradeable(run: Run): boolean {
   const v = finalLampVideo(run);
   const serverVerifiedArtifact =
     finalLampIteration(run)?.recoveredFromProviderOperation === true;
-  const approvedBackgroundNoOp =
-    isLampBackgroundRun(run) &&
-    run.backgroundCleanupPlan?.approval.status === "approved" &&
-    run.backgroundCleanupPlan.runId === run.id &&
-    run.backgroundCleanupPlan.decision === "exceptional-no-op" &&
-    run.status === "awaiting-review" &&
-    v?.url === run.originalVideo.url;
-  const approvedBeautifyNoOp =
-    isLampBeautifyRun(run) &&
-    run.beautifyPlan?.approval.status === "approved" &&
-    run.beautifyPlan.runId === run.id &&
-    run.beautifyPlan.decision === "exceptional-no-op" &&
-    run.status === "awaiting-review" &&
-    v?.url === run.originalVideo.url;
-  const approvedIrisNoOp =
-    isLampIrisRun(run) &&
-    run.irisPlan?.approval.status === "approved" &&
-    run.irisPlan.runId === run.id &&
-    run.irisPlan.decision === "exceptional-no-op" &&
-    run.status === "awaiting-review" &&
-    v?.url === run.originalVideo.url;
+  // A no-op remains part of Grade's durable history after the human decision
+  // changes the run from awaiting-review to approved/needs-changes. The exact
+  // source URL and approved plan binding are the artifact proof in this path.
+  const approvedPlanNoOp =
+    isApprovedPlanNoOp(run) && v?.url === run.originalVideo.url;
   return (
     (!run.serverExecution || run.serverExecution.status === "awaiting_review") &&
-    (serverVerifiedArtifact ||
-      approvedBackgroundNoOp ||
-      approvedBeautifyNoOp ||
-      approvedIrisNoOp) &&
+    (serverVerifiedArtifact || approvedPlanNoOp) &&
     v !== undefined &&
     !v.simulatedFilter
   );
@@ -150,31 +132,46 @@ export function finalLampIteration(run: Run): Iteration | undefined {
   return second ?? run.iterations.at(-1);
 }
 
+/**
+ * Accept a revealed AI artifact only when it belongs to the same delivered
+ * take the grader is currently watching. This matters for Iris best-of-two,
+ * where the canonical grading target can be Initial instead of Final.
+ */
+export function revealedDeliveredEvaluation(
+  gradedRun: Run,
+  revealedRun: Run
+): Iteration | undefined {
+  const expected = finalLampIteration(gradedRun);
+  const revealed = finalLampIteration(revealedRun);
+  return expected &&
+    revealed &&
+    expected.index === revealed.index &&
+    revealed.evalResults.length > 0
+    ? revealed
+    : undefined;
+}
+
 /** The delivered remux when present, otherwise the delivered take's artifact. */
 export function finalLampVideo(run: Run): VideoAsset | undefined {
   return run.finalVideo ?? finalLampIteration(run)?.generatedVideo;
 }
 
+/** Honest label for the exact artifact the human grader is watching. */
+export function deliveredVideoLabel(run: Run): string {
+  const delivered = finalLampIteration(run);
+  if (isApprovedPlanNoOp(run)) {
+    return "EXACT SOURCE · APPROVED NO-OP";
+  }
+  if (deliveredInitialBestOfTwo(run)) {
+    return `DELIVERED VIDEO · v${delivered?.index ?? 1} · BEST OF TWO`;
+  }
+  return `FINAL VIDEO${delivered ? ` · v${delivered.index}` : ""}`;
+}
+
 /** Canonical ungraded-Final predicate: execution truth is server-owned. */
 export function needsLampHumanGrade(run: Run): boolean {
-  const backgroundNoOp =
-    isLampBackgroundRun(run) &&
-    run.backgroundCleanupPlan?.approval.status === "approved" &&
-    run.backgroundCleanupPlan.runId === run.id &&
-    run.backgroundCleanupPlan.decision === "exceptional-no-op" &&
-    run.status === "awaiting-review";
-  const beautifyNoOp =
-    isLampBeautifyRun(run) &&
-    run.beautifyPlan?.approval.status === "approved" &&
-    run.beautifyPlan.runId === run.id &&
-    run.beautifyPlan.decision === "exceptional-no-op" &&
-    run.status === "awaiting-review";
-  const irisNoOp =
-    isLampIrisRun(run) &&
-    run.irisPlan?.approval.status === "approved" &&
-    run.irisPlan.runId === run.id &&
-    run.irisPlan.decision === "exceptional-no-op" &&
-    run.status === "awaiting-review";
+  const approvedPlanNoOp =
+    isApprovedPlanNoOp(run) && run.status === "awaiting-review";
   return (
     ((run.serverExecution !== undefined &&
       (run.serverExecution.executionId.startsWith("lamp:") ||
@@ -182,9 +179,7 @@ export function needsLampHumanGrade(run: Run): boolean {
         run.serverExecution.executionId.startsWith("lamp-beautify:") ||
         run.serverExecution.executionId.startsWith("lamp-iris:")) &&
       run.serverExecution.status === "awaiting_review") ||
-      backgroundNoOp ||
-      beautifyNoOp ||
-      irisNoOp) &&
+      approvedPlanNoOp) &&
     run.humanGrade === undefined
   );
 }
@@ -293,7 +288,7 @@ export function perCheckStats(
 
 /** Preserve each method's registry; mixed sets use the stable union by id. */
 export function evalDefsForRuns(runs: Run[]): EvalDefinition[] {
-  if (runs.length === 0) return LAMP_BEAUTIFY_UI_EVAL_DEFS;
+  if (runs.length === 0) return [];
   const registries: readonly EvalDefinition[][] = [
     ...(runs.some(
       (run) =>

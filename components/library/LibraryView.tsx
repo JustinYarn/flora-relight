@@ -324,7 +324,7 @@ export function LibraryView() {
           {hydrated ? (
             <EmptyState
               title="The library is empty"
-              hint="As runs complete, every relit cut lands here automatically — before/after, your saved grade, any available automated evidence, and what it cost."
+              hint="As runs complete, every delivered output lands here automatically — before/after, your saved grade, any available automated evidence, and what it cost."
               action={
                 <Link
                   href="/"

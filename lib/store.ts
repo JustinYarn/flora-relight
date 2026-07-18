@@ -60,7 +60,31 @@ import {
 } from "@/lib/batch-recovery";
 import {
   DEFAULT_WORKFLOW_MODE,
+  parseSelectableWorkflowMode,
+  type SelectableWorkflowMode,
 } from "@/lib/workflow-mode";
+import { needsSingleExecutionAdoption } from "@/lib/single-execution-adoption";
+
+const WORKFLOW_MODE_PREFERENCE_KEY = "flora-relight:workflow-mode";
+
+function readWorkflowModePreference(): SelectableWorkflowMode | null {
+  try {
+    return parseSelectableWorkflowMode(
+      window.localStorage.getItem(WORKFLOW_MODE_PREFERENCE_KEY)
+    );
+  } catch {
+    return null;
+  }
+}
+
+function writeWorkflowModePreference(mode: SelectableWorkflowMode): void {
+  try {
+    window.localStorage.setItem(WORKFLOW_MODE_PREFERENCE_KEY, mode);
+  } catch {
+    // Private browsing or a locked-down browser may disable local storage.
+    // The in-memory selection still works for the current tab.
+  }
+}
 
 /**
  * Batch worker pool size: at most this many runWorkflow() executions in
@@ -108,13 +132,15 @@ interface AppStore {
    */
   mode: "mock" | "live";
   /** Product workflow for new work. Flora is retained only for old runs. */
-  workflowMode: WorkflowMode;
+  workflowMode: SelectableWorkflowMode;
   /**
    * True once hydrate() has finished pulling persisted state (or confirmed
    * the persistence API is absent).
    */
   hydrated: boolean;
   setMode(mode: "mock" | "live"): void;
+  /** Selects the method for the next run and remembers it in this browser. */
+  setWorkflowMode(mode: SelectableWorkflowMode): void;
   /**
    * One-time boot sync (called by lib/persist.ts startPersistence):
    *   1. GET /api/live/health → flips mode to "live" when the server says
@@ -567,32 +593,6 @@ function healthSaysLive(data: unknown): boolean {
   return d.live === true || d.mode === "live";
 }
 
-function needsSingleExecutionAdoption(run: Run): boolean {
-  if (
-    run.workflowMode === "background" &&
-    (run.backgroundCleanupPlan?.approval.status !== "approved" ||
-      run.backgroundCleanupPlan.decision === "exceptional-no-op")
-  ) {
-    return false;
-  }
-  if (
-    !run.spendApproval ||
-    run.spendApproval.source !== "single" ||
-    run.spendApproval.batchId !== undefined
-  ) {
-    return false;
-  }
-  const execution = run.serverExecution;
-  if (!execution) return true;
-  return (
-    execution.source === "single" &&
-    (execution.status === "queued" ||
-      execution.status === "running" ||
-      execution.status === "user_action_required" ||
-      execution.status === "reconcile_required")
-  );
-}
-
 /** Best-effort durable-outbox adoption; callers keep the saved Run on error. */
 async function adoptSingleExecution(runId: string): Promise<RunExecution | null> {
   const response = await fetch("/api/runs/recover", {
@@ -640,13 +640,27 @@ export const useAppStore = create<AppStore>()((set, get) => ({
 
   setMode: (mode) => set({ mode }),
 
+  setWorkflowMode: (workflowMode) => {
+    writeWorkflowModePreference(workflowMode);
+    set({
+      workflowMode,
+      workflow: workflowForMode(workflowMode),
+    });
+  },
+
   hydrate: () => {
     if (typeof window === "undefined") return Promise.resolve(false); // client-only
     if (hydratePromise) return hydratePromise;
     const hydration = (async (): Promise<boolean> => {
-      // The saved workflow-mode preference is intentionally not read back:
-      // Flora is retired for new work, so a stale saved "flora" must not
-      // resurrect it, and Lamp Background is the experiment's fixed default.
+      // Restore only selectable methods. A stale saved "flora" can never
+      // resurrect the retired one-pass flow for new work.
+      const savedWorkflowMode = readWorkflowModePreference();
+      if (savedWorkflowMode) {
+        set({
+          workflowMode: savedWorkflowMode,
+          workflow: workflowForMode(savedWorkflowMode),
+        });
+      }
       // 1. Live-mode health check. A missing route means a mock-only static
       // environment; a transient/network/server failure must be retried so a
       // live deployment never silently boots with persistence disabled.

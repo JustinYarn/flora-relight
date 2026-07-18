@@ -2,9 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isV2FinalGenerationProof,
+  isV2CandidateSyncVerdict,
   isLipsyncOperationResult,
+  LIPSYNC_OPERATION_ID,
   LIPSYNC_MODEL,
+  v2CandidateSourceSyncMatchesCanonical,
+  v2CandidateSyncJournalOwnerMatches,
+  v2CompletedRunRecoveryDecision,
+  v2FinalGenerationProof,
+  v2LipsyncOperationInputHash,
   v2SyncPasses,
+  v2SyncSettlementVerified,
   v2SyncVerdict,
   type SyncNetMetrics,
 } from "../lib/v2-sync.ts";
@@ -20,6 +29,96 @@ const metrics = (
   offsetSec,
   speechPercentage: 0.87,
 });
+
+const RUN_ID = "run_fixture";
+
+function finalGeneration(overrides: Record<string, unknown> = {}) {
+  const resultOverrides =
+    overrides.result && typeof overrides.result === "object"
+      ? (overrides.result as Record<string, unknown>)
+      : {};
+  return {
+    id: "video-generation:2",
+    provider: "gemini",
+    kind: "video_generation",
+    iteration: 2,
+    providerInteractionId: "interaction_final_fixture",
+    renderedPrompt: "exact Final prompt bytes",
+    status: "completed",
+    startedAt: 1_799_999_999_000,
+    updatedAt: 1_800_000_000_000,
+    ...overrides,
+    result: {
+      videoUrl: `/api/media/runs/${RUN_ID}/relit-v2.mp4`,
+      rawUrl: `/api/media/runs/${RUN_ID}/gen-v2.mp4`,
+      durationSec: 5.3,
+      audioVerified: true,
+      usage: {
+        total_input_tokens: 1,
+        total_output_tokens: 1,
+        output_tokens_by_modality: [],
+      },
+      costUsd: 1.12,
+      ...resultOverrides,
+    },
+  };
+}
+
+function finalProof(operation = finalGeneration()) {
+  const proof = v2FinalGenerationProof(operation);
+  assert.ok(proof);
+  return proof;
+}
+
+function passingCandidate(
+  operation = finalGeneration(),
+  sourceSync: SyncNetMetrics | null = null
+) {
+  return {
+    outcome: "passed" as const,
+    iteration: 2 as const,
+    sourceFinal: finalProof(operation),
+    recordedAt: 1_800_000_000_000,
+    policy: "v2_source_relative_artifact_v2" as const,
+    mode: sourceSync ? ("source_relative" as const) : ("absolute" as const),
+    reason: "Candidate clears the effective bar.",
+    metrics: sourceSync ? metrics(2.74, 7.42, -0.04) : metrics(5.2, 8, 0),
+    sourceSync,
+  };
+}
+
+function completedLipsync(operation = finalGeneration()) {
+  const sourceFinal = finalProof(operation);
+  const preSync = metrics(2, 15);
+  const result = {
+    predictionId: "prediction_repair_fixture",
+    model: LIPSYNC_MODEL,
+    videoUrl: `/api/media/runs/${RUN_ID}/relit-v2.mp4`,
+    billableDurationSec: 5.3,
+    costUsd: 0.441225,
+    audioVerified: true as const,
+    preSync,
+    postSync: metrics(6.2, 8.1, 0),
+    sourceFinal,
+  };
+  return {
+    id: LIPSYNC_OPERATION_ID,
+    runId: RUN_ID,
+    provider: "replicate",
+    kind: "lipsync",
+    iteration: 2,
+    inputHash: v2LipsyncOperationInputHash({
+      runId: RUN_ID,
+      preSync,
+      sourceFinal,
+    }),
+    providerOperationId: result.predictionId,
+    status: "completed",
+    startedAt: 1_800_000_000_000,
+    updatedAt: 1_800_000_001_000,
+    result,
+  };
+}
 
 test("V2 SyncNet gate admits its exact confidence and distance boundaries", () => {
   assert.equal(v2SyncPasses(metrics(4, 10)), true);
@@ -109,6 +208,7 @@ test("Lipsync cost is derived from actual output duration", () => {
 });
 
 test("completed Lipsync results retain both SyncNet checks", () => {
+  const sourceFinal = finalProof();
   assert.equal(
     isLipsyncOperationResult({
       predictionId: "prediction_fixture",
@@ -119,7 +219,322 @@ test("completed Lipsync results retain both SyncNet checks", () => {
       audioVerified: true,
       preSync: metrics(3.38, 11.22),
       postSync: metrics(6.2, 8.1),
+      sourceFinal,
     }),
     true
   );
+});
+
+test("a null Lipsync journal requires an explicit Final-artifact-bound candidate verdict", () => {
+  const final = finalGeneration();
+  const passed = passingCandidate(final);
+
+  assert.equal(isV2CandidateSyncVerdict(passed), true);
+  assert.equal(
+    v2SyncSettlementVerified({
+      runId: RUN_ID,
+      candidateVerdict: undefined,
+      finalGeneration: final,
+      lipsync: null,
+      canonicalSourceSync: null,
+      sourceHasAudio: true,
+    }),
+    false
+  );
+  assert.equal(
+    v2SyncSettlementVerified({
+      runId: RUN_ID,
+      candidateVerdict: passed,
+      finalGeneration: final,
+      lipsync: null,
+      canonicalSourceSync: null,
+      sourceHasAudio: true,
+    }),
+    true
+  );
+  assert.equal(
+    v2SyncSettlementVerified({
+      runId: RUN_ID,
+      candidateVerdict: passed,
+      finalGeneration: finalGeneration({
+        renderedPrompt: "changed Final prompt bytes",
+      }),
+      lipsync: null,
+      canonicalSourceSync: null,
+      sourceHasAudio: true,
+    }),
+    false
+  );
+  assert.equal(
+    isV2CandidateSyncVerdict({
+      ...passed,
+      metrics: metrics(1, 20, 0.5),
+    }),
+    false
+  );
+});
+
+test("candidate proof rejects every changed Final journal identity field", () => {
+  const final = finalGeneration();
+  const passed = passingCandidate(final);
+  const changedFinals = [
+    finalGeneration({ providerInteractionId: "interaction_changed" }),
+    finalGeneration({ renderedPrompt: "changed prompt" }),
+    finalGeneration({
+      result: {
+        videoUrl: `/api/media/runs/${RUN_ID}/other-final.mp4`,
+      },
+    }),
+    finalGeneration({
+      result: { rawUrl: `/api/media/runs/${RUN_ID}/other-raw.mp4` },
+    }),
+    finalGeneration({ result: { durationSec: 5.31 } }),
+    finalGeneration({ result: { audioVerified: false } }),
+  ];
+  for (const changed of changedFinals) {
+    assert.equal(
+      v2SyncSettlementVerified({
+        runId: RUN_ID,
+        candidateVerdict: passed,
+        finalGeneration: changed,
+        lipsync: null,
+        canonicalSourceSync: null,
+        sourceHasAudio: true,
+      }),
+      false
+    );
+  }
+});
+
+test("candidate proof is bound to the exact canonical source baseline", () => {
+  const quietSource = metrics(2.65, 7.5, -0.02);
+  const passed = passingCandidate(finalGeneration(), quietSource);
+  assert.equal(
+    v2CandidateSourceSyncMatchesCanonical(quietSource, { ...quietSource }),
+    true
+  );
+  assert.equal(
+    v2CandidateSourceSyncMatchesCanonical(quietSource, {
+      ...quietSource,
+      confidence: 2.66,
+    }),
+    false
+  );
+  assert.equal(
+    v2SyncSettlementVerified({
+      runId: RUN_ID,
+      candidateVerdict: passed,
+      finalGeneration: finalGeneration(),
+      lipsync: null,
+      canonicalSourceSync: quietSource,
+      sourceHasAudio: true,
+    }),
+    true
+  );
+  assert.equal(
+    v2SyncSettlementVerified({
+      runId: RUN_ID,
+      candidateVerdict: passed,
+      finalGeneration: finalGeneration(),
+      lipsync: null,
+      canonicalSourceSync: { ...quietSource, distance: 7.6 },
+      sourceHasAudio: true,
+    }),
+    false
+  );
+});
+
+test("an explicit silent-source skip requires hasAudio === false exactly", () => {
+  const final = finalGeneration();
+  const skipped = {
+    outcome: "skipped" as const,
+    iteration: 2 as const,
+    sourceFinal: finalProof(final),
+    recordedAt: 1_800_000_000_001,
+    policy: "v2_source_relative_artifact_v2" as const,
+    skipReason: "silent_source" as const,
+    reason: "Canonical source is silent.",
+  };
+  assert.equal(isV2CandidateSyncVerdict(skipped), true);
+  assert.equal(
+    v2SyncSettlementVerified({
+      runId: RUN_ID,
+      candidateVerdict: skipped,
+      finalGeneration: final,
+      lipsync: null,
+      canonicalSourceSync: null,
+      sourceHasAudio: false,
+    }),
+    true
+  );
+  for (const malformed of [true, undefined, null, 0, "false"]) {
+    assert.equal(
+      v2SyncSettlementVerified({
+        runId: RUN_ID,
+        candidateVerdict: skipped,
+        finalGeneration: final,
+        lipsync: null,
+        canonicalSourceSync: null,
+        sourceHasAudio: malformed,
+      }),
+      false
+    );
+  }
+});
+
+test("a completed passing repair must match its paid claim and current Final", () => {
+  const final = finalGeneration();
+  const lipsync = completedLipsync(final);
+  assert.equal(
+    v2SyncSettlementVerified({
+      runId: RUN_ID,
+      candidateVerdict: undefined,
+      finalGeneration: final,
+      lipsync,
+      canonicalSourceSync: null,
+      sourceHasAudio: true,
+    }),
+    true
+  );
+  assert.equal(
+    v2SyncSettlementVerified({
+      runId: RUN_ID,
+      candidateVerdict: undefined,
+      finalGeneration: final,
+      lipsync: { ...lipsync, inputHash: "0".repeat(64) },
+      canonicalSourceSync: null,
+      sourceHasAudio: true,
+    }),
+    false
+  );
+  assert.equal(
+    v2SyncSettlementVerified({
+      runId: RUN_ID,
+      candidateVerdict: undefined,
+      finalGeneration: final,
+      lipsync: { ...lipsync, providerOperationId: "prediction_changed" },
+      canonicalSourceSync: null,
+      sourceHasAudio: true,
+    }),
+    false
+  );
+});
+
+test("completed repair proof rejects interaction, prompt, artifact, duration, and audio mutations", () => {
+  const final = finalGeneration();
+  const lipsync = completedLipsync(final);
+  const changedFinals = [
+    finalGeneration({ providerInteractionId: "interaction_changed" }),
+    finalGeneration({ renderedPrompt: "changed prompt" }),
+    finalGeneration({
+      result: {
+        videoUrl: `/api/media/runs/${RUN_ID}/other-final.mp4`,
+      },
+    }),
+    finalGeneration({
+      result: { rawUrl: `/api/media/runs/${RUN_ID}/other-raw.mp4` },
+    }),
+    finalGeneration({ result: { durationSec: 5.31 } }),
+    finalGeneration({ result: { audioVerified: false } }),
+  ];
+  for (const changed of changedFinals) {
+    assert.equal(
+      v2SyncSettlementVerified({
+        runId: RUN_ID,
+        candidateVerdict: undefined,
+        finalGeneration: changed,
+        lipsync,
+        canonicalSourceSync: null,
+        sourceHasAudio: true,
+      }),
+      false
+    );
+  }
+});
+
+test("candidate verdict replay requires the same live execution/workflow owner", () => {
+  const execution = {
+    runId: RUN_ID,
+    executionId: "lamp:fixture",
+    workflowRunId: "workflow_fixture",
+    status: "running",
+    phase: "evaluating",
+    iteration: 2,
+  };
+  const expected = {
+    runId: RUN_ID,
+    executionId: "lamp:fixture",
+    workflowRunId: "workflow_fixture",
+  };
+  assert.equal(v2CandidateSyncJournalOwnerMatches(execution, expected), true);
+  assert.equal(
+    v2CandidateSyncJournalOwnerMatches(
+      { ...execution, workflowRunId: "workflow_other" },
+      expected
+    ),
+    false
+  );
+  assert.equal(
+    v2CandidateSyncJournalOwnerMatches(
+      { ...execution, executionId: "lamp:other" },
+      expected
+    ),
+    false
+  );
+  assert.equal(
+    v2CandidateSyncJournalOwnerMatches(
+      { ...execution, status: "reconcile_required" },
+      expected
+    ),
+    false
+  );
+});
+
+test("completed-run recovery holds for the live gate until proof exists", () => {
+  assert.equal(
+    v2CompletedRunRecoveryDecision(false),
+    "hold_for_live_sync_gate"
+  );
+  assert.equal(v2CompletedRunRecoveryDecision(true), "settle");
+});
+
+test("Final proof itself refuses an unverified artifact marker", () => {
+  assert.equal(isV2FinalGenerationProof(finalProof()), true);
+  assert.equal(
+    v2FinalGenerationProof(finalGeneration({ provider: "replicate" })),
+    null
+  );
+  assert.equal(
+    v2FinalGenerationProof(finalGeneration({ kind: "lipsync" })),
+    null
+  );
+  assert.equal(
+    v2FinalGenerationProof(
+      finalGeneration({ result: { audioVerified: false } })
+    ),
+    null
+  );
+});
+
+test("completed repair proof refuses the wrong run or operation kind", () => {
+  const final = finalGeneration();
+  const lipsync = completedLipsync(final);
+  for (const changed of [
+    { ...lipsync, runId: "run_other" },
+    { ...lipsync, provider: "gemini" },
+    { ...lipsync, kind: "judge" },
+    { ...lipsync, iteration: 1 },
+  ]) {
+    assert.equal(
+      v2SyncSettlementVerified({
+        runId: RUN_ID,
+        candidateVerdict: undefined,
+        finalGeneration: final,
+        lipsync: changed,
+        canonicalSourceSync: null,
+        sourceHasAudio: true,
+      }),
+      false
+    );
+  }
 });

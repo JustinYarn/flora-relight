@@ -16,9 +16,17 @@ import {
 } from "../lib/lamp-iris-evaluation.ts";
 import { projectLampIrisEvaluationForRead } from "../lib/lamp-iris-read.ts";
 import {
+  deliveredVideoLabel,
   deliveredInitialBestOfTwo,
   finalLampIteration,
+  finalLampVideo,
+  revealedDeliveredEvaluation,
 } from "../components/grade/derive.ts";
+import {
+  reviewAttemptKey,
+  reviewAttemptLabel,
+  reviewAttemptSelection,
+} from "../components/review/attempt-selection.ts";
 import type { Run } from "../lib/types.ts";
 
 function approvedPlan(): LampIrisPlan {
@@ -242,4 +250,101 @@ test("finalLampIteration grades the delivered take for iris best-of-two only", (
   } as unknown as Run;
   assert.equal(deliveredInitialBestOfTwo(lampRun), false);
   assert.equal(finalLampIteration(lampRun)?.index, 2);
+});
+
+test("AI reveal follows the delivered Iris take instead of hard-coding Final", () => {
+  const irisRun = (deliveredIteration: 1 | 2, revealed: boolean): Run =>
+    ({
+      workflowMode: "iris",
+      workflowId: "lamp-iris-v1",
+      serverExecution: {
+        runId: "run_best_of_two",
+        executionId: "lamp-iris:run_best_of_two",
+        status: "awaiting_review",
+        deliveredIteration,
+      },
+      iterations: [
+        { index: 1, evalResults: deliveredIteration === 1 && revealed ? [{}] : [] },
+        { index: 2, evalResults: deliveredIteration === 2 && revealed ? [{}] : [] },
+      ],
+    }) as unknown as Run;
+
+  assert.equal(
+    revealedDeliveredEvaluation(irisRun(1, false), irisRun(1, true))?.index,
+    1
+  );
+  assert.equal(
+    revealedDeliveredEvaluation(irisRun(2, false), irisRun(2, true))?.index,
+    2
+  );
+  assert.equal(
+    revealedDeliveredEvaluation(irisRun(1, false), irisRun(2, true)),
+    undefined
+  );
+  assert.equal(
+    revealedDeliveredEvaluation(irisRun(1, false), irisRun(1, false)),
+    undefined
+  );
+});
+
+test("review keeps Iris Final selectable when best-of-two delivers Initial", () => {
+  const video = (id: string, url: string, kind: "original" | "generated" | "final") => ({
+    id,
+    runId: "run_best_of_two_review",
+    kind,
+    url,
+    label: `${id}.mp4`,
+    durationSec: 8,
+    width: 1280,
+    height: 720,
+    hasAudio: true,
+  });
+  const initialVideo = video("initial", "/generated/v1.mp4", "generated");
+  const finalVideo = video("final", "/generated/v2.mp4", "generated");
+  const run = {
+    id: "run_best_of_two_review",
+    workflowMode: "iris",
+    workflowId: "lamp-iris-v1",
+    originalVideo: video("source", "/source/input.mp4", "original"),
+    serverExecution: {
+      runId: "run_best_of_two_review",
+      executionId: "lamp-iris:run_best_of_two_review",
+      status: "awaiting_review",
+      deliveredIteration: 1,
+    },
+    iterations: [
+      { index: 1, generatedVideo: initialVideo, evalResults: [] },
+      { index: 2, generatedVideo: finalVideo, evalResults: [] },
+    ],
+  } as unknown as Run;
+
+  const initial = run.iterations[0]!;
+  const final = run.iterations[1]!;
+  assert.equal(reviewAttemptKey(run, initial), "final");
+  assert.equal(reviewAttemptLabel(run, initial), "Delivered");
+  assert.equal(reviewAttemptKey(run, final), "iter-2");
+  assert.equal(reviewAttemptLabel(run, final), "Final");
+
+  const deliveredSelection = reviewAttemptSelection(run, "final");
+  assert.equal(deliveredSelection.iteration?.index, 1);
+  assert.equal(deliveredSelection.video?.url, initialVideo.url);
+  const finalSelection = reviewAttemptSelection(run, "iter-2");
+  assert.equal(finalSelection.iteration?.index, 2);
+  assert.equal(finalSelection.video?.url, finalVideo.url);
+
+  assert.equal(finalLampVideo(run)?.url, initialVideo.url);
+  assert.equal(
+    deliveredVideoLabel(run),
+    "DELIVERED VIDEO · v1 · BEST OF TWO"
+  );
+
+  // If an older/read-model record also carries a canonical delivered remux,
+  // that artifact still wins over the raw iteration media.
+  const deliveredVideo = video("delivered", "/delivered/v1-remux.mp4", "final");
+  const withDeliveredRemux = { ...run, finalVideo: deliveredVideo };
+  assert.equal(
+    reviewAttemptSelection(withDeliveredRemux, "final").video?.url,
+    deliveredVideo.url
+  );
+  assert.equal(finalLampVideo(withDeliveredRemux)?.url, deliveredVideo.url);
 });

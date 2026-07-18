@@ -12,7 +12,11 @@ import type {
   NodeRunStatus,
   Run,
 } from "@/lib/types";
-import { isTwoPassWorkflowMode, runWorkflowMode } from "@/lib/workflow-mode";
+import {
+  isApprovedPlanNoOp,
+  isTwoPassWorkflowMode,
+  runWorkflowMode,
+} from "@/lib/workflow-mode";
 
 /** Visual tone of a chain step — drives tile accents and connector colors. */
 export type StepTone = "running" | "pass" | "fail" | "warn" | "neutral";
@@ -97,10 +101,7 @@ export function correctionsDiff(
 export function buildJourneySteps(run: Run): JourneyStep[] {
   const steps: JourneyStep[] = [];
   const twoPass = isTwoPassWorkflowMode(runWorkflowMode(run));
-  const backgroundNoOp =
-    runWorkflowMode(run) === "background" &&
-    run.backgroundCleanupPlan?.approval.status === "approved" &&
-    run.backgroundCleanupPlan.decision === "exceptional-no-op";
+  const approvedPlanNoOp = isApprovedPlanNoOp(run);
   const status = (nodeId: string): NodeRunStatus =>
     run.nodeStates[nodeId]?.status ?? "idle";
   const started = (nodeId: string): boolean => {
@@ -189,7 +190,7 @@ export function buildJourneySteps(run: Run): JourneyStep[] {
       kind: "attempt",
       id: `attempt-${it.index}`,
       label:
-        backgroundNoOp
+        approvedPlanNoOp
           ? "Exact source"
           : twoPass
           ? it.index === 1
@@ -199,7 +200,7 @@ export function buildJourneySteps(run: Run): JourneyStep[] {
               : `Video v${it.index}`
           : `Attempt v${it.index}`,
       sub:
-        backgroundNoOp
+        approvedPlanNoOp
           ? "approved no-op · no AI evaluation"
           : twoPass
           ? it.composite

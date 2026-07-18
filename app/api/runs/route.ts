@@ -137,6 +137,11 @@ import {
   runLampIrisPlanner,
 } from "@/lib/server/lamp-iris-planner";
 import {
+  canAcceptMockBackgroundPlanApproval,
+  canAcceptMockBeautifyPlanApproval,
+  canAcceptMockIrisPlanApproval,
+} from "@/lib/mock-plan-approval";
+import {
   compileLampFinalPrompt,
   isLampEvaluationArtifact,
   LAMP_EVAL_IDS,
@@ -152,6 +157,7 @@ import { workflowRunLiveness } from "@/lib/server/dead-workflow-recovery";
 import {
   FLORA_RETIRED_RUN_ERROR,
   floraRetiredForNewWork,
+  isApprovedPlanNoOp,
   runHasStartedWork,
   runWorkflowMode,
   workflowModeFromExecutionId,
@@ -1130,7 +1136,9 @@ function mergeLampBeautifyEvaluationResults(
     : undefined;
   const billedFinalOperation = candidate.providerOperations?.find(
     (operation) =>
-      operation.kind === "video_generation" && operation.iteration === 2
+      operation.kind === "video_generation" &&
+      operation.iteration === 2 &&
+      !isArchivedLostGenerationId(operation.id)
   );
   const finalPrompt = finalPromptCandidates
     ? (finalPromptCandidates.find(
@@ -1315,6 +1323,27 @@ function mergeLampIrisEvaluationResults(
   const finalPrompt = final
     ? lampIrisFinalPrompt(candidate, execution, evaluations)
     : undefined;
+  const billedFinalOperation = candidate.providerOperations?.find(
+    (operation) =>
+      operation.kind === "video_generation" &&
+      operation.iteration === 2 &&
+      !isArchivedLostGenerationId(operation.id)
+  );
+  if (
+    finalPrompt &&
+    billedFinalOperation?.renderedPrompt &&
+    providerOperationMatchesLampIrisExecution(
+      billedFinalOperation,
+      candidate,
+      execution,
+      evaluations
+    )
+  ) {
+    // Frozen Iris generations remain valid historical contracts. Project the
+    // exact bytes proved by the provider journal instead of recompiling them
+    // into today's wording on read.
+    finalPrompt.rendered = billedFinalOperation.renderedPrompt;
+  }
   // Best-of-two: the blind-grading hide tracks the settlement's DELIVERED
   // take. Legacy executions without the marker delivered Final (2).
   const deliveredIteration = execution.deliveredIteration ?? 2;
@@ -1903,9 +1932,41 @@ function materializeServerResults(
           backgroundEvaluations
         )
       : undefined;
+    const beautifyFinalCandidates = beautify
+      ? lampBeautifyFinalPromptCandidates(
+          materialized,
+          execution,
+          beautifyEvaluations
+        )
+      : undefined;
+    const beautifyFinal = beautifyFinalCandidates
+      ? (beautifyFinalCandidates.find(
+          (candidate) =>
+            candidate.rendered === secondCutOperation?.renderedPrompt
+        ) ?? beautifyFinalCandidates[0])
+      : undefined;
+    const irisFinal = iris
+      ? lampIrisFinalPrompt(materialized, execution, irisEvaluations)
+      : undefined;
+    if (
+      irisFinal &&
+      secondCutOperation?.renderedPrompt &&
+      providerOperationMatchesLampIrisExecution(
+        secondCutOperation,
+        materialized,
+        execution,
+        irisEvaluations
+      )
+    ) {
+      irisFinal.rendered = secondCutOperation.renderedPrompt;
+    }
     const finalPromptForRun = backgroundFinal
       ? lampBackgroundPromptForRun(backgroundFinal)
-      : lampFinal;
+      : beautifyFinal
+        ? lampBeautifyPromptForRun(beautifyFinal)
+        : irisFinal
+          ? lampIrisPromptForRun(irisFinal)
+          : lampFinal;
     if (twoPass && execution.iteration >= 2 && finalPromptForRun) {
       let iteration = materialized.iterations.find((item) => item.index === 2);
       if (!iteration) {
@@ -2603,7 +2664,7 @@ function materializeServerResults(
     }
   } else {
     delete materialized.serverExecution;
-    if (isLampBackgroundRun(materialized) && materialized.humanGrade) {
+    if (isApprovedPlanNoOp(materialized) && materialized.humanGrade) {
       materialized.status = materialized.humanGrade.shipIt
         ? "approved"
         : "needs-changes";
@@ -3438,23 +3499,32 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   persisted.humanGrade = current.humanGrade;
   persisted.spendApproval = current.spendApproval;
   let acceptsMockPlanApproval = false;
-  try {
-    acceptsMockPlanApproval = Boolean(
-      current.backgroundCleanupPlan &&
-        candidate.backgroundCleanupPlan &&
-        current.spendApproval === undefined &&
-        current.backgroundCleanupPlan.approval.status === "draft" &&
-        candidate.backgroundCleanupPlan.approval.status === "approved" &&
-        (await hashLampBackgroundCleanupPlan(
-          current.backgroundCleanupPlan
-        )) ===
-          (await hashLampBackgroundCleanupPlan(
-            candidate.backgroundCleanupPlan
-          ))
-    );
-  } catch {
-    acceptsMockPlanApproval = false;
-  }
+  let acceptsMockBeautifyPlanApproval = false;
+  let acceptsMockIrisPlanApproval = false;
+  const mockApprovalInput = {
+    hasSpendApproval: current.spendApproval !== undefined,
+  };
+  [
+    acceptsMockPlanApproval,
+    acceptsMockBeautifyPlanApproval,
+    acceptsMockIrisPlanApproval,
+  ] = await Promise.all([
+    canAcceptMockBackgroundPlanApproval({
+      ...mockApprovalInput,
+      currentPlan: current.backgroundCleanupPlan,
+      candidatePlan: candidate.backgroundCleanupPlan,
+    }),
+    canAcceptMockBeautifyPlanApproval({
+      ...mockApprovalInput,
+      currentPlan: current.beautifyPlan,
+      candidatePlan: candidate.beautifyPlan,
+    }),
+    canAcceptMockIrisPlanApproval({
+      ...mockApprovalInput,
+      currentPlan: current.irisPlan,
+      candidatePlan: candidate.irisPlan,
+    }),
+  ]);
   if (acceptsMockPlanApproval) {
     // Provider-free mock plans still require a deliberate human approval.
     persisted.backgroundCleanupPlan =
@@ -3463,6 +3533,12 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     persisted.backgroundCleanupPlan =
       current.backgroundCleanupPlan;
   }
+  persisted.beautifyPlan = acceptsMockBeautifyPlanApproval
+    ? candidate.beautifyPlan
+    : current.beautifyPlan;
+  persisted.irisPlan = acceptsMockIrisPlanApproval
+    ? candidate.irisPlan
+    : current.irisPlan;
   persisted.cost = mergeCost(candidate.cost, current.cost);
   await storage.putRun(persisted);
   return NextResponse.json({ ok: true, id: candidate.id });
@@ -3644,16 +3720,13 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
                 authoritativeExecution
               )
     : true;
-  const approvedBackgroundNoOp =
+  const approvedPlanNoOp =
     !authoritativeExecution &&
-    background &&
-    materialized.backgroundCleanupPlan?.approval.status === "approved" &&
-    materialized.backgroundCleanupPlan.runId === materialized.id &&
-    materialized.backgroundCleanupPlan.decision === "exceptional-no-op" &&
+    isApprovedPlanNoOp(materialized) &&
     materialized.status === "awaiting-review" &&
     shipped?.generatedVideo?.url === materialized.originalVideo.url;
   const canonicalArtifact =
-    approvedBackgroundNoOp ||
+    approvedPlanNoOp ||
     (!authoritativeExecution &&
       materialized.live !== true &&
       shipped?.generatedVideo?.simulatedFilter !== undefined) ||

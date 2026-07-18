@@ -479,6 +479,11 @@ export interface RunExecution {
   approvedPlanHash?: string;
   /** Lamp relight-strength target bound into renderedPrompt; absent on legacy records. */
   relightIntensity?: number;
+  /**
+   * Free SyncNet proof for the exact Final prompt. A clean candidate and a
+   * legitimate silent-source skip both journal here; absence never means pass.
+   */
+  candidateSyncVerdict?: import("./v2-sync").V2CandidateSyncVerdict;
   source: "single" | "batch";
   batchId?: string;
   status: RunExecutionStatus;

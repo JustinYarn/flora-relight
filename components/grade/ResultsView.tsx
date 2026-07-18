@@ -251,9 +251,9 @@ export function ResultsView({ gradedRuns }: { gradedRuns: Run[] }) {
         </SectionTitle>
         <p className="mb-4 max-w-3xl text-pretty text-xs leading-relaxed text-muted">
           Open a video to compare every saved grade with the AI evaluation made
-          after the final regeneration. Lamp Background uses nine visual checks
-          plus source audio, Lamp retains nine active rows, and Flora retains
-          its eleven-row method.
+          for the exact delivered take. Each Lamp method keeps its own
+          source-faithful rubric plus deterministic source-audio verification;
+          historical Flora records retain their eleven-row method.
         </p>
         <div className="space-y-2">
           {gradedRuns.map((run, index) => (

@@ -11,7 +11,11 @@
 import { useEffect, useMemo, useState } from "react";
 import type { EvalDefinition, EvalResult, Run } from "@/lib/types";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
-import { isLampBackgroundRun } from "@/lib/lamp-background-read";
+import {
+  isPlanWorkflowMode,
+  runWorkflowMode,
+  workflowModeLabel,
+} from "@/lib/workflow-mode";
 import { verdictColor } from "@/components/ui";
 import { formatUsd } from "@/lib/cost";
 
@@ -59,7 +63,7 @@ const BACKGROUND_NODE_STAGES: Array<{ id: string; stage: StageId }> = [
  * nodes), fall back to the furthest settled node so the line never blanks.
  */
 export function currentStage(run: Run): StageId {
-  const stages = isLampBackgroundRun(run)
+  const stages = isPlanWorkflowMode(runWorkflowMode(run))
     ? BACKGROUND_NODE_STAGES
     : NODE_STAGES;
   let running: StageId | null = null;
@@ -145,7 +149,9 @@ function CheckChips({
 
 export function GenerationTheater({ run }: { run: Run }) {
   const stage = currentStage(run);
-  const background = isLampBackgroundRun(run);
+  const workflowMode = runWorkflowMode(run);
+  const planMode = isPlanWorkflowMode(workflowMode);
+  const methodLabel = workflowModeLabel(workflowMode);
   const wholeVideoCheckDefs = evalDefsForRun(run).filter(
     (definition) => definition.method !== "deterministic"
   );
@@ -204,12 +210,22 @@ export function GenerationTheater({ run }: { run: Run }) {
         } — compiling the final prompt…`;
         subline = "the whole-video feedback gets one correction pass";
       } else {
-        headline = background
-          ? "Locking the approved cleanup plan…"
-          : "Compiling the mega prompt…";
-        subline = background
-          ? "only approved removal targets may change"
-          : "what may change and what must remain source-faithful";
+        headline =
+          workflowMode === "background"
+            ? "Locking the approved cleanup plan…"
+            : workflowMode === "beautify"
+              ? "Locking the approved enhancement plan…"
+              : workflowMode === "iris"
+                ? "Locking the approved gaze plan…"
+                : "Compiling the mega prompt…";
+        subline =
+          workflowMode === "background"
+            ? "only approved removal targets may change"
+            : workflowMode === "beautify"
+              ? "only approved on-camera enhancement zones may change"
+              : workflowMode === "iris"
+                ? "only approved gaze corrections may change"
+                : "what may change and what must remain source-faithful";
       }
       break;
     case "videogen":
@@ -231,7 +247,7 @@ export function GenerationTheater({ run }: { run: Run }) {
         attempt >= 2
           ? "Saving the final AI evaluation…"
           : "Turning the critique into one final revision…";
-      subline = `${background ? "Lamp Background" : "Lamp"} stops after the fixed second generation`;
+      subline = `${methodLabel} stops after the fixed second generation`;
       break;
     case "remux":
       headline = "Restoring and verifying the original audio…";
@@ -239,9 +255,9 @@ export function GenerationTheater({ run }: { run: Run }) {
       break;
   }
   if (pausedForApproval) {
-    headline = `${background ? "Lamp Background" : "Lamp"} is safely paused for approval`;
+    headline = `${methodLabel} is safely paused for approval`;
     subline =
-      "return to Create to renew the exact plan; completed provider work will be reused";
+      `${planMode ? "return to Create to renew the exact plan" : "return to Create to renew the exact run approval"}; completed provider work will be reused`;
   }
 
   const landedCount = wholeVideoCheckDefs.filter((def) =>

@@ -18,6 +18,7 @@ import { useAppStore } from "@/lib/store";
 import type { Run } from "@/lib/types";
 import { Badge, Button, Card } from "@/components/ui";
 import { ConfirmSpend } from "@/components/shell/ConfirmSpend";
+import { runWorkflowMode } from "@/lib/workflow-mode";
 
 function formatReservationUsd(usd: number): string {
   return `$${(Math.ceil(usd * 100) / 100).toFixed(2)}`;
@@ -206,7 +207,7 @@ export function BeautifyPlanReview({
     LampBeautifyIntensity | null
   >(null);
   const plan = run.beautifyPlan;
-  if (run.workflowMode !== "beautify" || !plan) return null;
+  if (runWorkflowMode(run) !== "beautify" || !plan) return null;
 
   const approved = plan.approval.status === "approved";
   const enhance = plan.decision === "enhance";

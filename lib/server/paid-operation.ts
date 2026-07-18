@@ -1,6 +1,6 @@
 import "server-only";
 
-import { createHash } from "node:crypto";
+import { canonicalInputHash } from "@/lib/canonical-input-hash";
 import { getStorage } from "@/lib/server/storage";
 import { assertPaidOperationAuthorized } from "@/lib/server/spend-approval";
 import type { JudgeId, PaidOperation, Run } from "@/lib/types";
@@ -21,25 +21,9 @@ export function judgeOperationId(
   return `judge:${iteration}:${evalId}:${judge}`;
 }
 
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (value && typeof value === "object") {
-    const object = value as Record<string, unknown>;
-    return Object.fromEntries(
-      Object.keys(object)
-        .filter((key) => object[key] !== undefined)
-        .sort()
-        .map((key) => [key, canonicalize(object[key])])
-    );
-  }
-  return value;
-}
-
 /** Fingerprint validated inputs without persisting media, prompts, or frames. */
 export function paidOperationInputHash(value: unknown): string {
-  return createHash("sha256")
-    .update(JSON.stringify(canonicalize(value)))
-    .digest("hex");
+  return canonicalInputHash(value);
 }
 
 export type BeginPaidOperationResult =

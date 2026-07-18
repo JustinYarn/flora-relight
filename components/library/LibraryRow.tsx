@@ -14,8 +14,12 @@ import {
   needsLampHumanGrade,
 } from "@/components/grade/derive";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
-import { isLampBackgroundRun } from "@/lib/lamp-background-read";
-import { isTwoPassWorkflowMode, runWorkflowMode } from "@/lib/workflow-mode";
+import {
+  isApprovedPlanNoOp,
+  isTwoPassWorkflowMode,
+  runWorkflowMode,
+  workflowOutputLabel,
+} from "@/lib/workflow-mode";
 import {
   STATUS_META,
   activeFixes,
@@ -163,11 +167,8 @@ function RowBody({ run }: { run: Run }) {
   const relit = shippedVideo(run);
   const fixedTwoPass =
     isTwoPassWorkflowMode(runWorkflowMode(run));
-  const background = isLampBackgroundRun(run);
-  const backgroundNoOp =
-    background &&
-    run.backgroundCleanupPlan?.approval.status === "approved" &&
-    run.backgroundCleanupPlan.decision === "exceptional-no-op";
+  const outputLabel = workflowOutputLabel(runWorkflowMode(run));
+  const approvedPlanNoOp = isApprovedPlanNoOp(run);
   const needsHumanGrade = needsLampHumanGrade(run);
 
   return (
@@ -176,23 +177,17 @@ function RowBody({ run }: { run: Run }) {
         original={run.originalVideo}
         relit={relit}
         relitLabel={
-          backgroundNoOp
+          approvedPlanNoOp
             ? "UNCHANGED SOURCE · APPROVED NO-OP"
             : deliveredInitialBestOfTwo(run) && shipped?.index === 1
-            ? "RELIT v1 · BEST OF TWO"
-            : background && shipped?.index === 2
-            ? "CLEANED · FINAL"
+            ? `${outputLabel} v1 · BEST OF TWO`
             : fixedTwoPass && shipped?.index === 2
-              ? "RELIT · FINAL"
+              ? `${outputLabel} · FINAL`
             : run.finalVideo
-              ? background
-                ? "CLEANED · FINAL"
-                : "RELIT · FINAL"
+              ? `${outputLabel} · FINAL`
               : shipped
-                ? `${background ? "CLEANED" : "RELIT"} v${shipped.index}`
-                : background
-                  ? "CLEANED"
-                  : "RELIT"
+                ? `${outputLabel} v${shipped.index}`
+                : outputLabel
         }
       />
 
@@ -202,7 +197,7 @@ function RowBody({ run }: { run: Run }) {
             iterations={ordered}
             bestIndex={run.bestIterationIndex}
             fixedTwoPass={fixedTwoPass}
-            noOp={backgroundNoOp}
+            noOp={approvedPlanNoOp}
             selected={selected?.index}
             onSelect={setSelectedIndex}
           />
@@ -305,10 +300,7 @@ export function LibraryRow({
   const relit = shippedVideo(run);
   const attempts = run.iterations.length;
   const fixedTwoPass = isTwoPassWorkflowMode(runWorkflowMode(run));
-  const backgroundNoOp =
-    isLampBackgroundRun(run) &&
-    run.backgroundCleanupPlan?.approval.status === "approved" &&
-    run.backgroundCleanupPlan.decision === "exceptional-no-op";
+  const approvedPlanNoOp = isApprovedPlanNoOp(run);
   const actualUsd = run.cost?.actualUsd ?? 0;
 
   // Delete flow: ✕ → inline confirm → removeRun (optimistic; store restores
@@ -374,7 +366,7 @@ export function LibraryRow({
               filter={relit.simulatedFilter}
             />
           ) : (
-            <Thumb url={run.originalVideo.url} tag="no relit cut" dimmed />
+            <Thumb url={run.originalVideo.url} tag="no output" dimmed />
           )}
         </span>
 
@@ -431,7 +423,7 @@ export function LibraryRow({
         </span>
 
         <span className="w-16 shrink-0 text-sm tabular-nums text-muted">
-          {backgroundNoOp
+          {approvedPlanNoOp
             ? "no gen."
             : fixedTwoPass
               ? `${attempts}/2 vids`

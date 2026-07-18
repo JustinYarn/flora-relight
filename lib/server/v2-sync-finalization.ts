@@ -40,6 +40,11 @@ import {
   isLipsyncOperationResult,
   LIPSYNC_MODEL,
   LIPSYNC_OPERATION_ID,
+  V2_FINAL_GENERATION_OPERATION_ID,
+  v2FinalGenerationProof,
+  v2LipsyncCanonicalInput,
+  v2LipsyncOperationInputHash,
+  v2LipsyncProofMatchesFinal,
   v2SyncVerdict,
   type LipsyncOperationResult,
   type SyncNetMetrics,
@@ -59,7 +64,11 @@ export type V2LipsyncCheckpoint =
   | { state: "blocked"; reason: string };
 
 export type V2CandidateSyncCheck =
-  | { skipped: true; videoUrl: string }
+  | {
+      skipped: true;
+      videoUrl: string;
+      skipReason: "silent_source";
+    }
   | {
       skipped: false;
       videoUrl: string;
@@ -220,7 +229,16 @@ export async function analyzeV2Candidate(
     const candidatePath = await ensureCandidate(storage, runId);
     const videoUrl = await storage.publicMediaUrl(runId, CANONICAL_NAME);
     if (!(await storage.mediaExists(runId, SOURCE_AUDIO_NAME))) {
-      return { skipped: true, videoUrl };
+      const run = await storage.getRun(runId);
+      if (!run) {
+        throw new Error("Run disappeared during candidate sync analysis.");
+      }
+      if (run.originalVideo.hasAudio !== false) {
+        throw new Error(
+          "Candidate sync analysis cannot skip an audio-bearing source whose canonical audio is missing."
+        );
+      }
+      return { skipped: true, videoUrl, skipReason: "silent_source" };
     }
     // Candidate first: it proves the analyzer is reachable before the
     // baseline's failure-tolerant fallback could misread an outage as "this
@@ -264,6 +282,12 @@ export async function analyzeInitialCandidateSync(
     if (!(await storage.mediaExists(runId, SOURCE_AUDIO_NAME))) {
       // A silent source has no lip-sync dimension; the composite comparison
       // alone is sufficient to deliver the Initial.
+      const run = await storage.getRun(runId);
+      if (!run || run.originalVideo.hasAudio !== false) {
+        throw new Error(
+          "Initial sync analysis cannot treat missing canonical source audio as silence."
+        );
+      }
       return { silent: true };
     }
     const initialPath = await mediaPath(storage, runId, INITIAL_NAME);
@@ -353,6 +377,15 @@ export async function startV2LipsyncPrediction(input: {
   const storage = getStorage();
   const run = await storage.getRun(input.runId);
   if (!run) throw new Error("Run not found for V2 Lipsync repair.");
+  const finalGeneration = run.providerOperations?.find(
+    (operation) => operation.id === V2_FINAL_GENERATION_OPERATION_ID
+  );
+  const sourceFinal = v2FinalGenerationProof(finalGeneration);
+  if (!sourceFinal) {
+    throw new Error(
+      "Lipsync repair has no canonical Final operation, prompt, and artifact identity to bind."
+    );
+  }
   // Billing guard on the EFFECTIVE gate, not the absolute bar: when the
   // source's own baseline already admits this candidate, a repair cannot
   // improve the verdict — Lipsync-2-Pro cannot make a quiet speaker score
@@ -368,21 +401,21 @@ export async function startV2LipsyncPrediction(input: {
     provider: "replicate",
     kind: "lipsync",
     iteration: 2,
-    canonicalInput: {
-      model: LIPSYNC_MODEL,
-      candidateUrl: await storage.publicMediaUrl(input.runId, CANDIDATE_NAME),
-      sourceAudioUrl: await storage.publicMediaUrl(
-        input.runId,
-        SOURCE_AUDIO_NAME
-      ),
-      syncMode: "cut_off",
-      temperature: 0.5,
-      activeSpeaker: false,
+    canonicalInput: v2LipsyncCanonicalInput({
+      runId: input.runId,
       preSync: input.preSync,
-    },
+      sourceFinal,
+    }),
   });
   if (claim.state === "cached") {
-    if (!isLipsyncOperationResult(claim.operation.result)) {
+    if (
+      !isLipsyncOperationResult(claim.operation.result) ||
+      !v2LipsyncProofMatchesFinal({
+        runId: input.runId,
+        finalGeneration,
+        lipsync: claim.operation,
+      })
+    ) {
       throw new Error("Cached Lipsync repair has an invalid result.");
     }
     return claim.operation.result.predictionId;
@@ -473,13 +506,45 @@ export async function finalizeV2Lipsync(input: {
   preSync: SyncNetMetrics;
 }): Promise<LipsyncOperationResult> {
   const storage = getStorage();
-  const operation = await storage.getPaidOperation(
-    input.runId,
-    LIPSYNC_OPERATION_ID
+  const [operation, run] = await Promise.all([
+    storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+    storage.getRun(input.runId),
+  ]);
+  if (!operation || !run) {
+    throw new Error("Lipsync operation or run journal is missing.");
+  }
+  const finalGeneration = run.providerOperations?.find(
+    (candidate) => candidate.id === V2_FINAL_GENERATION_OPERATION_ID
   );
-  if (!operation) throw new Error("Lipsync operation journal is missing.");
+  const sourceFinal = v2FinalGenerationProof(finalGeneration);
+  if (
+    !sourceFinal ||
+    operation.inputHash !==
+      v2LipsyncOperationInputHash({
+        runId: input.runId,
+        preSync: input.preSync,
+        sourceFinal,
+      })
+  ) {
+    if (operation.status === "in_progress") {
+      await markPaidOperationReconcileRequired(
+        operation,
+        "Lipsync repair no longer matches the canonical Final operation, prompt, artifact, or pre-sync input."
+      );
+    }
+    throw new Error(
+      "Lipsync operation is not bound to the current canonical Final."
+    );
+  }
   if (operation.status === "completed") {
-    if (!isLipsyncOperationResult(operation.result)) {
+    if (
+      !isLipsyncOperationResult(operation.result) ||
+      !v2LipsyncProofMatchesFinal({
+        runId: input.runId,
+        finalGeneration,
+        lipsync: operation,
+      })
+    ) {
       throw new Error("Completed Lipsync result is invalid.");
     }
     return operation.result;
@@ -502,8 +567,6 @@ export async function finalizeV2Lipsync(input: {
     }
 
     const rawProbe = await probe(rawPath);
-    const run = await storage.getRun(input.runId);
-    if (!run) throw new Error("Run not found while finalizing V2 Lipsync.");
     // Billing ceiling, mirroring the generation path: the model may only
     // bill for the authorized source duration plus container padding. A
     // gross overrun (model looping/padding) seals as billing evidence
@@ -570,6 +633,7 @@ export async function finalizeV2Lipsync(input: {
       audioVerified: true as const,
       preSync: input.preSync,
       postSync,
+      sourceFinal,
     };
 
     // Judge the repair against the same effective gate that admitted the

@@ -57,6 +57,7 @@ import { runLampIrisHolisticEvaluation } from "@/lib/server/lamp-iris-evaluator"
 import { runLampHolisticEvaluation } from "@/lib/server/lamp-evaluator";
 import type { PreparedLipsyncInputs } from "@/lib/server/replicate-lipsync";
 import { getStorage } from "@/lib/server/storage";
+import { recordV2CandidateSyncVerdict } from "@/lib/server/v2-sync-verdict-journal";
 import { runExecutionInputHash } from "@/lib/server/run-execution-input";
 import {
   isLampUserActionRequiredError,
@@ -104,8 +105,8 @@ import {
 } from "@/lib/server/videogen-operation";
 import type { RunExecution, VideoGenerationOperationResult } from "@/lib/types";
 import {
-  isLipsyncOperationResult,
   LIPSYNC_OPERATION_ID,
+  v2SyncSettlementVerified,
   v2SyncVerdict,
   type LipsyncOperationResult,
   type SyncNetMetrics,
@@ -581,6 +582,19 @@ async function finalizeV2WithSync(
       videoUrl: checkpoint.result.videoUrl,
       audioVerified: true,
     };
+  }
+
+  if (checkpoint.state === "unclaimed") {
+    const journaledCandidateUrl = await readAcceptedV2CandidateStep(
+      input,
+      workflowRunId
+    );
+    if (journaledCandidateUrl) {
+      // A prior step attempt may have saved the free pass/skip before losing
+      // its response. Reuse that exact proof instead of re-analyzing into a
+      // different noisy verdict or accidentally starting a paid repair.
+      return { videoUrl: journaledCandidateUrl, audioVerified: true };
+    }
   }
 
   const candidate = await analyzeV2CandidateStep(input, workflowRunId);
@@ -1363,13 +1377,104 @@ async function readSourceSyncBaselineStep(
 
 readSourceSyncBaselineStep.maxRetries = 2;
 
+async function readAcceptedV2CandidateStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<string | null> {
+  "use step";
+  await assertV2FinalizeOwner(input, workflowRunId);
+  return (await readAcceptedV2Candidate(input, workflowRunId))?.videoUrl ?? null;
+}
+
+async function readAcceptedV2Candidate(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<V2CandidateSyncCheck | null> {
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  const finalGeneration = run?.providerOperations?.find(
+    (operation) => operation.id === videoGenerationOperationId(2)
+  );
+  if (
+    !execution ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    !run ||
+    !isGradeableVideoGeneration(finalGeneration) ||
+    typeof finalGeneration?.renderedPrompt !== "string" ||
+    !finalGeneration.result
+  ) {
+    return null;
+  }
+  if (!v2SyncSettlementVerified({
+    runId: input.runId,
+    candidateVerdict: execution.candidateSyncVerdict,
+    finalGeneration,
+    lipsync: null,
+    canonicalSourceSync: run.originalVideo.syncBaseline,
+    sourceHasAudio: run.originalVideo.hasAudio,
+  })) {
+    return null;
+  }
+  const verdict = execution.candidateSyncVerdict;
+  if (!verdict) return null;
+  return verdict.outcome === "skipped"
+    ? {
+        skipped: true,
+        videoUrl: finalGeneration.result.videoUrl,
+        skipReason: verdict.skipReason,
+      }
+    : {
+        skipped: false,
+        videoUrl: finalGeneration.result.videoUrl,
+        metrics: verdict.metrics,
+        sourceSync: verdict.sourceSync,
+      };
+}
+
+readAcceptedV2CandidateStep.maxRetries = 2;
+
 async function analyzeV2CandidateStep(
   input: DurableRelightRunInput,
   workflowRunId: string
 ): Promise<V2CandidateSyncCheck> {
   "use step";
   await assertV2FinalizeOwner(input, workflowRunId);
-  return analyzeV2Candidate(input.runId);
+  // Step retries restart this function. Re-read the server-owned receipt
+  // before calling SyncNet so a response lost after the CAS cannot produce a
+  // different noisy analysis and accidentally authorize a paid repair.
+  const journaled = await readAcceptedV2Candidate(input, workflowRunId);
+  if (journaled) return journaled;
+  const candidate = await analyzeV2Candidate(input.runId);
+  if (candidate.skipped) {
+    await recordV2CandidateSyncVerdict({
+      runId: input.runId,
+      executionId: input.executionId,
+      workflowRunId,
+      evidence: {
+        outcome: "skipped",
+        skipReason: candidate.skipReason,
+      },
+    });
+    return candidate;
+  }
+  if (v2SyncVerdict(candidate.metrics, candidate.sourceSync).pass) {
+    await recordV2CandidateSyncVerdict({
+      runId: input.runId,
+      executionId: input.executionId,
+      workflowRunId,
+      evidence: {
+        outcome: "passed",
+        metrics: candidate.metrics,
+        sourceSync: candidate.sourceSync,
+      },
+    });
+  }
+  return candidate;
 }
 
 analyzeV2CandidateStep.maxRetries = 2;
@@ -2429,13 +2534,14 @@ async function settleLampExecution(
     operation.renderedPrompt !== finalRenderedPrompt ||
     finalEvaluation?.status !== "completed" ||
     !isLampEvaluationArtifact(finalEvaluation.result, 2) ||
-    (lipsync !== null &&
-      (lipsync.status !== "completed" ||
-        !isLipsyncOperationResult(lipsync.result) ||
-        !v2SyncVerdict(
-          lipsync.result.postSync,
-          run?.originalVideo.syncBaseline ?? null
-        ).pass))
+    !v2SyncSettlementVerified({
+      runId: input.runId,
+      candidateVerdict: execution.candidateSyncVerdict,
+      finalGeneration: operation,
+      lipsync,
+      canonicalSourceSync: run?.originalVideo.syncBaseline,
+      sourceHasAudio: run?.originalVideo.hasAudio,
+    })
   ) {
     throw new Error(
       "Lamp's final artifact and final evaluation are not durably journaled against this execution."
@@ -2506,13 +2612,14 @@ async function settleBackgroundExecution(
     finalEvaluation?.status !== "completed" ||
     !isLampBackgroundEvaluationArtifact(finalEvaluation.result, 2) ||
     finalEvaluation.result.cleanupPlanId !== cleanupPlan.id ||
-    (lipsync !== null &&
-      (lipsync.status !== "completed" ||
-        !isLipsyncOperationResult(lipsync.result) ||
-        !v2SyncVerdict(
-          lipsync.result.postSync,
-          run.originalVideo.syncBaseline ?? null
-        ).pass))
+    !v2SyncSettlementVerified({
+      runId: input.runId,
+      candidateVerdict: execution.candidateSyncVerdict,
+      finalGeneration: operation,
+      lipsync,
+      canonicalSourceSync: run.originalVideo.syncBaseline,
+      sourceHasAudio: run.originalVideo.hasAudio,
+    })
   ) {
     throw new Error(
       "Lamp Background's Final artifact and both plan-bound evaluations are not durably journaled against this execution."
@@ -2598,13 +2705,14 @@ async function settleBeautifyExecution(
     finalEvaluation?.status !== "completed" ||
     !isLampBeautifyEvaluationArtifact(finalEvaluation.result, 2) ||
     finalEvaluation.result.planId !== plan.id ||
-    (lipsync !== null &&
-      (lipsync.status !== "completed" ||
-        !isLipsyncOperationResult(lipsync.result) ||
-        !v2SyncVerdict(
-          lipsync.result.postSync,
-          run.originalVideo.syncBaseline ?? null
-        ).pass))
+    !v2SyncSettlementVerified({
+      runId: input.runId,
+      candidateVerdict: execution.candidateSyncVerdict,
+      finalGeneration: operation,
+      lipsync,
+      canonicalSourceSync: run.originalVideo.syncBaseline,
+      sourceHasAudio: run.originalVideo.hasAudio,
+    })
   ) {
     throw new Error(
       "Lamp Beautify's Final artifact and both plan-bound evaluations are not durably journaled against this execution."
@@ -2690,13 +2798,14 @@ async function settleIrisExecution(
     finalEvaluation?.status !== "completed" ||
     !isLampIrisEvaluationArtifact(finalEvaluation.result, 2) ||
     finalEvaluation.result.planId !== plan.id ||
-    (lipsync !== null &&
-      (lipsync.status !== "completed" ||
-        !isLipsyncOperationResult(lipsync.result) ||
-        !v2SyncVerdict(
-          lipsync.result.postSync,
-          run.originalVideo.syncBaseline ?? null
-        ).pass))
+    !v2SyncSettlementVerified({
+      runId: input.runId,
+      candidateVerdict: execution.candidateSyncVerdict,
+      finalGeneration: operation,
+      lipsync,
+      canonicalSourceSync: run.originalVideo.syncBaseline,
+      sourceHasAudio: run.originalVideo.hasAudio,
+    })
   ) {
     throw new Error(
       "Lamp Iris's Final artifact and both plan-bound evaluations are not durably journaled against this execution."
@@ -2877,23 +2986,43 @@ async function recordExecutionFailure(
   const final = run?.providerOperations?.find(
     (operation) => operation.id === videoGenerationOperationId(2)
   );
-  const [firstBackgroundEvaluation, finalEvaluation, lipsync] =
+  const [firstPlanEvaluation, finalEvaluation, lipsync] =
     await Promise.all([
       workflowMode === "background"
         ? storage.getPaidOperation(
             input.runId,
             lampBackgroundEvaluationOperationId(1)
           )
-        : Promise.resolve(null),
+        : workflowMode === "beautify"
+          ? storage.getPaidOperation(
+              input.runId,
+              lampBeautifyEvaluationOperationId(1)
+            )
+          : workflowMode === "iris"
+            ? storage.getPaidOperation(
+                input.runId,
+                lampIrisEvaluationOperationId(1)
+              )
+            : Promise.resolve(null),
       workflowMode === "background"
         ? storage.getPaidOperation(
             input.runId,
             lampBackgroundEvaluationOperationId(2)
           )
-        : storage.getPaidOperation(
-            input.runId,
-            lampEvaluationOperationId(2)
-          ),
+        : workflowMode === "beautify"
+          ? storage.getPaidOperation(
+              input.runId,
+              lampBeautifyEvaluationOperationId(2)
+            )
+          : workflowMode === "iris"
+            ? storage.getPaidOperation(
+                input.runId,
+                lampIrisEvaluationOperationId(2)
+              )
+            : storage.getPaidOperation(
+                input.runId,
+                lampEvaluationOperationId(2)
+              ),
       storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
     ]);
   let finalEvaluationComplete =
@@ -2903,9 +3032,9 @@ async function recordExecutionFailure(
   if (
     workflowMode === "background" &&
     run &&
-    firstBackgroundEvaluation?.status === "completed" &&
+    firstPlanEvaluation?.status === "completed" &&
     isLampBackgroundEvaluationArtifact(
-      firstBackgroundEvaluation.result,
+      firstPlanEvaluation.result,
       1
     ) &&
     finalEvaluation?.status === "completed" &&
@@ -2926,10 +3055,10 @@ async function recordExecutionFailure(
       const expectedFinalPrompt = compileLampBackgroundFinalPrompt(
         input.renderedPrompt,
         cleanupPlan,
-        firstBackgroundEvaluation.result
+        firstPlanEvaluation.result
       ).rendered;
       finalEvaluationComplete =
-        firstBackgroundEvaluation.result.cleanupPlanId === cleanupPlan.id &&
+        firstPlanEvaluation.result.cleanupPlanId === cleanupPlan.id &&
         finalEvaluation.result.cleanupPlanId === cleanupPlan.id &&
         final?.renderedPrompt === expectedFinalPrompt;
     } catch {
@@ -2937,18 +3066,89 @@ async function recordExecutionFailure(
     }
   }
   if (
+    workflowMode === "beautify" &&
+    run &&
+    firstPlanEvaluation?.status === "completed" &&
+    isLampBeautifyEvaluationArtifact(firstPlanEvaluation.result, 1) &&
+    finalEvaluation?.status === "completed" &&
+    isLampBeautifyEvaluationArtifact(finalEvaluation.result, 2)
+  ) {
+    try {
+      const planOperation = execution.planOperationId
+        ? await storage.getPaidOperation(
+            input.runId,
+            execution.planOperationId
+          )
+        : null;
+      const plan = await validateLampBeautifyExecutionBinding({
+        run,
+        execution,
+        planOperation,
+      });
+      const expectedFinalPrompt = compileLampBeautifyFinalPrompt(
+        input.renderedPrompt,
+        plan,
+        firstPlanEvaluation.result
+      ).rendered;
+      finalEvaluationComplete =
+        firstPlanEvaluation.result.planId === plan.id &&
+        finalEvaluation.result.planId === plan.id &&
+        final?.renderedPrompt === expectedFinalPrompt;
+    } catch {
+      finalEvaluationComplete = false;
+    }
+  }
+  if (
+    workflowMode === "iris" &&
+    run &&
+    firstPlanEvaluation?.status === "completed" &&
+    isLampIrisEvaluationArtifact(firstPlanEvaluation.result, 1) &&
+    finalEvaluation?.status === "completed" &&
+    isLampIrisEvaluationArtifact(finalEvaluation.result, 2)
+  ) {
+    try {
+      const planOperation = execution.planOperationId
+        ? await storage.getPaidOperation(
+            input.runId,
+            execution.planOperationId
+          )
+        : null;
+      const plan = await validateLampIrisExecutionBinding({
+        run,
+        execution,
+        planOperation,
+      });
+      const expectedFinalPrompt = compileLampIrisFinalPrompt(
+        input.renderedPrompt,
+        plan,
+        firstPlanEvaluation.result
+      ).rendered;
+      finalEvaluationComplete =
+        firstPlanEvaluation.result.planId === plan.id &&
+        finalEvaluation.result.planId === plan.id &&
+        final?.renderedPrompt === expectedFinalPrompt;
+    } catch {
+      finalEvaluationComplete = false;
+    }
+  }
+  const finalSyncVerified = Boolean(
+    final?.renderedPrompt &&
+      v2SyncSettlementVerified({
+        runId: input.runId,
+        candidateVerdict: execution.candidateSyncVerdict,
+        finalGeneration: final,
+        lipsync,
+        canonicalSourceSync: run?.originalVideo.syncBaseline,
+        sourceHasAudio: run?.originalVideo.hasAudio,
+      })
+  );
+  if (
     twoPass &&
     final?.status === "completed" &&
     final.result &&
     final.result.audioVerified &&
     finalEvaluationComplete &&
-    (lipsync === null ||
-      (lipsync.status === "completed" &&
-        isLipsyncOperationResult(lipsync.result) &&
-        v2SyncVerdict(
-          lipsync.result.postSync,
-          run?.originalVideo.syncBaseline ?? null
-        ).pass))
+    finalSyncVerified
   ) {
     return "two_pass_completed";
   }
@@ -2959,12 +3159,25 @@ async function recordExecutionFailure(
           input.runId,
           workflowMode === "background"
             ? lampBackgroundEvaluationOperationId(execution.iteration)
-            : lampEvaluationOperationId(execution.iteration)
+            : workflowMode === "beautify"
+              ? lampBeautifyEvaluationOperationId(execution.iteration)
+              : workflowMode === "iris"
+                ? lampIrisEvaluationOperationId(execution.iteration)
+                : lampEvaluationOperationId(execution.iteration)
         )
       : null;
+  const candidateSyncProofMissing = Boolean(
+    twoPass &&
+      final?.status === "completed" &&
+      final.result?.audioVerified &&
+      finalEvaluationComplete &&
+      lipsync === null &&
+      !finalSyncVerified
+  );
   const evaluationAmbiguous = Boolean(
     (currentEvaluation && currentEvaluation.status !== "completed") ||
-      (lipsync && lipsync.status !== "completed")
+      (lipsync && lipsync.status !== "completed") ||
+      candidateSyncProofMissing
   );
   const status = runExecutionFailureStatus({
     evaluationAmbiguous,

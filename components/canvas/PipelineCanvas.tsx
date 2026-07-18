@@ -14,7 +14,12 @@ import {
   type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { EvalResult, Run, WorkflowDefinition } from "@/lib/types";
+import type {
+  EvalResult,
+  Run,
+  WorkflowDefinition,
+  WorkflowMode,
+} from "@/lib/types";
 import { clamp } from "@/lib/util";
 import {
   kindColor,
@@ -36,9 +41,22 @@ type CanvasNode = PipelineFlowNode | LaneFlowNode;
 /* Stable module-level map so React Flow never re-registers node types. */
 const nodeTypes = { pipeline: PipelineNodeView, lane: StageLaneView };
 
-function buildNodes(workflow: WorkflowDefinition): CanvasNode[] {
+const COMPACT_PLAN_WORKFLOW_IDS = new Set([
+  "lamp-background-v1",
+  "lamp-beautify-v1",
+  "lamp-iris-v1",
+]);
+
+function isCompactPlanWorkflow(workflow: WorkflowDefinition): boolean {
+  return COMPACT_PLAN_WORKFLOW_IDS.has(workflow.id);
+}
+
+function buildNodes(
+  workflow: WorkflowDefinition,
+  workflowMode: WorkflowMode
+): CanvasNode[] {
   const laneNodes: LaneFlowNode[] =
-    workflow.id === "lamp-background-v1"
+    isCompactPlanWorkflow(workflow)
       ? []
       : STAGE_LANES.map((lane) => ({
     id: lane.id,
@@ -60,13 +78,14 @@ function buildNodes(workflow: WorkflowDefinition): CanvasNode[] {
     /* Render-time stage layout; the workflow definition stays untouched. */
     position: {
       ...(
-        workflow.id === "lamp-background-v1"
+        isCompactPlanWorkflow(workflow)
           ? n.position
           : POSITION_OVERRIDES[n.id] ?? n.position
       ),
     },
     data: {
       pipelineNode: n,
+      workflowMode,
       status: "idle" as const,
       evalResult: null,
       iteration: null,
@@ -158,24 +177,33 @@ function latestEvalResult(run: Run, evalId: string): EvalResult | null {
 
 export function PipelineCanvas({
   workflow,
+  workflowMode,
   run,
   selectedNodeId,
   onSelectNode,
 }: {
   workflow: WorkflowDefinition;
+  workflowMode: WorkflowMode;
   /** The run whose nodeStates / eval results drive the live view. */
   run?: Run;
   /** Controlled selection also lets Rubrics deep-link into one graph node. */
   selectedNodeId: string | null;
   onSelectNode: (nodeId: string | null) => void;
 }) {
-  const initialNodes = useMemo(() => buildNodes(workflow), [workflow]);
+  const initialNodes = useMemo(
+    () => buildNodes(workflow, workflowMode),
+    [workflow, workflowMode]
+  );
   const [nodes, setNodes, onNodesChange] =
     useNodesState<CanvasNode>(initialNodes);
   const pipelineNodeIds = useMemo(
     () => new Set(workflow.nodes.map((node) => node.id)),
     [workflow.nodes]
   );
+
+  useEffect(() => {
+    setNodes(buildNodes(workflow, workflowMode));
+  }, [setNodes, workflow, workflowMode]);
 
   const threshold = workflow.config.compositePassThreshold;
 
@@ -319,7 +347,7 @@ export function PipelineCanvas({
       new Map(
         workflow.nodes.map((node) => [
           node.id,
-          workflow.id === "lamp-background-v1"
+          isCompactPlanWorkflow(workflow)
             ? node.position
             : POSITION_OVERRIDES[node.id] ?? node.position,
         ])

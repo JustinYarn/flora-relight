@@ -1,5 +1,5 @@
-import type { PipelineNode } from "@/lib/types";
-import { evalDefForId } from "@/lib/lamp-evaluation";
+import type { PipelineNode, WorkflowMode } from "../../lib/types.ts";
+import { evalDefForId } from "../../lib/lamp-evaluation.ts";
 
 export interface NodePromptRole {
   label: string;
@@ -12,7 +12,10 @@ export interface NodePromptRole {
  * canonical in lib/workflow-def.ts; this helper merely says which nodes carry,
  * compile, or write prompt state so those relationships are discoverable.
  */
-export function promptRoleForNode(node: PipelineNode): NodePromptRole | null {
+export function promptRoleForNode(
+  node: PipelineNode,
+  workflowMode: WorkflowMode = "lamp"
+): NodePromptRole | null {
   if (node.kind === "evaluate" && node.evalId) {
     const def = evalDefForId(node.evalId);
     if (!def) {
@@ -42,14 +45,22 @@ export function promptRoleForNode(node: PipelineNode): NodePromptRole | null {
         label: "planner prompt",
         color: "var(--running)",
         description:
-          "Inventories the complete source as remove, preserve, or uncertain before human approval.",
+          workflowMode === "beautify"
+            ? "Classifies the closed enhancement catalog as enhance, declined, or uncertain before human approval."
+            : workflowMode === "iris"
+              ? "Classifies the closed gaze catalog as correct, declined, or uncertain before human approval."
+              : "Inventories the complete source as remove, preserve, or uncertain before human approval.",
       };
     case "initial":
       return {
         label: "approved-plan prompt",
         color: "var(--accent)",
         description:
-          "Consumes the exact approved cleanup plan with person, lighting, camera, and audio locks.",
+          workflowMode === "beautify"
+            ? "Consumes the exact approved enhancement plan with every out-of-scope region locked."
+            : workflowMode === "iris"
+              ? "Consumes the exact approved gaze plan with expression, identity, scene, and audio locked."
+              : "Consumes the exact approved cleanup plan with person, lighting, camera, and audio locks.",
       };
     case "critique":
       return {

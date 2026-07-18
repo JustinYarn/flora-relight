@@ -18,7 +18,11 @@ import { Badge } from "@/components/ui";
 import { evalDefsForRun } from "@/lib/lamp-evaluation";
 import { formatUsd } from "@/lib/cost";
 import { formatClock, formatTime } from "@/lib/util";
-import { isTwoPassWorkflowMode, runWorkflowMode } from "@/lib/workflow-mode";
+import {
+  isApprovedPlanNoOp,
+  isTwoPassWorkflowMode,
+  runWorkflowMode,
+} from "@/lib/workflow-mode";
 import type { JourneyStep } from "./chain";
 import { firstDataUrl } from "./chain";
 
@@ -335,15 +339,15 @@ function AttemptDetail({
               >
                 {twoPass
                   ? iteration.index === 1
-                    ? "AI summary · Final is generated once regardless of score"
-                    : "final AI summary · no best-of selection"
+                    ? "Initial AI summary · one corrected Final is generated"
+                    : "Final AI summary for this take"
                   : `Overall score · needs ${threshold} to pass`}
               </span>
             </div>
           ) : noOp ? (
             <p className="mt-3 text-sm text-muted">
               No AI evaluation ran. Human grading decides whether leaving this
-              already presentation-ready background unchanged was correct.
+              source unchanged was the right approved-plan decision.
             </p>
           ) : (
             <p className="status-pulse mt-3 text-sm text-muted">checking…</p>
@@ -567,10 +571,7 @@ export function StepDetail({
 }) {
   const definitions = evalDefsForRun(run);
   const twoPass = isTwoPassWorkflowMode(runWorkflowMode(run));
-  const noOp =
-    runWorkflowMode(run) === "background" &&
-    run.backgroundCleanupPlan?.approval.status === "approved" &&
-    run.backgroundCleanupPlan.decision === "exceptional-no-op";
+  const noOp = isApprovedPlanNoOp(run);
   switch (step.kind) {
     case "source":
       return <SourceDetail run={run} />;

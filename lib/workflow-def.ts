@@ -223,7 +223,7 @@ export const LAMP_WORKFLOW: WorkflowDefinition = {
 };
 
 /** Legacy import kept for components that have not yet selected a mode. */
-export const RELIGHT_WORKFLOW = BEAUTIFY_WORKFLOW;
+export const RELIGHT_WORKFLOW = LAMP_WORKFLOW;
 
 export function workflowForMode(mode: WorkflowMode): WorkflowDefinition {
   if (mode === "flora") return FLORA_WORKFLOW;

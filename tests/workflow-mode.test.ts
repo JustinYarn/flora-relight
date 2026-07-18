@@ -4,19 +4,24 @@ import test from "node:test";
 import {
   DEFAULT_WORKFLOW_MODE,
   floraRetiredForNewWork,
+  isApprovedPlanNoOp,
+  isPlanWorkflowMode,
   isTwoPassWorkflowMode,
+  parseSelectableWorkflowMode,
   parseWorkflowMode,
   runHasStartedWork,
   runWorkflowMode,
   workflowModeFromExecutionId,
   workflowModeLabel,
+  workflowOutputLabel,
 } from "../lib/workflow-mode.ts";
 import {
   initialMegaPrompt,
   nextMegaPrompt,
+  renderMegaPrompt,
 } from "../lib/prompts/mega-prompt.ts";
 import { mergeBatch } from "../lib/server/storage/batch-merge.ts";
-import type { Batch } from "../lib/types.ts";
+import type { Batch, Run } from "../lib/types.ts";
 import {
   RELIGHT_WORKFLOW,
   workflowForMode,
@@ -31,14 +36,99 @@ test("workflow mode accepts the current mode plus both historical product modes"
   assert.equal(parseWorkflowMode(undefined), null);
 });
 
-test("new browser selections default to Lamp Iris and retain historical labels", () => {
-  assert.equal(DEFAULT_WORKFLOW_MODE, "iris");
-  assert.equal(RELIGHT_WORKFLOW.id, workflowForMode("beautify").id);
+test("new browser selections default to Lamp and retain historical labels", () => {
+  assert.equal(DEFAULT_WORKFLOW_MODE, "lamp");
+  assert.equal(RELIGHT_WORKFLOW.id, workflowForMode("lamp").id);
   assert.equal(workflowModeLabel("flora"), "Flora");
   assert.equal(workflowModeLabel("lamp"), "Lamp");
   assert.equal(workflowModeLabel("background"), "Lamp Background");
   assert.equal(workflowModeLabel("beautify"), "Lamp Beautify");
   assert.equal(workflowModeLabel("iris"), "Lamp Iris");
+  assert.equal(workflowOutputLabel("lamp"), "RELIT");
+  assert.equal(workflowOutputLabel("background"), "CLEANED");
+  assert.equal(workflowOutputLabel("beautify"), "ENHANCED");
+  assert.equal(workflowOutputLabel("iris"), "GAZE-CORRECTED");
+});
+
+test("the saved new-run preference can never resurrect legacy Flora", () => {
+  assert.equal(parseSelectableWorkflowMode("lamp"), "lamp");
+  assert.equal(parseSelectableWorkflowMode("background"), "background");
+  assert.equal(parseSelectableWorkflowMode("beautify"), "beautify");
+  assert.equal(parseSelectableWorkflowMode("iris"), "iris");
+  assert.equal(parseSelectableWorkflowMode("flora"), null);
+  assert.equal(parseSelectableWorkflowMode("combo"), null);
+});
+
+test("plan-mode helpers cover Background, Beautify, and Iris symmetrically", () => {
+  assert.equal(isPlanWorkflowMode("lamp"), false);
+  assert.equal(isPlanWorkflowMode("background"), true);
+  assert.equal(isPlanWorkflowMode("beautify"), true);
+  assert.equal(isPlanWorkflowMode("iris"), true);
+
+  const base = {
+    id: "run-plan-noop",
+    workflowId: "lamp-v1",
+    createdAt: 1,
+    originalVideo: {},
+    status: "awaiting-review",
+    iterations: [],
+    nodeStates: {},
+    log: [],
+  } as unknown as Run;
+  const approval = {
+    status: "approved" as const,
+    approvedAt: 2,
+    approvedBy: "human" as const,
+  };
+
+  assert.equal(
+    isApprovedPlanNoOp({
+      ...base,
+      workflowMode: "background",
+      backgroundCleanupPlan: {
+        runId: base.id,
+        approval,
+        decision: "exceptional-no-op",
+      } as never,
+    }),
+    true
+  );
+  assert.equal(
+    isApprovedPlanNoOp({
+      ...base,
+      workflowMode: "beautify",
+      beautifyPlan: {
+        runId: base.id,
+        approval,
+        decision: "exceptional-no-op",
+      } as never,
+    }),
+    true
+  );
+  assert.equal(
+    isApprovedPlanNoOp({
+      ...base,
+      workflowMode: "iris",
+      irisPlan: {
+        runId: base.id,
+        approval,
+        decision: "exceptional-no-op",
+      } as never,
+    }),
+    true
+  );
+  assert.equal(
+    isApprovedPlanNoOp({
+      ...base,
+      workflowMode: "iris",
+      irisPlan: {
+        runId: "another-run",
+        approval,
+        decision: "exceptional-no-op",
+      } as never,
+    }),
+    false
+  );
 });
 
 test("Lamp Iris joins the fixed two-pass plumbing end to end", () => {
@@ -106,6 +196,44 @@ test("Flora and Lamp prompts preserve method labels without changing prompt sema
     () => initialMegaPrompt("background"),
     /human-approved cleanup plan/
   );
+  assert.throws(
+    () => initialMegaPrompt("beautify"),
+    /human-approved enhancement plan/
+  );
+  assert.throws(
+    () => initialMegaPrompt("iris"),
+    /human-approved gaze plan/
+  );
+});
+
+test("plan modes cannot fall back to the generic correction or render paths", () => {
+  const lamp = initialMegaPrompt("lamp");
+  const cases = [
+    {
+      mode: "background" as const,
+      header: "=== LAMP BACKGROUND CLEANUP MEGA PROMPT v1 ===",
+      expected: /Lamp Background/,
+    },
+    {
+      mode: "beautify" as const,
+      header: "=== LAMP BEAUTIFY TOUCH-UP MEGA PROMPT v1 ===",
+      expected: /Lamp Beautify/,
+    },
+    {
+      mode: "iris" as const,
+      header: "=== LAMP IRIS EYE-CONTACT MEGA PROMPT v1 ===",
+      expected: /Lamp Iris/,
+    },
+  ];
+
+  for (const { mode, header, expected } of cases) {
+    assert.throws(() => nextMegaPrompt(lamp, [], mode), expected);
+    assert.throws(() => renderMegaPrompt(lamp, mode), expected);
+
+    const persistedPlanPrompt = { ...lamp, rendered: header };
+    assert.throws(() => nextMegaPrompt(persistedPlanPrompt, []), expected);
+    assert.throws(() => renderMegaPrompt(persistedPlanPrompt), expected);
+  }
 });
 
 test("a later browser batch snapshot cannot change the batch method", () => {

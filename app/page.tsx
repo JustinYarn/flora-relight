@@ -511,6 +511,7 @@ function isResumableSingleRun(
   batchRunIds: ReadonlySet<string>,
   now = Date.now()
 ): boolean {
+  const workflowMode = runWorkflowMode(run);
   if (
     batchRunIds.has(run.id) ||
     run.status !== "running"
@@ -521,19 +522,19 @@ function isResumableSingleRun(
     return run.serverExecution.source === "single";
   }
   if (
-    run.workflowMode === "background" &&
+    workflowMode === "background" &&
     run.backgroundCleanupPlan?.approval.status === "draft"
   ) {
     return true;
   }
   if (
-    run.workflowMode === "beautify" &&
+    workflowMode === "beautify" &&
     run.beautifyPlan?.approval.status === "draft"
   ) {
     return true;
   }
   if (
-    run.workflowMode === "iris" &&
+    workflowMode === "iris" &&
     run.irisPlan?.approval.status === "draft"
   ) {
     return true;
@@ -554,6 +555,7 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
   readyToStart: boolean;
 }) {
   const router = useRouter();
+  const runMode = runWorkflowMode(run);
   const latest = run.iterations.at(-1);
   const composite = latest?.composite;
   const evals = latest?.evalResults ?? [];
@@ -561,18 +563,18 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
     evals.length > 0
       ? evals.reduce((sum, r) => sum + r.confidence, 0) / evals.length
       : undefined;
-  const isLampRun = run.workflowMode === "lamp";
+  const isLampRun = runMode === "lamp";
   const isTwoPassRun =
     isLampRun ||
-    run.workflowMode === "background" ||
-    run.workflowMode === "beautify" ||
-    run.workflowMode === "iris";
+    runMode === "background" ||
+    runMode === "beautify" ||
+    runMode === "iris";
   const backgroundPlanDraft =
-    (run.workflowMode === "background" &&
+    (runMode === "background" &&
       run.backgroundCleanupPlan?.approval.status === "draft") ||
-    (run.workflowMode === "beautify" &&
+    (runMode === "beautify" &&
       run.beautifyPlan?.approval.status === "draft") ||
-    (run.workflowMode === "iris" &&
+    (runMode === "iris" &&
       run.irisPlan?.approval.status === "draft");
   const status = readyToStart
     ? backgroundPlanDraft
@@ -598,15 +600,15 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
             {inBatch ? <Badge>batch</Badge> : null}
             <Badge
               color={
-                run.workflowMode === "lamp" ||
-                run.workflowMode === "background" ||
-                run.workflowMode === "beautify" ||
-                run.workflowMode === "iris"
+                runMode === "lamp" ||
+                runMode === "background" ||
+                runMode === "beautify" ||
+                runMode === "iris"
                   ? "var(--accent)"
                   : "var(--muted)"
               }
             >
-              {workflowModeLabel(run.workflowMode ?? "flora")}
+              {workflowModeLabel(runMode)}
             </Badge>
           </div>
           <div className="mt-0.5 max-w-[220px] truncate text-2xs text-faint">
@@ -630,12 +632,12 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
             ? "Final ready"
             : run.iterations.length === 1
               ? isTwoPassRun
-                ? (run.workflowMode === "background" &&
+                ? (runMode === "background" &&
                     run.backgroundCleanupPlan?.decision ===
                       "exceptional-no-op") ||
-                  (run.workflowMode === "beautify" &&
+                  (runMode === "beautify" &&
                     run.beautifyPlan?.decision === "exceptional-no-op") ||
-                  (run.workflowMode === "iris" &&
+                  (runMode === "iris" &&
                     run.irisPlan?.decision === "exceptional-no-op")
                   ? "Unchanged source ready"
                   : "Initial ready"
@@ -677,6 +679,7 @@ export default function DashboardPage() {
   const batches = useAppStore((s) => s.batches);
   const mode = useAppStore((s) => s.mode);
   const workflowMode = useAppStore((s) => s.workflowMode);
+  const setWorkflowMode = useAppStore((s) => s.setWorkflowMode);
   const hydrated = useAppStore((s) => s.hydrated);
   const [relightIntensity, setRelightIntensity] = useState(
     DEFAULT_RELIGHT_INTENSITY
@@ -1269,7 +1272,7 @@ export default function DashboardPage() {
   const pendingBatchProfile = pendingBatch
     ? relightIntensityProfile(pendingBatchIntensity)
     : null;
-  const intensityControlDisabled =
+  const modeControlsDisabled =
     ingesting ||
     launching !== null ||
     pendingLaunch !== null ||
@@ -1300,9 +1303,11 @@ export default function DashboardPage() {
           </p>
         </header>
         <WorkflowModeSelector
+          workflowMode={workflowMode}
+          onWorkflowModeChange={setWorkflowMode}
           relightIntensity={relightIntensity}
           onRelightIntensityChange={setRelightIntensity}
-          disabled={intensityControlDisabled}
+          disabled={modeControlsDisabled}
         />
       </div>
 

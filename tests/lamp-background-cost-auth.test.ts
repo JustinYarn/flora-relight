@@ -84,7 +84,7 @@ function fixtureRun(
 }
 
 test("legacy Flora estimates remain bound to Flora after the default workflow changes", () => {
-  assert.equal(RELIGHT_WORKFLOW.id, "lamp-beautify-v1");
+  assert.equal(RELIGHT_WORKFLOW.id, "lamp-v1");
   assert.deepEqual(RELIGHT_WORKFLOW.config.judges, ["gemini"]);
 
   const judgeItems = estimateIteration(5).items.filter(
