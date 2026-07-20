@@ -114,17 +114,17 @@ const COMBINED_FLOW = [
   {
     title: "Two source-rooted takes",
     description:
-      "Generate Take 1 from the original, critique it once, then generate Take 2 from that same original—not Take 1's pixels.",
+      "Generate Take 1 from the original, apply at most three safe corrections when the critic responds, then generate Take 2 from that same original—not Take 1's pixels.",
   },
   {
     title: "Qualify both",
     description:
-      "Restore source audio and run SyncNet on each take. Take 1 cannot be repaired; Take 2 gets at most one repair.",
+      "Run every audio-bearing take through Lipsync-2-Pro, restore exact source audio, then require whole-clip and rolling-window SyncNet proof.",
   },
   {
-    title: "You choose, then grade",
+    title: "Score separately, then choose",
     description:
-      "Compare the eligible takes, pick one winner, and blind-grade only that exact artifact.",
+      "Show both lip-synced videos first. Detailed scoring can recover independently, but grading and export stay locked until its receipts are complete.",
   },
 ] as const;
 
@@ -640,12 +640,19 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
       run.irisPlan?.approval.status === "draft") ||
     (runMode === "combined" &&
       run.combinedPlan?.approval.status === "draft");
+  const combinedScoringPending =
+    runMode === "combined" &&
+    run.serverExecution?.status === "reconcile_required" &&
+    run.iterations.length >= 2 &&
+    Boolean(run.iterations.find((iteration) => iteration.index === 2)?.generatedVideo);
   const status = readyToStart
     ? backgroundPlanDraft
       ? { color: "var(--borderline)", label: "plan review" }
       : run.serverExecution?.status === "user_action_required"
       ? { color: "var(--borderline)", label: "approval needed" }
       : { color: "var(--running)", label: "ready to start" }
+    : combinedScoringPending
+      ? { color: "var(--borderline)", label: "scoring pending" }
     : STATUS_META[run.status];
 
   return (

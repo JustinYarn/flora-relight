@@ -166,13 +166,15 @@ export async function persistPaidOperationProviderId(
 /** Seal an uncertain call so no automatic or manual retry can re-bill it. */
 export async function markPaidOperationReconcileRequired(
   operation: PaidOperation,
-  safeError: string
+  safeError: string,
+  receipt?: unknown
 ): Promise<void> {
   await getStorage().reconcilePaidOperation(
     operation.runId,
     operation.id,
     operation.inputHash,
-    safeError.slice(0, 500)
+    safeError.slice(0, 500),
+    receipt
   );
 }
 

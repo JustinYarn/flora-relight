@@ -12,6 +12,7 @@ import { assertRunId } from "../runstore.ts";
 import {
   isLampApprovalReplayTransition,
   isLampLostGenerationAcknowledgeTransition,
+  isLampRejectedEvaluationAcknowledgeTransition,
   LAMP_USER_ACTION_REQUIRED_PREFIX,
 } from "../run-execution-resume.ts";
 import { isTwoPassExecutionId } from "../../workflow-mode.ts";
@@ -524,7 +525,10 @@ export function assertRunExecutionTransition(
     // exit from reconcile_required into the paused-for-approval state. The
     // replacement generation still fails closed until a fresh exact approval
     // is confirmed, so this cannot re-bill anything by itself.
-    !isLampLostGenerationAcknowledgeTransition(current, candidate)
+    !isLampLostGenerationAcknowledgeTransition(current, candidate) &&
+    // The same guarded pause is allowed after an exact synchronous Gemini 400
+    // evaluation rejection has been archived by the reconciliation route.
+    !isLampRejectedEvaluationAcknowledgeTransition(current, candidate)
   ) {
     throw new Error(
       `Run execution status cannot move from ${current.status} to ${candidate.status}`

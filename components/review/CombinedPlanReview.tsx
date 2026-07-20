@@ -465,7 +465,7 @@ export function CombinedPlanReview({
           lines={[
             `${run.originalVideo.label} — ${run.originalVideo.durationSec.toFixed(1)}s`,
             `Estimated provider cost after plan approval: ${formatUsd(estimate.totalUsd)}`,
-            `Spend authorization: the server reserves ${formatReservationUsd(reservation)} for exactly two source-rooted generations, two whole-video evaluations, and at most one Take 2 Lipsync-2-Pro repair. The completed planning calls are excluded.`,
+            `Spend authorization: the server reserves ${formatReservationUsd(reservation)} for exactly two source-rooted generations, two mandatory Lipsync-2-Pro normalizations, and two post-normalization whole-video evaluations. The completed planning calls are excluded.`,
             `Controls locked to this approval: relight ${relightIntensity}/100; background ${cleanliness.label}; Beautify ${plan.controls.beautifyLevel === 0 ? "off" : `${plan.controls.beautifyLevel}/3`}; eye contact ${plan.controls.eyeContact ? "Presenter P2" : "off"}.`,
             "Take 1 and Take 2 both start from the immutable original. Take 2 receives only the frozen prompt plus the bounded correction ledger—never Take 1's generated pixels.",
             "There is one correction pass, no chaining, and no open-ended regeneration loop. After both candidates finish qualification, you choose among the eligible takes before blind grading.",

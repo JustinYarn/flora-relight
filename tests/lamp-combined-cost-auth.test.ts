@@ -17,6 +17,7 @@ import {
   LAMP_COMBINED_IRIS_PLAN_OPERATION_ID,
 } from "../lib/lamp-combined-operations.ts";
 import type { LampCombinedControls } from "../lib/lamp-combined.ts";
+import { lampCombinedLipsyncOperationId } from "../lib/lamp-combined-lipsync.ts";
 import { microsToUsd } from "../lib/server/batch-budget.ts";
 import {
   assertPaidOperationAuthorized,
@@ -28,7 +29,6 @@ import {
   lampCombinedPlanMaximumMicros,
 } from "../lib/server/spend-approval.ts";
 import type { ProviderOperation, Run, VideoAsset } from "../lib/types.ts";
-import { LIPSYNC_OPERATION_ID } from "../lib/v2-sync.ts";
 
 const NOW = 1_800_100_000_000;
 const OFF_CONTROLS: LampCombinedControls = {
@@ -212,7 +212,7 @@ test("Combined approvals cannot authorize work for another workflow mode", () =>
   );
 });
 
-test("Combined two-pass reserves exactly two generations, two evals, and one possible Final repair", () => {
+test("Combined two-pass reserves two generations, two mandatory normalizations, and two evals", () => {
   const source = video("run_combined_two_pass");
   const estimate = estimateLampCombinedTwoPass(source.durationSec);
   const approval = createSpendApproval(
@@ -235,6 +235,9 @@ test("Combined two-pass reserves exactly two generations, two evals, and one pos
   };
   const fixture = run(source, ALL_CONTROLS, approval, [completedInitial]);
   assert.equal(estimate.items.length, 6);
+  const lipsync = estimate.items.find((item) => item.provider === "replicate");
+  assert.equal(lipsync?.units, source.durationSec * 2);
+  assert.match(lipsync?.label ?? "", /Two mandatory/);
   assert.ok(
     lampCombinedTwoPassReservationUsd(FIRST_CUT_MAX_OUTPUT_SECONDS) >
       estimate.totalUsd
@@ -261,16 +264,18 @@ test("Combined two-pass reserves exactly two generations, two evals, and one pos
       )
     );
   }
-  assert.doesNotThrow(() =>
-    assertPaidOperationAuthorized(
-      fixture,
-      "lipsync",
-      2,
-      undefined,
-      LIPSYNC_OPERATION_ID,
-      NOW + 1
-    )
-  );
+  for (const iteration of [1, 2] as const) {
+    assert.doesNotThrow(() =>
+      assertPaidOperationAuthorized(
+        fixture,
+        "lipsync",
+        iteration,
+        undefined,
+        lampCombinedLipsyncOperationId(iteration),
+        NOW + 1
+      )
+    );
+  }
   assert.throws(
     () =>
       assertPaidOperationAuthorized(

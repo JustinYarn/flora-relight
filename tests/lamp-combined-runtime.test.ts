@@ -3,9 +3,11 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
-  appendLampCombinedRepairQualification,
   buildLampCombinedCandidateQualificationReceipt,
+  isLampCombinedCandidateQualificationReceipt,
   lampCombinedCandidateReceiptEligible,
+  lampCombinedCandidateReceiptToDeliveryCandidate,
+  lampCombinedLegacyCandidateReceiptMatches,
   lampCombinedCandidateReceiptMatches,
 } from "../lib/lamp-combined-candidate.ts";
 import {
@@ -16,6 +18,12 @@ import {
   LAMP_COMBINED_HOLISTIC_EVAL_ID,
   lampCombinedEvaluationOperationId,
 } from "../lib/lamp-combined-operations.ts";
+import {
+  lampCombinedLipsyncGenerationBinding,
+  lampCombinedLipsyncInputHash,
+  lampCombinedLipsyncOperationId,
+  lampCombinedMandatorySyncVerdict,
+} from "../lib/lamp-combined-lipsync.ts";
 import {
   approveLampCombinedPlan,
   buildLampCombinedPlan,
@@ -39,9 +47,6 @@ import type {
 } from "../lib/types.ts";
 import {
   LIPSYNC_MODEL,
-  LIPSYNC_OPERATION_ID,
-  v2FinalGenerationProof,
-  v2LipsyncOperationInputHash,
   type SyncNetMetrics,
 } from "../lib/v2-sync.ts";
 
@@ -123,9 +128,76 @@ function evaluation(iteration: 1 | 2): PaidOperation {
   };
 }
 
+function normalization(
+  iteration: 1 | 2,
+  preSync: SyncNetMetrics = PASS,
+  postSync: SyncNetMetrics = PASS
+): PaidOperation {
+  const gen = generation(iteration);
+  const sourceGeneration = lampCombinedLipsyncGenerationBinding(gen, iteration);
+  assert.ok(sourceGeneration);
+  const predictionId = `prediction-${iteration}`;
+  return {
+    id: lampCombinedLipsyncOperationId(iteration),
+    runId: RUN_ID,
+    provider: "replicate",
+    kind: "lipsync",
+    iteration,
+    inputHash: lampCombinedLipsyncInputHash({
+      runId: RUN_ID,
+      iteration,
+      sourceGeneration,
+    }),
+    providerOperationId: predictionId,
+    status: "completed",
+    startedAt: 20,
+    updatedAt: 30,
+    result: {
+      version: "lamp-combined-lipsync-v1",
+      iteration,
+      predictionId,
+      model: LIPSYNC_MODEL,
+      videoUrl: `/api/media/runs/${RUN_ID}/lipsync-v${iteration}-remuxed.mp4`,
+      videoSha256: "b".repeat(64),
+      audioMd5: "c".repeat(32),
+      billableDurationSec: 8,
+      costUsd: 0.666,
+      audioVerified: true,
+      preSync,
+      postSync,
+      sourceSync: PASS,
+      windows: [
+        {
+          startSec: 0,
+          durationSec: 3,
+          source: PASS,
+          candidate: postSync,
+        },
+      ],
+      sourceGeneration,
+    },
+  };
+}
+
+test("Combined Lipsync identity ignores mutable billing metadata", () => {
+  const original = generation(1);
+  const withReconciledBilling = structuredClone(original);
+  withReconciledBilling.result!.costUsd = 1.25;
+  withReconciledBilling.result!.usage = {
+    total_input_tokens: 2,
+    total_output_tokens: 3,
+    output_tokens_by_modality: [],
+  };
+  assert.deepEqual(
+    lampCombinedLipsyncGenerationBinding(original, 1),
+    lampCombinedLipsyncGenerationBinding(withReconciledBilling, 1)
+  );
+});
+
 test("Combined receipt binds exact generation, evaluation, and canonical baseline", () => {
   const gen = generation(1);
   const judge = evaluation(1);
+  const lipsync = normalization(1);
   const receipt = buildLampCombinedCandidateQualificationReceipt({
     iteration: 1,
     generationOperation: gen,
@@ -134,6 +206,7 @@ test("Combined receipt binds exact generation, evaluation, and canonical baselin
     planHash: PLAN_HASH,
     sourceHasAudio: true,
     syncEvidence: { outcome: "measured", metrics: PASS, sourceSync: PASS },
+    lipsyncOperation: lipsync,
     recordedAt: 40,
   });
   assert.equal(lampCombinedCandidateReceiptEligible(receipt), true);
@@ -146,7 +219,7 @@ test("Combined receipt binds exact generation, evaluation, and canonical baselin
       planHash: PLAN_HASH,
       sourceHasAudio: true,
       canonicalSourceSync: PASS,
-      lipsyncOperation: null,
+      lipsyncOperation: lipsync,
     }),
     true
   );
@@ -162,7 +235,7 @@ test("Combined receipt binds exact generation, evaluation, and canonical baselin
       planHash: PLAN_HASH,
       sourceHasAudio: true,
       canonicalSourceSync: PASS,
-      lipsyncOperation: null,
+      lipsyncOperation: lipsync,
     }),
     false
   );
@@ -175,13 +248,51 @@ test("Combined receipt binds exact generation, evaluation, and canonical baselin
       planHash: PLAN_HASH,
       sourceHasAudio: true,
       canonicalSourceSync: { ...PASS, confidence: 5.9 },
-      lipsyncOperation: null,
+      lipsyncOperation: lipsync,
     }),
     false
   );
 });
 
-test("Initial SyncNet failure is explicit, ineligible, and never repairable", () => {
+test("every audio-bearing Combined take requires a completed mandatory normalization", () => {
+  assert.throws(
+    () =>
+      buildLampCombinedCandidateQualificationReceipt({
+        iteration: 1,
+        generationOperation: generation(1),
+        evaluationOperation: evaluation(1),
+        planId: PLAN_ID,
+        planHash: PLAN_HASH,
+        sourceHasAudio: true,
+        syncEvidence: { outcome: "measured", metrics: PASS, sourceSync: PASS },
+        recordedAt: 40,
+      }),
+    /mandatory Lipsync proof/
+  );
+  const inProgress = {
+    ...normalization(1),
+    status: "in_progress" as const,
+    result: undefined,
+  };
+  assert.throws(
+    () =>
+      buildLampCombinedCandidateQualificationReceipt({
+        iteration: 1,
+        generationOperation: generation(1),
+        evaluationOperation: evaluation(1),
+        planId: PLAN_ID,
+        planHash: PLAN_HASH,
+        sourceHasAudio: true,
+        syncEvidence: { outcome: "measured", metrics: PASS, sourceSync: PASS },
+        lipsyncOperation: inProgress,
+        recordedAt: 40,
+      }),
+    /mandatory Lipsync proof/
+  );
+});
+
+test("a completed normalization that fails the strict post-check is explicit and ineligible", () => {
+  const lipsync = normalization(1, FAIL, FAIL);
   const receipt = buildLampCombinedCandidateQualificationReceipt({
     iteration: 1,
     generationOperation: generation(1),
@@ -190,102 +301,67 @@ test("Initial SyncNet failure is explicit, ineligible, and never repairable", ()
     planHash: PLAN_HASH,
     sourceHasAudio: true,
     syncEvidence: { outcome: "measured", metrics: FAIL, sourceSync: PASS },
+    lipsyncOperation: lipsync,
     recordedAt: 40,
   });
   assert.equal(receipt.sync.outcome, "failed");
   assert.equal(lampCombinedCandidateReceiptEligible(receipt), false);
-  assert.throws(
-    () =>
-      appendLampCombinedRepairQualification({
-        receipt,
-        finalGeneration: generation(2),
-        lipsyncOperation: {} as PaidOperation,
-        canonicalSourceSync: PASS,
-        recordedAt: 50,
-      }),
-    /Only one failed Combined Final/
+  assert.equal(
+    lampCombinedMandatorySyncVerdict(
+      lipsync.result as NonNullable<PaidOperation["result"]> & {
+        postSync: SyncNetMetrics;
+        sourceSync: SyncNetMetrics;
+        windows: Array<{
+          startSec: number;
+          durationSec: number;
+          source: SyncNetMetrics;
+          candidate: SyncNetMetrics;
+        }>;
+      }
+    ).pass,
+    false
   );
 });
 
-test("Final may append exactly one artifact-bound Lipsync repair", () => {
-  const gen = generation(2);
-  const base = buildLampCombinedCandidateQualificationReceipt({
-    iteration: 2,
-    generationOperation: gen,
-    evaluationOperation: evaluation(2),
-    planId: PLAN_ID,
-    planHash: PLAN_HASH,
-    sourceHasAudio: true,
-    syncEvidence: { outcome: "measured", metrics: FAIL, sourceSync: PASS },
-    recordedAt: 40,
-  });
-  const sourceFinal = v2FinalGenerationProof(gen);
-  assert.ok(sourceFinal);
-  const lipsync: PaidOperation = {
-    id: LIPSYNC_OPERATION_ID,
-    runId: RUN_ID,
-    provider: "replicate",
-    kind: "lipsync",
-    iteration: 2,
-    inputHash: v2LipsyncOperationInputHash({
-      runId: RUN_ID,
-      preSync: FAIL,
-      sourceFinal,
-    }),
-    providerOperationId: "prediction-1",
-    status: "completed",
-    startedAt: 50,
-    updatedAt: 60,
-    result: {
-      predictionId: "prediction-1",
-      model: LIPSYNC_MODEL,
-      videoUrl: `/api/media/runs/${RUN_ID}/relit-v2.mp4`,
-      billableDurationSec: 8,
-      costUsd: 0.666,
-      audioVerified: true,
-      preSync: FAIL,
-      postSync: PASS,
-      sourceFinal,
-    },
-  };
-  const repaired = appendLampCombinedRepairQualification({
-    receipt: base,
-    finalGeneration: gen,
-    lipsyncOperation: lipsync,
-    canonicalSourceSync: PASS,
-    recordedAt: 70,
-  });
-  assert.equal(repaired.repair?.sync.outcome, "passed");
-  assert.equal(lampCombinedCandidateReceiptEligible(repaired), true);
-  assert.equal(
-    lampCombinedCandidateReceiptMatches({
-      receipt: repaired,
+test("both Take 1 and Take 2 bind their own normalized artifact", () => {
+  for (const iteration of [1, 2] as const) {
+    const gen = generation(iteration);
+    const judge = evaluation(iteration);
+    const lipsync = normalization(iteration);
+    const receipt = buildLampCombinedCandidateQualificationReceipt({
+      iteration,
       generationOperation: gen,
-      evaluationOperation: evaluation(2),
+      evaluationOperation: judge,
       planId: PLAN_ID,
       planHash: PLAN_HASH,
       sourceHasAudio: true,
-      canonicalSourceSync: PASS,
+      syncEvidence: { outcome: "measured", metrics: PASS, sourceSync: PASS },
       lipsyncOperation: lipsync,
-    }),
-    true
-  );
-  assert.throws(
-    () =>
-      appendLampCombinedRepairQualification({
-        receipt: repaired,
-        finalGeneration: gen,
-        lipsyncOperation: lipsync,
+      recordedAt: 40,
+    });
+    assert.equal(receipt.normalization?.operationId, `lipsync:${iteration}`);
+    assert.equal(receipt.repair, undefined);
+    assert.equal(lampCombinedCandidateReceiptEligible(receipt), true);
+    assert.equal(
+      lampCombinedCandidateReceiptMatches({
+        receipt,
+        generationOperation: gen,
+        evaluationOperation: judge,
+        planId: PLAN_ID,
+        planHash: PLAN_HASH,
+        sourceHasAudio: true,
         canonicalSourceSync: PASS,
-        recordedAt: 80,
+        lipsyncOperation: lipsync,
       }),
-    /Only one failed Combined Final/
-  );
+      true
+    );
+  }
 });
 
-test("Final without a repair receipt rejects every existing Lipsync journal", () => {
+test("a normalized receipt rejects missing, changed, and unresolved Lipsync journals", () => {
   const gen = generation(2);
   const judge = evaluation(2);
+  const completed = normalization(2);
   const receipt = buildLampCombinedCandidateQualificationReceipt({
     iteration: 2,
     generationOperation: gen,
@@ -293,41 +369,14 @@ test("Final without a repair receipt rejects every existing Lipsync journal", ()
     planId: PLAN_ID,
     planHash: PLAN_HASH,
     sourceHasAudio: true,
-    syncEvidence: { outcome: "measured", metrics: FAIL, sourceSync: PASS },
+    syncEvidence: { outcome: "measured", metrics: PASS, sourceSync: PASS },
+    lipsyncOperation: completed,
     recordedAt: 40,
   });
-  const sourceFinal = v2FinalGenerationProof(gen)!;
-  const inputHash = v2LipsyncOperationInputHash({
-    runId: RUN_ID,
-    preSync: FAIL,
-    sourceFinal,
-  });
   const inProgress: PaidOperation = {
-    id: LIPSYNC_OPERATION_ID,
-    runId: RUN_ID,
-    provider: "replicate",
-    kind: "lipsync",
-    iteration: 2,
-    inputHash,
-    providerOperationId: "prediction-orphan",
+    ...completed,
     status: "in_progress",
-    startedAt: 50,
-    updatedAt: 60,
-  };
-  const completed: PaidOperation = {
-    ...inProgress,
-    status: "completed",
-    result: {
-      predictionId: "prediction-orphan",
-      model: LIPSYNC_MODEL,
-      videoUrl: `/api/media/runs/${RUN_ID}/lipsync-v2-remuxed.mp4`,
-      billableDurationSec: 8,
-      costUsd: 0.666,
-      audioVerified: true,
-      preSync: FAIL,
-      postSync: PASS,
-      sourceFinal,
-    },
+    result: undefined,
   };
   const reconcileRequired: PaidOperation = {
     ...inProgress,
@@ -346,74 +395,65 @@ test("Final without a repair receipt rejects every existing Lipsync journal", ()
       lipsyncOperation,
     });
 
-  assert.equal(receipt.repair, undefined);
-  assert.equal(matches(null), true);
+  assert.equal(matches(null), false);
   assert.equal(matches(inProgress), false);
-  assert.equal(matches(completed), false);
+  assert.equal(matches(completed), true);
   assert.equal(matches(reconcileRequired), false);
+  const changed = structuredClone(completed);
+  (changed.result as { videoSha256: string }).videoSha256 = "d".repeat(64);
+  assert.equal(
+    matches(changed),
+    false
+  );
 });
 
-test("a durably completed but failing Final repair stays explicit and ineligible", () => {
-  const gen = generation(2);
-  const base = buildLampCombinedCandidateQualificationReceipt({
-    iteration: 2,
+test("legacy Combined receipts stay readable but cannot pass the current delivery gate", () => {
+  const gen = generation(1);
+  const judge = evaluation(1);
+  const current = buildLampCombinedCandidateQualificationReceipt({
+    iteration: 1,
     generationOperation: gen,
-    evaluationOperation: evaluation(2),
+    evaluationOperation: judge,
     planId: PLAN_ID,
     planHash: PLAN_HASH,
     sourceHasAudio: true,
-    syncEvidence: { outcome: "measured", metrics: FAIL, sourceSync: PASS },
+    syncEvidence: { outcome: "measured", metrics: PASS, sourceSync: PASS },
+    lipsyncOperation: normalization(1),
     recordedAt: 40,
   });
-  const sourceFinal = v2FinalGenerationProof(gen)!;
-  const lipsync: PaidOperation = {
-    id: LIPSYNC_OPERATION_ID,
-    runId: RUN_ID,
-    provider: "replicate",
-    kind: "lipsync",
-    iteration: 2,
-    inputHash: v2LipsyncOperationInputHash({
-      runId: RUN_ID,
-      preSync: FAIL,
-      sourceFinal,
-    }),
-    providerOperationId: "prediction-failed",
-    status: "completed",
-    startedAt: 50,
-    updatedAt: 60,
-    result: {
-      predictionId: "prediction-failed",
-      model: LIPSYNC_MODEL,
-      videoUrl: `/api/media/runs/${RUN_ID}/lipsync-v2-remuxed.mp4`,
-      billableDurationSec: 8,
-      costUsd: 0.666,
-      audioVerified: true,
-      preSync: FAIL,
-      postSync: FAIL,
-      sourceFinal,
-    },
-  };
-  const repaired = appendLampCombinedRepairQualification({
-    receipt: base,
-    finalGeneration: gen,
-    lipsyncOperation: lipsync,
-    canonicalSourceSync: PASS,
-    recordedAt: 70,
-  });
-  assert.equal(repaired.repair?.sync.outcome, "failed");
-  assert.equal(lampCombinedCandidateReceiptEligible(repaired), false);
+  const legacy = structuredClone(current);
+  delete legacy.normalization;
+
+  assert.equal(isLampCombinedCandidateQualificationReceipt(legacy), true);
+  assert.equal(lampCombinedCandidateReceiptEligible(legacy), false);
   assert.equal(
-    lampCombinedCandidateReceiptMatches({
-      receipt: repaired,
+    lampCombinedCandidateReceiptToDeliveryCandidate(legacy).syncStatus,
+    "unverified"
+  );
+  assert.equal(
+    lampCombinedLegacyCandidateReceiptMatches({
+      receipt: legacy,
       generationOperation: gen,
-      evaluationOperation: evaluation(2),
+      evaluationOperation: judge,
       planId: PLAN_ID,
       planHash: PLAN_HASH,
       sourceHasAudio: true,
       canonicalSourceSync: PASS,
-      lipsyncOperation: lipsync,
     }),
     true
+  );
+  assert.equal(
+    lampCombinedCandidateReceiptMatches({
+      receipt: legacy,
+      generationOperation: gen,
+      evaluationOperation: judge,
+      planId: PLAN_ID,
+      planHash: PLAN_HASH,
+      sourceHasAudio: true,
+      canonicalSourceSync: PASS,
+      lipsyncOperation: null,
+    }),
+    false
   );
 });
 

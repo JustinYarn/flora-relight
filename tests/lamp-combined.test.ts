@@ -11,7 +11,6 @@ import {
   hashLampCombinedPlan,
   lampCombinedBackgroundExecutionScope,
   lampCombinedEnabledConcerns,
-  lampCombinedMayAttemptSyncRepair,
   lampCombinedRequiredPlanners,
   LAMP_COMBINED_CLEANLINESS_PROFILES,
   LAMP_COMBINED_MAX_CORRECTIONS,
@@ -239,7 +238,7 @@ test("cleanliness changes execution amplitude without changing approved targets"
   assert.match(LAMP_COMBINED_CLEANLINESS_PROFILES[3].scopeRule, /same human-approved/);
 });
 
-test("corrections prioritize hard gates, enabled-concern coverage, then stable severity with a 12 cap", () => {
+test("corrections prioritize hard gates, then enabled-concern coverage within a compact cap", () => {
   const candidates: LampCombinedCorrectionCandidate[] = [
     {
       id: "background-minor",
@@ -298,33 +297,26 @@ test("corrections prioritize hard gates, enabled-concern coverage, then stable s
   const selected = selectLampCombinedCorrections(candidates, allControls);
   assert.equal(selected.length, LAMP_COMBINED_MAX_CORRECTIONS);
   assert.deepEqual(
-    selected.slice(0, 6).map((candidate) => candidate.id),
+    selected.map((candidate) => candidate.id),
     [
       "hard-critical",
       "hard-minor",
       "lighting-major",
-      "background-minor",
-      "beautify-critical",
-      "iris-major",
     ]
-  );
-  assert.deepEqual(
-    selected.slice(6, 10).map((candidate) => candidate.id),
-    ["filler-0", "filler-1", "filler-2", "filler-3"]
   );
 
   const withDuplicate = selectLampCombinedCorrections(
-    [...candidates, candidates[0]!],
+    [...candidates, candidates[5]!],
     allControls
   );
   assert.equal(
-    withDuplicate.filter((candidate) => candidate.id === "background-minor")
+    withDuplicate.filter((candidate) => candidate.id === "hard-critical")
       .length,
     1
   );
 });
 
-test("a failed v1 sync verdict makes v1 ineligible and only v2 gets one repair chance", () => {
+test("a failed mandatory sync verdict makes either take ineligible", () => {
   const candidates: LampCombinedDeliveryCandidate[] = [
     {
       iteration: 1,
@@ -363,27 +355,6 @@ test("a failed v1 sync verdict makes v1 ineligible and only v2 gets one repair c
   });
   assert.throws(() => assertLampCombinedGradeTarget(winner, 1), /Only the human-selected/);
   assert.doesNotThrow(() => assertLampCombinedGradeTarget(winner, 2));
-  assert.equal(
-    lampCombinedMayAttemptSyncRepair({
-      iteration: 1,
-      previousRepairAttempts: 0,
-    }),
-    false
-  );
-  assert.equal(
-    lampCombinedMayAttemptSyncRepair({
-      iteration: 2,
-      previousRepairAttempts: 0,
-    }),
-    true
-  );
-  assert.equal(
-    lampCombinedMayAttemptSyncRepair({
-      iteration: 2,
-      previousRepairAttempts: 1,
-    }),
-    false
-  );
 });
 
 test("the five-stage workflow keeps both generations rooted in the source", () => {

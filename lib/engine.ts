@@ -1853,6 +1853,8 @@ async function mockLampCombinedEvaluation(
     plan,
     iteration,
     audioVerified: true,
+    syncVerified: true,
+    syncReason: "Provider-free rehearsal uses a trusted simulated sync pass.",
     previousArtifact,
     costUsd: 0,
   });

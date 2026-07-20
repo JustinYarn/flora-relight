@@ -38,6 +38,7 @@ import {
   parseLampCombinedControls,
   type LampCombinedControls,
 } from "../lamp-combined.ts";
+import { lampCombinedLipsyncOperationId } from "../lamp-combined-lipsync.ts";
 import { lampEvaluationOperationId } from "../lamp-evaluation.ts";
 import { LIPSYNC_OPERATION_ID } from "../v2-sync.ts";
 import type {
@@ -702,14 +703,14 @@ export function assertPaidOperationAuthorized(
       combinedIteration !== null &&
       evalId === LAMP_COMBINED_HOLISTIC_EVAL_ID &&
       operationId === lampCombinedEvaluationOperationId(combinedIteration);
-    const finalLipsyncRepair =
+    const mandatoryLipsync =
       kind === "lipsync" &&
-      iteration === 2 &&
+      combinedIteration !== null &&
       evalId === undefined &&
-      operationId === LIPSYNC_OPERATION_ID;
-    if (!holisticEvaluation && !finalLipsyncRepair) {
+      operationId === lampCombinedLipsyncOperationId(combinedIteration);
+    if (!holisticEvaluation && !mandatoryLipsync) {
       throw new Error(
-        "Lamp Combined execution authorizes its two holistic evaluations and at most one Lipsync-2-Pro repair for Final; planning requires a separate approval."
+        "Lamp Combined execution authorizes two mandatory Lipsync-2-Pro normalizations and two holistic evaluations; planning requires a separate approval."
       );
     }
     return;

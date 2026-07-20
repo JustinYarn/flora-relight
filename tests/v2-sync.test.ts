@@ -126,18 +126,23 @@ test("V2 SyncNet gate admits its exact confidence and distance boundaries", () =
   assert.equal(v2SyncPasses(metrics(4, 10.001)), false);
 });
 
-test("verdict stays absolute without a baseline or when the source passes", () => {
+test("verdict stays absolute without a baseline and prevents regression from a healthy source", () => {
   const noBaseline = v2SyncVerdict(metrics(3.9, 8));
   assert.equal(noBaseline.pass, false);
   assert.equal(noBaseline.mode, "absolute");
   assert.equal(v2SyncVerdict(metrics(4.2, 8), null).pass, true);
 
-  // A source that clears 4/10 keeps the absolute bar: "almost as good as a
-  // healthy source" is not a pass.
+  // A healthy source activates the stricter source-relative regression bar.
   const healthySource = metrics(6.5, 7);
   const nearMiss = v2SyncVerdict(metrics(3.9, 8), healthySource);
   assert.equal(nearMiss.pass, false);
-  assert.equal(nearMiss.mode, "absolute");
+  assert.equal(nearMiss.mode, "source_relative");
+
+  // Live Combined V2 regression: this used to scrape through the loose 4/10
+  // absolute threshold despite looking visibly wrong to a human.
+  const liveSource = metrics(7.1218, 7.8304, 0.2);
+  const falsePass = v2SyncVerdict(metrics(5.7188, 9.8072, 0.08), liveSource);
+  assert.equal(falsePass.pass, false);
 });
 
 test("run_bg01_049 regression: a quiet-speaker source admits its within-tolerance Final", () => {
@@ -170,19 +175,17 @@ test("source-relative bar still refuses real regressions", () => {
   assert.equal(v2SyncVerdict(metrics(2.74, 10, 0), quietSource).pass, true);
   assert.equal(v2SyncVerdict(metrics(2.74, 10.001, 0), quietSource).pass, false);
   // The relative gate must refuse real A/V drift outright (~1 frame cap).
-  assert.equal(v2SyncVerdict(metrics(2.74, 7.42, 0.05), quietSource).pass, true);
+  assert.equal(v2SyncVerdict(metrics(2.74, 7.42, 0.03), quietSource).pass, true);
   assert.equal(
-    v2SyncVerdict(metrics(2.74, 7.42, -0.051), quietSource).pass,
+    v2SyncVerdict(metrics(2.74, 7.42, 0.031), quietSource).pass,
     false
   );
 });
 
-test("an absolute pass is always sufficient, even in source-relative mode", () => {
-  // Offset is only guarded when the gate is trading away the confidence bar;
-  // metrics that clear 4/10 outright pass exactly as they always have.
+test("an absolute pass cannot bypass source-relative timing preservation", () => {
   const quietSource = metrics(2.65, 7.5);
   const verdict = v2SyncVerdict(metrics(5.2, 8, 0.3), quietSource);
-  assert.equal(verdict.pass, true);
+  assert.equal(verdict.pass, false);
   assert.equal(verdict.mode, "source_relative");
 });
 

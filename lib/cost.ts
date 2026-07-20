@@ -413,11 +413,18 @@ export function lampCombinedPlanReservationUsd(
   );
 }
 
-/** Combined generation/evaluation has the same fixed provider shape as the plan modes. */
+/**
+ * Combined adds mandatory Lipsync-2-Pro normalization for both takes. The
+ * reused base total happens to reserve one duration-priced Lipsync operation,
+ * so add a second duration-priced call to reach exactly two mandatory passes.
+ */
 export function lampCombinedTwoPassReservationUsd(
   durationSec: number
 ): number {
-  return lampBackgroundTwoPassReservationUsd(durationSec);
+  return (
+    lampBackgroundTwoPassReservationUsd(durationSec) +
+    durationSec * PRICE_TABLE.lipsync2ProPerOutputSecond.usd
+  );
 }
 
 /** Price a completed Lipsync-2-Pro repair from its actual output duration. */
@@ -790,7 +797,7 @@ export function estimateLampCombinedPlan(
   );
 }
 
-/** Combined execution: two generations, two holistic evals, one possible repair. */
+/** Combined execution: two generations, two mandatory normalizations, two evals. */
 export function estimateLampCombinedTwoPass(
   durationSec: number
 ): CostEstimate {
@@ -800,7 +807,11 @@ export function estimateLampCombinedTwoPass(
       label: item.label
         .replace(/background-cleanup/gi, "Combined")
         .replace(/cleanup/gi, "Combined")
+        .replace(/One possible Final Lipsync-2-Pro repair/gi, "Two mandatory Lipsync-2-Pro normalizations")
         .replace(/Final/gi, "Take 2"),
+      ...(item.provider === PRICE_TABLE.lipsync2ProPerOutputSecond.provider
+        ? { units: item.units * 2, usd: item.usd * 2 }
+        : {}),
     }))
   );
 }

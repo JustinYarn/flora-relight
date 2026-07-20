@@ -66,6 +66,7 @@ import {
   hasDeletionBlockingRunWork,
 } from "./run-deletion";
 import { isProviderLostInteraction } from "@/lib/server/run-execution-failure";
+import { isReplayableLampCombinedEvaluationFailure } from "@/lib/server/definitive-provider-rejection";
 import type { MediaRange, MediaStat, RunPageCursor, StorageDriver } from "./types";
 import {
   lampCombinedApprovalDisposition,
@@ -457,6 +458,66 @@ export function createFsDriver(): StorageDriver {
         return { superseded: true as const, run: updated };
       });
     },
+    async supersedeDefinitiveRejectedPaidOperation(runId, input) {
+      const id = assertRunId(runId);
+      const operationId = assertPaidOperationId(input.operationId);
+      const archivedId = assertPaidOperationId(input.archivedOperationId);
+      if (!SHA256_RE.test(input.inputHash)) {
+        throw new Error("Invalid paid operation inputHash");
+      }
+      if (!Number.isSafeInteger(input.startedAt) || input.startedAt < 0) {
+        throw new Error("Invalid paid operation startedAt");
+      }
+      if (!isReplayableLampCombinedEvaluationFailure(input.expectedError)) {
+        return { superseded: false as const, run: await readRun(id) };
+      }
+      return withPaidOperationLock(async () => {
+        if (await isRunTombstoned(id)) {
+          return { superseded: false as const, run: null };
+        }
+        const operations = await readPaidOperations(id);
+        const index = operations.findIndex((item) => item.id === operationId);
+        const archivedIndex = operations.findIndex(
+          (item) => item.id === archivedId
+        );
+        const matches = (operation: PaidOperation | undefined) =>
+          Boolean(
+            operation &&
+              operation.provider === "gemini" &&
+              operation.kind === "judge" &&
+              operation.status === "reconcile_required" &&
+              operation.inputHash === input.inputHash &&
+              operation.startedAt === input.startedAt &&
+              operation.error === input.expectedError &&
+              isReplayableLampCombinedEvaluationFailure(operation.error)
+          );
+        if (index >= 0) {
+          if (archivedIndex >= 0 || !matches(operations[index])) {
+            return { superseded: false as const, run: await readRun(id) };
+          }
+          operations[index] = {
+            ...operations[index],
+            id: archivedId,
+            updatedAt: Date.now(),
+          };
+          await writeJsonAtomic(paidOperationsPath(id), operations);
+        } else if (!matches(operations[archivedIndex])) {
+          return { superseded: false as const, run: await readRun(id) };
+        }
+
+        return withRunLock(async () => {
+          const run = await readRun(id);
+          if (!run) return { superseded: false as const, run: null };
+          if (!run.spendApproval) {
+            return { superseded: true as const, run };
+          }
+          const updated: Run = { ...run };
+          delete updated.spendApproval;
+          await writeRun(updated);
+          return { superseded: true as const, run: updated };
+        });
+      });
+    },
     async claimProviderWorkflow(runId, operationId, claimToken) {
       if (!/^[a-f0-9]{32}$/.test(claimToken)) {
         throw new Error("Invalid provider Workflow claim token");
@@ -615,10 +676,19 @@ export function createFsDriver(): StorageDriver {
         return completed;
       });
     },
-    async reconcilePaidOperation(runId, operationId, inputHash, error) {
+    async reconcilePaidOperation(
+      runId,
+      operationId,
+      inputHash,
+      error,
+      receipt
+    ) {
       const id = assertRunId(runId);
       const opId = assertPaidOperationId(operationId);
       if (!SHA256_RE.test(inputHash)) throw new Error("Invalid paid operation inputHash");
+      if (receipt !== undefined && JSON.stringify(receipt) === undefined) {
+        throw new Error("Paid operation receipt must be JSON serializable");
+      }
       return withPaidOperationLock(async () => {
         const operations = await readPaidOperations(id);
         const index = operations.findIndex((item) => item.id === opId);
@@ -631,6 +701,7 @@ export function createFsDriver(): StorageDriver {
         const reconciled: PaidOperation = {
           ...current,
           status: "reconcile_required",
+          ...(receipt !== undefined ? { result: receipt } : {}),
           error: error.slice(0, 500),
           updatedAt: Date.now(),
         };

@@ -3,10 +3,17 @@ import "server-only";
 import {
   buildLampCombinedEvaluationArtifact,
   buildLampCombinedHolisticEvaluationSchema,
+  LAMP_COMBINED_GEMINI_OUTPUT_CONFIG,
   parseLampCombinedEvaluationArtifact,
   type LampCombinedEvaluationArtifact,
   type LampCombinedHolisticEvaluationSchema,
 } from "@/lib/lamp-combined-evaluation";
+import {
+  isLampCombinedLipsyncResult,
+  lampCombinedLipsyncOperationId,
+  lampCombinedLipsyncProofMatchesGeneration,
+  lampCombinedMandatorySyncVerdict,
+} from "@/lib/lamp-combined-lipsync";
 import {
   LAMP_COMBINED_HOLISTIC_EVAL_ID,
   lampCombinedEvaluationOperationId,
@@ -28,6 +35,7 @@ import {
   type RelightLumaMeasurements,
 } from "@/lib/relight-intensity";
 import { measureRelightLuma } from "@/lib/server/ffmpeg";
+import { isRetryableGeminiCapacityError } from "@/lib/server/definitive-provider-rejection";
 import {
   GEMINI_PRO_MODEL,
   getGemini,
@@ -82,9 +90,11 @@ export function renderLampCombinedHolisticEvaluatorPrompt(input: {
   return [
     `You are the ${input.schema.evaluatorVersion} whole-video critic.`,
     "Compare the complete ORIGINAL source and CANDIDATE exactly once, then return exactly one row for every listed visual check.",
+    'The top level must be exactly one JSON object shaped as {"results":[...ten row objects...]}; never return a bare array, a differently named wrapper, or prose.',
     "Judge corresponding moments and the worst frame across the full timeline. The approved aggregate is authorization, not a suggestion: enabled targets must be complete, disabled/unlisted regions are preservation-only.",
+    "For motion-lipsync, judge visual performance preservation only: gestures, head pose, blinks, and mouth-shape continuity at corresponding source moments. Do not claim or score audio/video synchronization; trusted post-Lipsync code owns that release gate.",
     "Return only the ten visual rows. Never return audio-integrity; trusted code appends that deterministic result.",
-    "For any below-pass row, include at least one concrete violation. correctionAction must be one of that check's allowed actions or null, and planItemIds may name only exact approved IDs.",
+    'For every row, use the flat fields issue, severity, correctionAction, and planItemIds. For a passing row use issue="", severity="none", correctionAction="none", and planItemIds=[]. For any below-pass row, issue must describe the worst concrete failure; correctionAction must be one of that check\'s allowed actions; planItemIds may name only exact approved IDs.',
     "Return one JSON object matching the supplied response schema, with no prose outside JSON.",
     "",
     "EXACT APPROVED AGGREGATE PLAN (authoritative):",
@@ -108,12 +118,13 @@ export function renderLampCombinedHolisticEvaluatorPrompt(input: {
 
 const RATE_LIMIT_RETRY_DELAYS_MS = [30_000, 60_000, 120_000];
 
-function isRateLimitRejection(error: unknown): boolean {
+function isRetryableProviderRejection(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
     message.includes('"code":429') ||
     (message.includes("429") && message.toLowerCase().includes("rate limit")) ||
-    message.includes("RESOURCE_EXHAUSTED")
+    message.includes("RESOURCE_EXHAUSTED") ||
+    isRetryableGeminiCapacityError(error)
   );
 }
 
@@ -122,7 +133,12 @@ async function generateWithRateLimitRetry<T>(call: () => Promise<T>): Promise<T>
     try {
       return await call();
     } catch (error) {
-      if (!isRateLimitRejection(error)) throw error;
+      if (!isRetryableProviderRejection(error)) throw error;
+      console.warn(
+        `[lamp-combined-evaluator] provider temporarily rejected the judge call; retrying in ${Math.round(
+          delayMs / 1000
+        )}s`
+      );
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
@@ -212,9 +228,45 @@ export async function runLampCombinedHolisticEvaluation(input: {
     );
   }
 
+  const lipsyncOperation =
+    run.originalVideo.hasAudio === true
+      ? await storage.getPaidOperation(
+          input.runId,
+          lampCombinedLipsyncOperationId(input.iteration)
+        )
+      : null;
+  const lipsyncResult = lipsyncOperation?.result;
+  const syncVerdict =
+    run.originalVideo.hasAudio === false
+      ? { pass: true, reason: "Silent source; lip synchronization is not required." }
+      : isLampCombinedLipsyncResult(lipsyncResult, input.iteration) &&
+          lipsyncOperation &&
+          lampCombinedLipsyncProofMatchesGeneration({
+            runId: input.runId,
+            iteration: input.iteration,
+            generation,
+            operation: lipsyncOperation,
+          })
+        ? lampCombinedMandatorySyncVerdict(lipsyncResult)
+        : { pass: false, reason: "Mandatory Lipsync proof is missing or invalid." };
+  if (!syncVerdict.pass) {
+    throw new Error(
+      `Lamp Combined evaluation cannot run before post-Lipsync verification: ${syncVerdict.reason}`
+    );
+  }
+  const candidateUrl =
+    run.originalVideo.hasAudio === false
+      ? generation.result.videoUrl
+      : (lipsyncResult as NonNullable<typeof lipsyncResult> & { videoUrl: string })
+          .videoUrl;
+  const candidateAudioVerified =
+    run.originalVideo.hasAudio === false ||
+    (isLampCombinedLipsyncResult(lipsyncResult, input.iteration) &&
+      lipsyncResult.audioVerified);
+
   const [sourcePath, candidatePath] = await Promise.all([
     resolveSourceUrl(run.originalVideo.url),
-    resolveSourceUrl(generation.result.videoUrl),
+    resolveSourceUrl(candidateUrl),
   ]);
   const [schema, measurements] = await Promise.all([
     buildLampCombinedHolisticEvaluationSchema(plan),
@@ -245,10 +297,13 @@ export async function runLampCombinedHolisticEvaluation(input: {
       planHash: schema.planHash,
       iteration: input.iteration,
       sourceUrl: run.originalVideo.url,
-      candidateUrl: generation.result.videoUrl,
+      candidateUrl,
+      lipsyncOperationId: lipsyncOperation?.id ?? null,
+      lipsyncInputHash: lipsyncOperation?.inputHash ?? null,
+      syncVerdict,
       generationPrompt: generation.renderedPrompt,
       relightIntensity,
-      audioVerified: generation.result.audioVerified,
+      audioVerified: candidateAudioVerified,
       previousArtifact: previousArtifact ?? null,
       measurements,
       prompt,
@@ -264,6 +319,14 @@ export async function runLampCombinedHolisticEvaluation(input: {
     throw new Error(paidOperationBlockedMessage(claim));
   }
 
+  let responseReceipt:
+    | {
+        version: "lamp-combined-provider-response-v1";
+        responseText: string;
+        usage: ReturnType<typeof requireGeminiProUsage>;
+        costUsd: number;
+      }
+    | undefined;
   try {
     const [source, candidate] = await Promise.all([
       uploadVideoCached(sourcePath),
@@ -287,8 +350,7 @@ export async function runLampCombinedHolisticEvaluation(input: {
         config: {
           httpOptions: { retryOptions: { attempts: 1 } },
           maxOutputTokens: LAMP_EVALUATOR_MAX_OUTPUT_TOKENS,
-          responseMimeType: "application/json",
-          responseJsonSchema: schema.resultSchema,
+          ...LAMP_COMBINED_GEMINI_OUTPUT_CONFIG,
         },
       })
     );
@@ -296,14 +358,23 @@ export async function runLampCombinedHolisticEvaluation(input: {
       throw new Error("Lamp Combined evaluator returned no content.");
     }
     const usage = requireGeminiProUsage(response.usageMetadata);
+    const costUsd = geminiProCostFromUsage(usage);
+    responseReceipt = {
+      version: "lamp-combined-provider-response-v1",
+      responseText: response.text,
+      usage,
+      costUsd,
+    };
     const artifact = await buildLampCombinedEvaluationArtifact({
       raw: JSON.parse(response.text),
       plan,
       iteration: input.iteration,
-      audioVerified: generation.result.audioVerified,
+      audioVerified: candidateAudioVerified,
+      syncVerified: syncVerdict.pass,
+      syncReason: syncVerdict.reason,
       previousArtifact,
       usage,
-      costUsd: geminiProCostFromUsage(usage),
+      costUsd,
     });
     return completePaidOperation(claim.operation, artifact);
   } catch (error) {
@@ -311,7 +382,8 @@ export async function runLampCombinedHolisticEvaluation(input: {
       claim.operation,
       error instanceof Error
         ? error.message
-        : "Lamp Combined evaluation returned an ambiguous result."
+        : "Lamp Combined evaluation returned an ambiguous result.",
+      responseReceipt
     );
     throw error;
   }

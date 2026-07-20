@@ -24,6 +24,12 @@ const INPUT_HASH_2 = "6".repeat(64);
 function receipt(
   iteration: 1 | 2
 ): LampCombinedCandidateQualificationReceipt {
+  const syncMetrics = {
+    confidence: 6,
+    distance: 8,
+    offsetSec: 0,
+    speechPercentage: 70,
+  };
   return {
     version: "lamp-combined-candidate-v1",
     iteration,
@@ -49,18 +55,29 @@ function receipt(
       policy: "combined_source_relative_v1",
       mode: "absolute",
       reason: "fixture pass",
-      metrics: {
-        confidence: 6,
-        distance: 8,
-        offsetSec: 0,
-        speechPercentage: 70,
-      },
-      sourceSync: {
-        confidence: 6,
-        distance: 8,
-        offsetSec: 0,
-        speechPercentage: 70,
-      },
+      metrics: syncMetrics,
+      sourceSync: syncMetrics,
+    },
+    normalization: {
+      operationId: `lipsync:${iteration}`,
+      inputHash: iteration === 1 ? "7".repeat(64) : "8".repeat(64),
+      predictionId: `prediction-${iteration}`,
+      artifactIdentityHash: iteration === 1 ? HASH_1 : HASH_2,
+      videoUrl: `/api/media/runs/run_combined_grade_fixture/lipsync-v${iteration}-remuxed.mp4`,
+      videoSha256: iteration === 1 ? "9".repeat(64) : "a".repeat(64),
+      audioMd5: iteration === 1 ? "b".repeat(32) : "c".repeat(32),
+      recordedAt: 20,
+      preSync: syncMetrics,
+      postSync: syncMetrics,
+      sourceSync: syncMetrics,
+      windows: [
+        {
+          startSec: 0,
+          durationSec: 3,
+          source: syncMetrics,
+          candidate: syncMetrics,
+        },
+      ],
     },
   };
 }

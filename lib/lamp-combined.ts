@@ -32,7 +32,8 @@ import type { ViolationSeverity } from "./types.ts";
 export const LAMP_COMBINED_LABEL = "Combined" as const;
 export const LAMP_COMBINED_PLAN_VERSION = "lamp-combined-plan-v1" as const;
 export const LAMP_COMBINED_PRESENTER_INTENSITY = 2 as const;
-export const LAMP_COMBINED_MAX_CORRECTIONS = 12 as const;
+/** Keep Take 2 steering compact enough to remain predictable and debuggable. */
+export const LAMP_COMBINED_MAX_CORRECTIONS = 3 as const;
 
 export type LampCombinedRelightIntensity = number;
 export type LampCombinedBeautifyLevel = 0 | 1 | 2 | 3;
@@ -768,7 +769,11 @@ export function lampCombinedCandidateIneligibility(
   return null;
 }
 
-/** V1 is never repaired; only V2 may consume the single repair attempt. */
+/**
+ * @deprecated Legacy pre-normalization policy retained only for old callers.
+ * Current Combined runs normalize both takes before evaluation and never use
+ * this optional-repair decision.
+ */
 export function lampCombinedMayAttemptSyncRepair(input: {
   iteration: LampCombinedIteration;
   previousRepairAttempts: number;

@@ -480,6 +480,32 @@ export async function compileLampCombinedFinalPrompt(
   relightIntensity: unknown,
   firstEvaluation: LampCombinedEvaluationArtifact
 ): Promise<LampCombinedMegaPrompt> {
+  // Preserve the historical validation boundary: reject an altered Initial
+  // before inspecting an evaluation that may belong to another plan.
+  await compileLampCombinedFinalPromptFromCorrections(
+    persistedInitialRendered,
+    plan,
+    relightIntensity,
+    []
+  );
+  const corrections = await collectLampCombinedCorrections(
+    firstEvaluation,
+    plan
+  );
+  return compileLampCombinedFinalPromptFromCorrections(
+    persistedInitialRendered,
+    plan,
+    relightIntensity,
+    corrections
+  );
+}
+
+async function compileLampCombinedFinalPromptFromCorrections(
+  persistedInitialRendered: string,
+  plan: LampCombinedPlan,
+  relightIntensity: unknown,
+  corrections: readonly LampCombinedPromptCorrectionCandidate[]
+): Promise<LampCombinedMegaPrompt> {
   const canonical = assertApprovedAggregatePlan(plan);
   const intensity = assertPromptRelightIntensity(relightIntensity);
   const initial = await initialLampCombinedMegaPrompt(canonical, intensity);
@@ -491,10 +517,6 @@ export async function compileLampCombinedFinalPrompt(
       "Lamp Combined Final requires the exact persisted v1 Initial bytes bound to this plan and relight intensity."
     );
   }
-  const corrections = await collectLampCombinedCorrections(
-    firstEvaluation,
-    canonical
-  );
   validateCorrectionTargets(canonical, corrections);
   return {
     lineage: LAMP_COMBINED_PROMPT_LINEAGE,
@@ -502,7 +524,60 @@ export async function compileLampCombinedFinalPrompt(
     aggregatePlanId: canonical.id,
     aggregatePlanHash: initial.aggregatePlanHash,
     relightIntensity: intensity,
-    corrections,
+    corrections: [...corrections],
     rendered: patchCorrectionsBody(persistedInitialRendered, corrections),
   };
+}
+
+/**
+ * Produce Take 2 even when the optional visual critic is unavailable. The
+ * fallback changes no approved scope or strength and always starts from the
+ * original source, so it is safe to reproduce and audit later.
+ */
+export async function compileLampCombinedFallbackFinalPrompt(
+  persistedInitialRendered: string,
+  plan: LampCombinedPlan,
+  relightIntensity: unknown
+): Promise<LampCombinedMegaPrompt> {
+  return compileLampCombinedFinalPromptFromCorrections(
+    persistedInitialRendered,
+    plan,
+    relightIntensity,
+    []
+  );
+}
+
+/**
+ * Resolve the one Final prompt allowed for this execution. A persisted Take 2
+ * may have used either the bounded critic or the deterministic fallback; exact
+ * byte matching keeps replays and settlement fail-closed.
+ */
+export async function resolveLampCombinedFinalPrompt(input: {
+  persistedInitialRendered: string;
+  plan: LampCombinedPlan;
+  relightIntensity: unknown;
+  firstEvaluation?: LampCombinedEvaluationArtifact;
+  persistedFinalRendered?: string;
+}): Promise<LampCombinedMegaPrompt> {
+  const fallback = await compileLampCombinedFallbackFinalPrompt(
+    input.persistedInitialRendered,
+    input.plan,
+    input.relightIntensity
+  );
+  const evaluated = input.firstEvaluation
+    ? await compileLampCombinedFinalPrompt(
+        input.persistedInitialRendered,
+        input.plan,
+        input.relightIntensity,
+        input.firstEvaluation
+      )
+    : undefined;
+  if (input.persistedFinalRendered !== undefined) {
+    if (evaluated?.rendered === input.persistedFinalRendered) return evaluated;
+    if (fallback.rendered === input.persistedFinalRendered) return fallback;
+    throw new Error(
+      "Persisted Lamp Combined Take 2 prompt is neither the bounded-critic prompt nor the deterministic fallback."
+    );
+  }
+  return evaluated ?? fallback;
 }

@@ -70,6 +70,7 @@ import {
 import {
   isLampCombinedCandidateQualificationReceipt,
   lampCombinedCandidateArtifactIdentityHash,
+  lampCombinedLegacyCandidateReceiptMatches,
   lampCombinedCandidateReceiptEligible,
   lampCombinedCandidateReceiptMatches,
   type LampCombinedCandidateQualificationReceipt,
@@ -179,8 +180,8 @@ import {
   canAcceptMockIrisPlanApproval,
 } from "@/lib/mock-plan-approval";
 import {
-  compileLampCombinedFinalPrompt,
   initialLampCombinedMegaPrompt,
+  resolveLampCombinedFinalPrompt,
   type LampCombinedMegaPrompt,
 } from "@/lib/prompts/lamp-combined";
 import {
@@ -218,9 +219,9 @@ import {
   normalizeRelightIntensity,
 } from "@/lib/relight-intensity";
 import {
-  isLipsyncOperationResult,
-  LIPSYNC_OPERATION_ID,
-} from "@/lib/v2-sync";
+  isLampCombinedLipsyncResult,
+  lampCombinedLipsyncOperationId,
+} from "@/lib/lamp-combined-lipsync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -1502,7 +1503,8 @@ interface LampCombinedRawEvaluationProjection {
   planOperations: PaidOperation[];
   first: PaidOperation | null;
   final: PaidOperation | null;
-  lipsync: PaidOperation | null;
+  initialLipsync: PaidOperation | null;
+  finalLipsync: PaidOperation | null;
 }
 
 interface LampCombinedCandidateReadProjection {
@@ -1531,7 +1533,8 @@ const EMPTY_LAMP_COMBINED_EVALUATIONS: LampCombinedEvaluationProjection = {
   planOperations: [],
   first: null,
   final: null,
-  lipsync: null,
+  initialLipsync: null,
+  finalLipsync: null,
   bindingValid: false,
   plan: null,
   candidates: {},
@@ -1541,7 +1544,15 @@ async function readLampCombinedRawEvaluationProjection(
   storage: ReturnType<typeof getStorage>,
   runId: string
 ): Promise<LampCombinedRawEvaluationProjection> {
-  const [backgroundPlan, beautifyPlan, irisPlan, first, final, lipsync] =
+  const [
+    backgroundPlan,
+    beautifyPlan,
+    irisPlan,
+    first,
+    final,
+    initialLipsync,
+    finalLipsync,
+  ] =
     await Promise.all([
       storage.getPaidOperation(
         runId,
@@ -1554,7 +1565,8 @@ async function readLampCombinedRawEvaluationProjection(
       storage.getPaidOperation(runId, LAMP_COMBINED_IRIS_PLAN_OPERATION_ID),
       storage.getPaidOperation(runId, lampCombinedEvaluationOperationId(1)),
       storage.getPaidOperation(runId, lampCombinedEvaluationOperationId(2)),
-      storage.getPaidOperation(runId, LIPSYNC_OPERATION_ID),
+      storage.getPaidOperation(runId, lampCombinedLipsyncOperationId(1)),
+      storage.getPaidOperation(runId, lampCombinedLipsyncOperationId(2)),
     ]);
   return {
     planOperations: [backgroundPlan, beautifyPlan, irisPlan].filter(
@@ -1562,7 +1574,8 @@ async function readLampCombinedRawEvaluationProjection(
     ),
     first,
     final,
-    lipsync,
+    initialLipsync,
+    finalLipsync,
   };
 }
 
@@ -1687,26 +1700,36 @@ function lampCombinedCandidateReadProjection(input: {
     (operation) => operation.id === videoGenerationOperationId(input.iteration)
   );
   if (!generationOperation || !input.evaluationOperation) return undefined;
-  const finalLipsync = input.iteration === 2 ? input.lipsyncOperation : null;
   const completedLipsync =
-    finalLipsync?.status === "completed" ? finalLipsync : null;
+    input.lipsyncOperation?.status === "completed"
+      ? input.lipsyncOperation
+      : null;
+  const exactCurrentMatch = lampCombinedCandidateReceiptMatches({
+    receipt: input.receipt,
+    generationOperation,
+    evaluationOperation: input.evaluationOperation,
+    planId: input.plan.id,
+    planHash: input.planHash,
+    sourceHasAudio: input.run.originalVideo.hasAudio,
+    canonicalSourceSync: input.run.originalVideo.syncBaseline,
+    lipsyncOperation: input.lipsyncOperation,
+  });
+  const legacyReadOnlyMatch = lampCombinedLegacyCandidateReceiptMatches({
+    receipt: input.receipt,
+    generationOperation,
+    evaluationOperation: input.evaluationOperation,
+    planId: input.plan.id,
+    planHash: input.planHash,
+    sourceHasAudio: input.run.originalVideo.hasAudio,
+    canonicalSourceSync: input.run.originalVideo.syncBaseline,
+  });
   const matchesJournals = Boolean(
-    input.evaluationArtifact &&
-      lampCombinedCandidateReceiptMatches({
-        receipt: input.receipt,
-        generationOperation,
-        evaluationOperation: input.evaluationOperation,
-        planId: input.plan.id,
-        planHash: input.planHash,
-        sourceHasAudio: input.run.originalVideo.hasAudio,
-        canonicalSourceSync: input.run.originalVideo.syncBaseline,
-        lipsyncOperation: finalLipsync,
-      })
+    input.evaluationArtifact && (exactCurrentMatch || legacyReadOnlyMatch)
   );
-  const repaired =
-    input.receipt.repair &&
+  const normalized =
+    input.receipt.normalization &&
     completedLipsync &&
-    isLipsyncOperationResult(completedLipsync.result)
+    isLampCombinedLipsyncResult(completedLipsync.result, input.iteration)
       ? completedLipsync.result
       : undefined;
   return {
@@ -1716,8 +1739,8 @@ function lampCombinedCandidateReadProjection(input: {
       matchesJournals && lampCombinedCandidateReceiptEligible(input.receipt),
     artifactIdentityHash:
       lampCombinedCandidateArtifactIdentityHash(input.receipt),
-    ...(repaired?.videoUrl
-      ? { videoUrl: repaired.videoUrl }
+    ...(normalized?.videoUrl
+      ? { videoUrl: normalized.videoUrl }
       : generationOperation.result?.videoUrl
         ? { videoUrl: generationOperation.result.videoUrl }
         : {}),
@@ -1753,14 +1776,16 @@ async function prepareLampCombinedEvaluationProjection(input: {
       lampCombinedArtifact(input.raw.final, plan, 2),
       initialLampCombinedMegaPrompt(plan, input.execution.relightIntensity),
     ]);
-    const finalPrompt = firstArtifact
-      ? await compileLampCombinedFinalPrompt(
-          input.execution.renderedPrompt,
-          plan,
-          input.execution.relightIntensity,
-          firstArtifact
-        )
-      : undefined;
+    const persistedFinalRendered = input.run.providerOperations?.find(
+      (operation) => operation.id === videoGenerationOperationId(2)
+    )?.renderedPrompt;
+    const finalPrompt = await resolveLampCombinedFinalPrompt({
+      persistedInitialRendered: input.execution.renderedPrompt,
+      plan,
+      relightIntensity: input.execution.relightIntensity,
+      ...(firstArtifact ? { firstEvaluation: firstArtifact } : {}),
+      ...(persistedFinalRendered ? { persistedFinalRendered } : {}),
+    });
     const planHash = input.execution.approvedPlanHash!;
     const initial = lampCombinedCandidateReadProjection({
       iteration: 1,
@@ -1770,7 +1795,7 @@ async function prepareLampCombinedEvaluationProjection(input: {
       planHash,
       evaluationOperation: input.raw.first,
       evaluationArtifact: firstArtifact,
-      lipsyncOperation: null,
+      lipsyncOperation: input.raw.initialLipsync,
     });
     const final = lampCombinedCandidateReadProjection({
       iteration: 2,
@@ -1780,7 +1805,7 @@ async function prepareLampCombinedEvaluationProjection(input: {
       planHash,
       evaluationOperation: input.raw.final,
       evaluationArtifact: finalArtifact,
-      lipsyncOperation: input.raw.lipsync,
+      lipsyncOperation: input.raw.finalLipsync,
     });
     return {
       ...input.raw,
@@ -1789,7 +1814,7 @@ async function prepareLampCombinedEvaluationProjection(input: {
       ...(firstArtifact ? { firstArtifact } : {}),
       ...(finalArtifact ? { finalArtifact } : {}),
       initialPrompt,
-      ...(finalPrompt ? { finalPrompt } : {}),
+      finalPrompt,
       candidates: {
         ...(initial ? { initial } : {}),
         ...(final ? { final } : {}),
@@ -2048,7 +2073,7 @@ function paidCostLabel(
   }
   if (entry.kind === "lipsync") {
     return workflowMode === "combined"
-      ? "Take 2 Lipsync-2-Pro repair (Replicate)"
+      ? `Take ${entry.iteration ?? "?"} mandatory Lipsync-2-Pro normalization (Replicate)`
       : "Final Lipsync-2-Pro repair (Replicate)";
   }
   if (entry.kind === "manifest") return "Scene manifest extraction (Gemini)";
@@ -2236,24 +2261,31 @@ function materializeServerResults(
       )
     : materialized.providerOperations;
   mergeServerGeneratedVideos(materialized, materialized, artifactOperations);
-  const repairedCombinedFinal = combinedEvaluations.candidates.final;
-  if (
-    combined &&
-    repairedCombinedFinal?.matchesJournals &&
-    repairedCombinedFinal.receipt.repair &&
-    repairedCombinedFinal.videoUrl
-  ) {
-    const finalIteration = materialized.iterations.find(
-      (iteration) => iteration.index === 2
-    );
-    if (finalIteration?.generatedVideo) {
-      finalIteration.generatedVideo = {
-        ...finalIteration.generatedVideo,
-        url: repairedCombinedFinal.videoUrl,
-        label: "Lamp Combined Take 2 — Lipsync-2-Pro repaired",
-        hasAudio: true,
-      };
-      finalIteration.recoveredFromProviderOperation = true;
+  if (combined) {
+    for (const iterationIndex of [1, 2] as const) {
+      const candidate =
+        iterationIndex === 1
+          ? combinedEvaluations.candidates.initial
+          : combinedEvaluations.candidates.final;
+      if (
+        !candidate?.matchesJournals ||
+        !candidate.receipt.normalization ||
+        !candidate.videoUrl
+      ) {
+        continue;
+      }
+      const iteration = materialized.iterations.find(
+        (item) => item.index === iterationIndex
+      );
+      if (iteration?.generatedVideo) {
+        iteration.generatedVideo = {
+          ...iteration.generatedVideo,
+          url: candidate.videoUrl,
+          label: `Lamp Combined Take ${iterationIndex} — Lipsync-2-Pro normalized`,
+          hasAudio: true,
+        };
+        iteration.recoveredFromProviderOperation = true;
+      }
     }
   }
   // A live finalVideo was only a browser-created alias of the already-remuxed
@@ -2568,18 +2600,22 @@ function materializeServerResults(
         iteration.megaPrompt = finalPromptForRun;
       }
       if (
-        execution.status === "awaiting_review" &&
         secondCutOperation?.status === "completed" &&
         secondCutOperation.result &&
-        (lamp
-          ? lampArtifact(lampEvaluations.final, 2)
-          : combined
-            ? combinedEvaluations.finalArtifact
-          : beautify
-            ? lampBeautifyArtifact(beautifyEvaluations.final, 2)
-            : iris
-              ? lampIrisArtifact(irisEvaluations.final, 2)
-              : lampBackgroundArtifact(backgroundEvaluations.final, 2))
+        (combined
+          ? providerOperationMatchesLampCombinedExecution(
+              secondCutOperation,
+              execution,
+              combinedEvaluations
+            )
+          : execution.status === "awaiting_review" &&
+            (lamp
+              ? lampArtifact(lampEvaluations.final, 2)
+              : beautify
+                ? lampBeautifyArtifact(beautifyEvaluations.final, 2)
+                : iris
+                  ? lampIrisArtifact(irisEvaluations.final, 2)
+                  : lampBackgroundArtifact(backgroundEvaluations.final, 2)))
       ) {
         iteration.status = "ungraded";
       } else if (
@@ -2613,6 +2649,16 @@ function materializeServerResults(
         execution.status === "failed" ||
         execution.status === "reconcile_required";
       const paused = execution.status === "user_action_required";
+      const take1Ready = Boolean(
+        videoOperation?.status === "completed" &&
+          videoOperation.result &&
+          combinedEvaluations.initialLipsync?.status === "completed"
+      );
+      const take2Ready = Boolean(
+        secondCutOperation?.status === "completed" &&
+          secondCutOperation.result &&
+          combinedEvaluations.finalLipsync?.status === "completed"
+      );
       materialized.nodeStates.plan = {
         nodeId: "plan",
         status: "succeeded",
@@ -2620,7 +2666,7 @@ function materializeServerResults(
       };
       materialized.nodeStates.initial = {
         nodeId: "initial",
-        status: firstEvaluation
+        status: firstEvaluation || take1Ready
           ? "succeeded"
           : terminal
             ? "failed"
@@ -2631,6 +2677,8 @@ function materializeServerResults(
               : "queued",
         detail: firstEvaluation
           ? "Take 1 generated, qualified, and evaluated from the original"
+          : take1Ready
+            ? "Take 1 generated from the original and passed mandatory lip sync"
           : paused
             ? "paused before the next authorized paid operation"
             : "one source-rooted Combined generation",
@@ -2646,11 +2694,13 @@ function materializeServerResults(
               : "queued",
         detail: firstEvaluation
           ? "one holistic evaluation compiled bounded corrections"
+          : take2Ready
+            ? "Take 1 scoring needs reconciliation; Take 2 used the safe bounded fallback"
           : "awaiting the Take 1 whole-video evaluation",
       };
       materialized.nodeStates.final = {
         nodeId: "final",
-        status: finalEvaluation
+        status: finalEvaluation || take2Ready
           ? "succeeded"
           : terminal
             ? "failed"
@@ -2662,6 +2712,8 @@ function materializeServerResults(
               : "queued",
         detail: finalEvaluation
           ? "Take 2 generated from the original and independently evaluated"
+          : take2Ready
+            ? "Take 2 is visible and lip-synced; detailed AI scoring is pending"
           : paused
             ? "paused; renew the exact Combined approval to resume"
             : "one bounded correction pass from the immutable source",
@@ -2677,7 +2729,9 @@ function materializeServerResults(
           ? materialized.humanGrade.shipIt
             ? "chosen candidate graded — ship"
             : "chosen candidate graded — do not ship"
-          : "choose one eligible take, then blind grade that exact artifact",
+          : take2Ready && terminal
+            ? "both videos are ready; grading/export waits for detailed scoring reconciliation"
+            : "choose one eligible take, then blind grade that exact artifact",
       };
 
       // Combined never silently selects a take. The saved grade target is the

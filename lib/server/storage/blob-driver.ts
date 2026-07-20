@@ -102,6 +102,7 @@ import {
 } from "./run-execution";
 import { ActiveRunDeletionError } from "./run-deletion";
 import { PROVIDER_LOST_INTERACTION_MARKER } from "@/lib/server/run-execution-failure";
+import { isReplayableLampCombinedEvaluationFailure } from "@/lib/server/definitive-provider-rejection";
 import { scratchMediaPath, scratchUploadsDir } from "./scratch";
 import type {
   DurableStorageVerification,
@@ -1261,6 +1262,88 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
       return { superseded: alreadyArchived, run };
     },
 
+    async supersedeDefinitiveRejectedPaidOperation(runId, input) {
+      await ensureSchema();
+      const id = assertRunId(runId);
+      const operationId = assertPaidOperationId(input.operationId);
+      const archivedId = assertPaidOperationId(input.archivedOperationId);
+      if (!SHA256_RE.test(input.inputHash)) {
+        throw new Error("Invalid paid operation inputHash");
+      }
+      if (!Number.isSafeInteger(input.startedAt) || input.startedAt < 0) {
+        throw new Error("Invalid paid operation startedAt");
+      }
+      if (!isReplayableLampCombinedEvaluationFailure(input.expectedError)) {
+        return { superseded: false as const, run: await this.getRun(id) };
+      }
+      const now = Date.now();
+      const patch = JSON.stringify({ id: archivedId, updatedAt: now });
+      const transactionResults = await sql.transaction(
+        (transactionSql) => [
+          transactionSql`
+            SELECT id FROM runs
+            WHERE id = ${id} AND data IS NOT NULL AND deleted_at IS NULL
+            FOR UPDATE
+          `,
+          transactionSql`
+            UPDATE paid_operations
+            SET operation_id = ${archivedId},
+                data = data || ${patch}::jsonb
+            WHERE run_id = ${id}
+              AND operation_id = ${operationId}
+              AND input_hash = ${input.inputHash}
+              AND status = 'reconcile_required'
+              AND (data->>'startedAt')::bigint = ${input.startedAt}
+              AND data->>'provider' = 'gemini'
+              AND data->>'kind' = 'judge'
+              AND data->>'error' = ${input.expectedError}
+              AND NOT EXISTS (
+                SELECT 1 FROM paid_operations archived
+                WHERE archived.run_id = ${id}
+                  AND archived.operation_id = ${archivedId}
+              )
+            RETURNING data
+          `,
+          transactionSql`
+            UPDATE runs
+            SET data = data - 'spendApproval'
+            WHERE id = ${id}
+              AND data IS NOT NULL
+              AND deleted_at IS NULL
+              AND EXISTS (
+                SELECT 1 FROM paid_operations archived
+                WHERE archived.run_id = ${id}
+                  AND archived.operation_id = ${archivedId}
+                  AND archived.input_hash = ${input.inputHash}
+                  AND archived.status = 'reconcile_required'
+                  AND (archived.data->>'startedAt')::bigint = ${input.startedAt}
+                  AND archived.data->>'provider' = 'gemini'
+                  AND archived.data->>'kind' = 'judge'
+                  AND archived.data->>'error' = ${input.expectedError}
+              )
+            RETURNING data
+          `,
+        ],
+        { isolationLevel: "ReadCommitted" }
+      );
+      const renamed = transactionResults[1] as Array<{ data: PaidOperation }>;
+      const archived = await this.getPaidOperation(id, archivedId);
+      const canonical = await this.getPaidOperation(id, operationId);
+      const superseded = Boolean(
+        !canonical &&
+          archived &&
+          archived.status === "reconcile_required" &&
+          archived.provider === "gemini" &&
+          archived.kind === "judge" &&
+          archived.inputHash === input.inputHash &&
+          archived.startedAt === input.startedAt &&
+          archived.error === input.expectedError &&
+          (renamed.length > 0 ||
+            isReplayableLampCombinedEvaluationFailure(archived.error))
+      );
+      return { superseded, run: await this.getRun(id) };
+    },
+
     async claimProviderWorkflow(runId, operationId, claimToken) {
       await ensureSchema();
       const id = assertRunId(runId);
@@ -1511,17 +1594,27 @@ export function createBlobDriver(databaseUrl: string): StorageDriver {
         : this.getPaidOperation(id, opId);
     },
 
-    async reconcilePaidOperation(runId, operationId, inputHash, error) {
+    async reconcilePaidOperation(
+      runId,
+      operationId,
+      inputHash,
+      error,
+      receipt
+    ) {
       await ensureSchema();
       const id = assertRunId(runId);
       const opId = assertPaidOperationId(operationId);
       if (!SHA256_RE.test(inputHash)) throw new Error("Invalid paid operation inputHash");
       const now = Date.now();
       const safeError = error.slice(0, 500);
+      if (receipt !== undefined && JSON.stringify(receipt) === undefined) {
+        throw new Error("Paid operation receipt must be JSON serializable");
+      }
       const serializedPatch = JSON.stringify({
         status: "reconcile_required",
         updatedAt: now,
         error: safeError,
+        ...(receipt !== undefined ? { result: receipt } : {}),
       });
       const rows = (await sql`
         UPDATE paid_operations

@@ -65,13 +65,28 @@ import {
   type LampCombinedEvaluationArtifact,
 } from "@/lib/lamp-combined-evaluation";
 import { lampCombinedEvaluationOperationId } from "@/lib/lamp-combined-operations";
-import { compileLampCombinedFinalPrompt } from "@/lib/prompts/lamp-combined";
 import {
-  appendLampCombinedFinalRepairReceipt,
+  lampCombinedLipsyncOperationId,
+  lampCombinedMandatorySyncVerdict,
+  type WorkflowSafeCombinedLipsyncResult,
+} from "@/lib/lamp-combined-lipsync-verdict";
+import {
+  resolveLampCombinedFinalPrompt,
+} from "@/lib/prompts/lamp-combined";
+import {
   qualifyLampCombinedCandidate,
 } from "@/lib/server/lamp-combined-candidate-qualification";
 import { validateLampCombinedExecutionBinding } from "@/lib/server/lamp-combined-execution";
 import { runLampCombinedHolisticEvaluation } from "@/lib/server/lamp-combined-evaluator";
+import {
+  analyzeLampCombinedPreSync,
+  finalizeLampCombinedLipsync,
+  pollLampCombinedLipsyncPrediction,
+  prepareLampCombinedLipsyncInputs,
+  readLampCombinedLipsyncCheckpoint,
+  startLampCombinedLipsyncPrediction,
+  type LampCombinedPreSyncCheck,
+} from "@/lib/server/lamp-combined-lipsync";
 import type { PreparedLipsyncInputs } from "@/lib/server/replicate-lipsync";
 import { getStorage } from "@/lib/server/storage";
 import { recordV2CandidateSyncVerdict } from "@/lib/server/v2-sync-verdict-journal";
@@ -144,7 +159,7 @@ export interface DurableRelightRunInput {
 export interface DurableRelightRunResult {
   runId: string;
   executionId: string;
-  status: "not_owner" | "awaiting_review";
+  status: "not_owner" | "awaiting_review" | "reconcile_required";
   videoUrl?: string;
   audioVerified?: boolean;
 }
@@ -468,14 +483,14 @@ async function durableLampCombinedRun(
   try {
     const plan = await readBoundCombinedPlan(input, workflowRunId);
     await runGenerationAttempt(input, workflowRunId, 1, input.renderedPrompt);
+    await finalizeCombinedTakeWithLipsync(input, workflowRunId, 1);
     await enterEvaluationPhaseWithRecovery(input, workflowRunId, 1);
-    const firstEvaluation = await evaluateCombinedAttemptWithRecovery(
+    const firstEvaluation = await evaluateCombinedCritiqueForV2(
       input,
       workflowRunId,
       1,
       plan
     );
-    await qualifyCombinedCandidateStep(input, workflowRunId, 1);
 
     const finalRenderedPrompt = await compileCombinedFinalPromptStep(
       input,
@@ -489,7 +504,22 @@ async function durableLampCombinedRun(
       2,
       finalRenderedPrompt
     );
+    await finalizeCombinedTakeWithLipsync(input, workflowRunId, 2);
     await enterEvaluationPhaseWithRecovery(input, workflowRunId, 2);
+    if (!firstEvaluation) {
+      await markCombinedDetailedScoringPending(
+        input,
+        workflowRunId,
+        "Both lip-synced takes are ready. Detailed Take 1 scoring needs reconciliation before grading and export."
+      );
+      return {
+        runId: input.runId,
+        executionId: input.executionId,
+        status: "reconcile_required",
+        audioVerified: second.audioVerified || undefined,
+      };
+    }
+    await qualifyCombinedCandidateStep(input, workflowRunId, 1);
     await evaluateCombinedAttemptWithRecovery(
       input,
       workflowRunId,
@@ -497,28 +527,7 @@ async function durableLampCombinedRun(
       plan,
       firstEvaluation
     );
-    const finalQualification = await qualifyCombinedCandidateStep(
-      input,
-      workflowRunId,
-      2
-    );
-
-    if (finalQualification.needsRepair && finalQualification.syncCheck) {
-      const syncCheck = finalQualification.syncCheck;
-        try {
-          await finalizeV2WithSync(input, workflowRunId, syncCheck);
-          await appendCombinedFinalRepairReceiptStep(input, workflowRunId);
-        } catch (error) {
-          // A completed but definitively failing repair is still durable
-          // candidate evidence. Journal it and leave Final ineligible; only an
-          // ambiguous/missing repair is allowed to keep execution unsettled.
-          try {
-            await appendCombinedFinalRepairReceiptStep(input, workflowRunId);
-          } catch {
-            throw error;
-          }
-        }
-    }
+    await qualifyCombinedCandidateStep(input, workflowRunId, 2);
 
     await settleCombinedExecution(
       input,
@@ -611,6 +620,88 @@ async function durableLampCombinedRun(
           : "Lamp Combined stopped before both candidate states were durably qualified."
     );
   }
+}
+
+async function finalizeCombinedTakeWithLipsync(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2
+): Promise<{ videoUrl: string; audioVerified: true }> {
+  const checkpoint = await readCombinedLipsyncCheckpointStep(
+    input,
+    workflowRunId,
+    iteration
+  );
+  if (checkpoint.state === "blocked") throw new Error(checkpoint.reason);
+  if (checkpoint.state === "completed") {
+    const verdict = lampCombinedMandatorySyncVerdict(checkpoint.result);
+    if (!verdict.pass) {
+      throw new Error(
+        `Completed mandatory Lipsync for Take ${iteration} failed verification: ${verdict.reason}`
+      );
+    }
+    return { videoUrl: checkpoint.result.videoUrl, audioVerified: true };
+  }
+
+  const preSync = await analyzeCombinedPreSyncStep(
+    input,
+    workflowRunId,
+    iteration
+  );
+  if (preSync.skipped) {
+    if (checkpoint.state === "started") {
+      throw new Error(
+        `Take ${iteration} has a started Lipsync operation but the source is now silent.`
+      );
+    }
+    return { videoUrl: preSync.videoUrl, audioVerified: true };
+  }
+
+  let predictionId =
+    checkpoint.state === "started" ? checkpoint.predictionId : null;
+  if (!predictionId) {
+    const prepared = await prepareCombinedLipsyncInputsStep(
+      input,
+      workflowRunId,
+      iteration
+    );
+    predictionId = await startCombinedLipsyncPredictionStep(
+      input,
+      workflowRunId,
+      iteration,
+      prepared,
+      preSync.metrics
+    );
+  }
+
+  for (let poll = 0; poll < MAX_POLLS + MAX_RECONCILIATION_POLLS; poll += 1) {
+    await sleep(poll < MAX_POLLS ? "8s" : "5m");
+    const result = await pollCombinedLipsyncPredictionStep(
+      input,
+      workflowRunId,
+      iteration,
+      predictionId
+    );
+    if (!result.done) continue;
+    const finalized = await finalizeCombinedLipsyncStep(
+      input,
+      workflowRunId,
+      iteration,
+      predictionId,
+      result.outputUrl,
+      preSync.metrics
+    );
+    const verdict = lampCombinedMandatorySyncVerdict(finalized);
+    if (!verdict.pass) {
+      throw new Error(
+        `Mandatory Lipsync for Take ${iteration} failed verification: ${verdict.reason}`
+      );
+    }
+    return { videoUrl: finalized.videoUrl, audioVerified: true };
+  }
+  throw new Error(
+    `Mandatory Lipsync for Take ${iteration} remained unresolved after the extended reconciliation window.`
+  );
 }
 
 async function readBoundCombinedPlan(
@@ -1593,6 +1684,128 @@ async function assertV2FinalizeOwner(
     throw new Error("Durable run execution no longer owns the V2 sync gate.");
   }
 }
+
+async function assertCombinedLipsyncOwner(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2
+): Promise<void> {
+  const current = await getStorage().getRunExecution(input.runId);
+  if (
+    !current ||
+    current.executionId !== input.executionId ||
+    current.executionId !== `lamp-combined:${input.runId}` ||
+    current.inputHash !== runExecutionInputHash(input.renderedPrompt) ||
+    current.workflowRunId !== workflowRunId ||
+    current.status !== "running" ||
+    current.phase !== "video_generation" ||
+    current.iteration !== iteration
+  ) {
+    throw new Error(
+      `Durable Combined execution no longer owns Take ${iteration} Lipsync.`
+    );
+  }
+}
+
+async function readCombinedLipsyncCheckpointStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2
+) {
+  "use step";
+  await assertCombinedLipsyncOwner(input, workflowRunId, iteration);
+  return readLampCombinedLipsyncCheckpoint({ runId: input.runId, iteration });
+}
+
+readCombinedLipsyncCheckpointStep.maxRetries = 2;
+
+async function analyzeCombinedPreSyncStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2
+): Promise<LampCombinedPreSyncCheck> {
+  "use step";
+  await assertCombinedLipsyncOwner(input, workflowRunId, iteration);
+  return analyzeLampCombinedPreSync({ runId: input.runId, iteration });
+}
+
+analyzeCombinedPreSyncStep.maxRetries = 2;
+
+async function prepareCombinedLipsyncInputsStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2
+): Promise<PreparedLipsyncInputs> {
+  "use step";
+  await assertCombinedLipsyncOwner(input, workflowRunId, iteration);
+  return prepareLampCombinedLipsyncInputs({ runId: input.runId, iteration });
+}
+
+prepareCombinedLipsyncInputsStep.maxRetries = 2;
+
+async function startCombinedLipsyncPredictionStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  prepared: PreparedLipsyncInputs,
+  preSync: SyncNetMetrics
+): Promise<string> {
+  "use step";
+  await assertCombinedLipsyncOwner(input, workflowRunId, iteration);
+  try {
+    return await startLampCombinedLipsyncPrediction({
+      runId: input.runId,
+      iteration,
+      prepared,
+      preSync,
+    });
+  } catch (error) {
+    if (error instanceof PaidOperationAuthorizationError) {
+      throw new Error(`${LAMP_USER_ACTION_REQUIRED_PREFIX}${error.message}`);
+    }
+    throw error;
+  }
+}
+
+startCombinedLipsyncPredictionStep.maxRetries = 0;
+
+async function pollCombinedLipsyncPredictionStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  predictionId: string
+) {
+  "use step";
+  await assertCombinedLipsyncOwner(input, workflowRunId, iteration);
+  return pollLampCombinedLipsyncPrediction({
+    runId: input.runId,
+    iteration,
+    predictionId,
+  });
+}
+
+pollCombinedLipsyncPredictionStep.maxRetries = 2;
+
+async function finalizeCombinedLipsyncStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1 | 2,
+  predictionId: string,
+  outputUrl: string,
+  preSync: SyncNetMetrics
+): Promise<WorkflowSafeCombinedLipsyncResult> {
+  "use step";
+  await assertCombinedLipsyncOwner(input, workflowRunId, iteration);
+  return finalizeLampCombinedLipsync({
+    runId: input.runId,
+    iteration,
+    predictionId,
+    outputUrl,
+    preSync,
+  });
+}
+
+finalizeCombinedLipsyncStep.maxRetries = 2;
 
 async function readV2SyncCheckpointStep(
   input: DurableRelightRunInput,
@@ -2675,59 +2888,59 @@ async function evaluateCombinedAttemptWithRecovery(
   );
 }
 
+/**
+ * The Take 1 critic is useful steering, not a delivery dependency. Try it once
+ * so a malformed or unavailable evaluator cannot consume the whole workflow;
+ * authorization pauses still remain fail-closed.
+ */
+async function evaluateCombinedCritiqueForV2(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  iteration: 1,
+  plan: LampCombinedPlan
+): Promise<LampCombinedEvaluationArtifact | undefined> {
+  try {
+    return await evaluateCombinedAttempt(
+      input,
+      workflowRunId,
+      iteration,
+      plan
+    );
+  } catch (error) {
+    if (error instanceof Error && isLampUserActionRequiredError(error)) {
+      throw error;
+    }
+    return undefined;
+  }
+}
+
 async function qualifyCombinedCandidateStep(
   input: DurableRelightRunInput,
   workflowRunId: string,
   iteration: 1 | 2
 ) {
   "use step";
-  const qualified = await qualifyLampCombinedCandidate({
+  return qualifyLampCombinedCandidate({
     runId: input.runId,
     executionId: input.executionId,
     workflowRunId,
     iteration,
   });
-  const needsRepair = Boolean(
-    iteration === 2 &&
-      qualified.syncCheck &&
-      !qualified.syncCheck.skipped &&
-      !v2SyncVerdict(
-        qualified.syncCheck.metrics,
-        qualified.syncCheck.sourceSync
-      ).pass
-  );
-  return {
-    needsRepair,
-    ...(needsRepair && qualified.syncCheck
-      ? { syncCheck: qualified.syncCheck }
-      : {}),
-  };
 }
 
 qualifyCombinedCandidateStep.maxRetries = 2;
-
-async function appendCombinedFinalRepairReceiptStep(
-  input: DurableRelightRunInput,
-  workflowRunId: string
-) {
-  "use step";
-  return appendLampCombinedFinalRepairReceipt({
-    runId: input.runId,
-    executionId: input.executionId,
-    workflowRunId,
-  });
-}
-
-appendCombinedFinalRepairReceiptStep.maxRetries = 2;
 
 async function compileCombinedFinalPromptStep(
   input: DurableRelightRunInput,
   workflowRunId: string,
   plan: LampCombinedPlan,
-  firstEvaluation: LampCombinedEvaluationArtifact
+  firstEvaluation?: LampCombinedEvaluationArtifact
 ): Promise<string> {
   "use step";
-  const execution = await getStorage().getRunExecution(input.runId);
+  const [execution, run] = await Promise.all([
+    getStorage().getRunExecution(input.runId),
+    getStorage().getRun(input.runId),
+  ]);
   if (
     !execution ||
     execution.executionId !== input.executionId ||
@@ -2738,17 +2951,67 @@ async function compileCombinedFinalPromptStep(
   ) {
     throw new Error("Lamp Combined execution binding disappeared.");
   }
+  const persistedFinalRendered = run?.providerOperations?.find(
+    (operation) => operation.id === videoGenerationOperationId(2)
+  )?.renderedPrompt;
   return (
-    await compileLampCombinedFinalPrompt(
-      input.renderedPrompt,
+    await resolveLampCombinedFinalPrompt({
+      persistedInitialRendered: input.renderedPrompt,
       plan,
-      execution.relightIntensity,
-      firstEvaluation
-    )
+      relightIntensity: execution.relightIntensity,
+      ...(firstEvaluation ? { firstEvaluation } : {}),
+      ...(persistedFinalRendered ? { persistedFinalRendered } : {}),
+    })
   ).rendered;
 }
 
 compileCombinedFinalPromptStep.maxRetries = 2;
+
+async function markCombinedDetailedScoringPending(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  reason: string
+): Promise<void> {
+  "use step";
+  const storage = getStorage();
+  const execution = await storage.getRunExecution(input.runId);
+  if (
+    !execution ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.executionId !== `lamp-combined:${input.runId}`
+  ) {
+    throw new Error("Lamp Combined scoring recovery lost execution ownership.");
+  }
+  if (execution.status === "reconcile_required") return;
+  if (
+    execution.status !== "running" ||
+    execution.iteration !== 2 ||
+    execution.phase !== "evaluating"
+  ) {
+    throw new Error("Lamp Combined scoring recovery started from the wrong stage.");
+  }
+  const candidate: RunExecution = {
+    ...execution,
+    status: "reconcile_required",
+    revision: execution.revision + 1,
+    updatedAt: Math.max(Date.now(), execution.updatedAt),
+    error: reason.slice(0, 2_000),
+  };
+  const advanced = await storage.advanceRunExecution(
+    candidate,
+    execution.revision
+  );
+  if (
+    advanced.execution?.executionId !== input.executionId ||
+    advanced.execution.workflowRunId !== workflowRunId ||
+    advanced.execution.status !== "reconcile_required"
+  ) {
+    throw new Error("Lamp Combined scoring recovery was not persisted.");
+  }
+}
+
+markCombinedDetailedScoringPending.maxRetries = 2;
 
 async function recordProviderWorkflowRunning(
   input: DurableRelightRunInput,
@@ -3042,7 +3305,14 @@ async function settleCombinedExecution(
 ): Promise<void> {
   "use step";
   const storage = getStorage();
-  const [execution, run, firstEvaluation, finalEvaluation, lipsync] =
+  const [
+    execution,
+    run,
+    firstEvaluation,
+    finalEvaluation,
+    firstLipsync,
+    finalLipsync,
+  ] =
     await Promise.all([
       storage.getRunExecution(input.runId),
       storage.getRun(input.runId),
@@ -3054,7 +3324,14 @@ async function settleCombinedExecution(
         input.runId,
         lampCombinedEvaluationOperationId(2)
       ),
-      storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+      storage.getPaidOperation(
+        input.runId,
+        lampCombinedLipsyncOperationId(1)
+      ),
+      storage.getPaidOperation(
+        input.runId,
+        lampCombinedLipsyncOperationId(2)
+      ),
     ]);
   if (
     !execution ||
@@ -3093,23 +3370,26 @@ async function settleCombinedExecution(
       iteration: 2,
     }),
   ]);
-  const expectedFinal = await compileLampCombinedFinalPrompt(
-    input.renderedPrompt,
-    plan,
-    execution.relightIntensity,
-    firstArtifact
-  );
-  if (expectedFinal.rendered !== finalRenderedPrompt) {
-    throw new Error(
-      "Lamp Combined Final prompt no longer reproduces from persisted v1 and Initial evaluation."
-    );
-  }
   const initialGeneration = run.providerOperations?.find(
     (operation) => operation.id === videoGenerationOperationId(1)
   );
   const finalGeneration = run.providerOperations?.find(
     (operation) => operation.id === videoGenerationOperationId(2)
   );
+  const expectedFinal = await resolveLampCombinedFinalPrompt({
+    persistedInitialRendered: input.renderedPrompt,
+    plan,
+    relightIntensity: execution.relightIntensity,
+    firstEvaluation: firstArtifact,
+    ...(finalGeneration?.renderedPrompt
+      ? { persistedFinalRendered: finalGeneration.renderedPrompt }
+      : {}),
+  });
+  if (expectedFinal.rendered !== finalRenderedPrompt) {
+    throw new Error(
+      "Lamp Combined Final prompt no longer reproduces from persisted v1 and Initial evaluation."
+    );
+  }
   const initialReceipt = execution.combinedCandidateReceipts?.initial;
   const finalReceipt = execution.combinedCandidateReceipts?.final;
   if (
@@ -3131,7 +3411,7 @@ async function settleCombinedExecution(
       planHash,
       sourceHasAudio: run.originalVideo.hasAudio,
       canonicalSourceSync: run.originalVideo.syncBaseline,
-      lipsyncOperation: null,
+      lipsyncOperation: firstLipsync,
     }) ||
     !lampCombinedCandidateReceiptMatches({
       receipt: finalReceipt,
@@ -3141,7 +3421,7 @@ async function settleCombinedExecution(
       planHash,
       sourceHasAudio: run.originalVideo.hasAudio,
       canonicalSourceSync: run.originalVideo.syncBaseline,
-      lipsyncOperation: lipsync,
+      lipsyncOperation: finalLipsync,
     })
   ) {
     throw new Error(
@@ -3687,8 +3967,21 @@ async function recordExecutionFailure(
                 input.runId,
                 lampEvaluationOperationId(2)
               ),
-      storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+      workflowMode === "combined"
+        ? storage.getPaidOperation(
+            input.runId,
+            lampCombinedLipsyncOperationId(2)
+          )
+        : storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
     ]);
+  const currentCombinedLipsync =
+    workflowMode === "combined" &&
+    (execution.iteration === 1 || execution.iteration === 2)
+      ? await storage.getPaidOperation(
+          input.runId,
+          lampCombinedLipsyncOperationId(execution.iteration)
+        )
+      : null;
   let finalEvaluationComplete =
     workflowMode === "lamp" &&
     finalEvaluation?.status === "completed" &&
@@ -3727,14 +4020,21 @@ async function recordExecutionFailure(
           iteration: 2,
         }),
       ]);
-      const expectedFinalPrompt = await compileLampCombinedFinalPrompt(
-        input.renderedPrompt,
+      const expectedFinalPrompt = await resolveLampCombinedFinalPrompt({
+        persistedInitialRendered: input.renderedPrompt,
         plan,
-        execution.relightIntensity,
-        firstArtifact
-      );
+        relightIntensity: execution.relightIntensity,
+        firstEvaluation: firstArtifact,
+        ...(final?.renderedPrompt
+          ? { persistedFinalRendered: final.renderedPrompt }
+          : {}),
+      });
       const initialGeneration = run.providerOperations?.find(
         (operation) => operation.id === videoGenerationOperationId(1)
+      );
+      const initialLipsync = await storage.getPaidOperation(
+        input.runId,
+        lampCombinedLipsyncOperationId(1)
       );
       const initialReceipt = execution.combinedCandidateReceipts?.initial;
       const finalReceipt = execution.combinedCandidateReceipts?.final;
@@ -3755,7 +4055,7 @@ async function recordExecutionFailure(
             planHash,
             sourceHasAudio: run.originalVideo.hasAudio,
             canonicalSourceSync: run.originalVideo.syncBaseline,
-            lipsyncOperation: null,
+            lipsyncOperation: initialLipsync,
           }) &&
           lampCombinedCandidateReceiptMatches({
             receipt: finalReceipt,
@@ -3926,6 +4226,8 @@ async function recordExecutionFailure(
   const evaluationAmbiguous = Boolean(
     (currentEvaluation && currentEvaluation.status !== "completed") ||
       (lipsync && lipsync.status !== "completed") ||
+      (currentCombinedLipsync &&
+        currentCombinedLipsync.status !== "completed") ||
       candidateSyncProofMissing
   );
   const status = runExecutionFailureStatus({

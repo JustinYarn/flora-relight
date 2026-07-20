@@ -13,6 +13,13 @@ import {
   type LampCombinedDeliveryCandidate,
   type LampCombinedIteration,
 } from "./lamp-combined.ts";
+import {
+  isLampCombinedLipsyncResult,
+  lampCombinedLipsyncOperationId,
+  lampCombinedLipsyncProofMatchesGeneration,
+  lampCombinedMandatorySyncVerdict,
+  type LampCombinedSyncWindowEvidence,
+} from "./lamp-combined-lipsync.ts";
 import type { PaidOperation, ProviderOperation } from "./types.ts";
 import {
   isLipsyncOperationResult,
@@ -81,10 +88,25 @@ export interface LampCombinedRepairQualification {
   };
 }
 
+export interface LampCombinedLipsyncQualification {
+  operationId: `lipsync:${LampCombinedIteration}`;
+  inputHash: string;
+  predictionId: string;
+  artifactIdentityHash: string;
+  videoUrl: string;
+  videoSha256: string;
+  audioMd5: string;
+  recordedAt: number;
+  preSync: SyncNetMetrics;
+  postSync: SyncNetMetrics;
+  sourceSync: SyncNetMetrics;
+  windows: LampCombinedSyncWindowEvidence[];
+}
+
 /**
  * Immutable eligibility evidence for one exact generated take and its one
- * holistic Combined evaluation. V2 may append one repair proof; the base
- * generation/evaluation/audio/sync evidence never changes.
+ * holistic Combined evaluation. New audio-bearing receipts require one exact
+ * mandatory normalization proof; the optional repair field is legacy-only.
  */
 export interface LampCombinedCandidateQualificationReceipt {
   version: typeof LAMP_COMBINED_CANDIDATE_RECEIPT_VERSION;
@@ -94,6 +116,9 @@ export interface LampCombinedCandidateQualificationReceipt {
   recordedAt: number;
   audio: LampCombinedCandidateAudioQualification;
   sync: LampCombinedCandidateSyncQualification;
+  /** Mandatory post-generation normalization for every audio-bearing take. */
+  normalization?: LampCombinedLipsyncQualification;
+  /** Legacy V2-only conditional repair proof retained for old receipts. */
   repair?: LampCombinedRepairQualification;
 }
 
@@ -284,6 +309,7 @@ export function buildLampCombinedCandidateQualificationReceipt(input: {
   planHash: string;
   sourceHasAudio: boolean | undefined;
   syncEvidence: LampCombinedSyncEvidence;
+  lipsyncOperation?: PaidOperation | null;
   recordedAt: number;
 }): LampCombinedCandidateQualificationReceipt {
   if (!timestamp(input.recordedAt)) {
@@ -307,6 +333,7 @@ export function buildLampCombinedCandidateQualificationReceipt(input: {
 
   let audio: LampCombinedCandidateAudioQualification;
   let sync: LampCombinedCandidateSyncQualification;
+  let normalization: LampCombinedLipsyncQualification | undefined;
   if (input.sourceHasAudio === false) {
     if (input.syncEvidence.outcome !== "silent_source") {
       throw new Error("A silent Combined source requires an explicit SyncNet skip.");
@@ -320,21 +347,62 @@ export function buildLampCombinedCandidateQualificationReceipt(input: {
     if (input.syncEvidence.outcome !== "measured") {
       throw new Error("An audio-bearing Combined take requires measured SyncNet evidence.");
     }
+    const lipsyncResult = input.lipsyncOperation?.result;
+    if (
+      !input.lipsyncOperation ||
+      !isLampCombinedLipsyncResult(lipsyncResult, input.iteration) ||
+      !lampCombinedLipsyncProofMatchesGeneration({
+        runId: input.lipsyncOperation.runId,
+        iteration: input.iteration,
+        generation: input.generationOperation,
+        operation: input.lipsyncOperation,
+      }) ||
+      !v2SyncMetricsEqual(input.syncEvidence.metrics, lipsyncResult.postSync) ||
+      !v2SyncMetricsEqual(
+        input.syncEvidence.sourceSync,
+        lipsyncResult.sourceSync
+      )
+    ) {
+      throw new Error(
+        "An audio-bearing Combined take requires its exact mandatory Lipsync proof."
+      );
+    }
     const verdict = v2SyncVerdict(
       input.syncEvidence.metrics,
       input.syncEvidence.sourceSync
     );
+    const mandatoryVerdict = lampCombinedMandatorySyncVerdict(lipsyncResult);
     audio = {
       outcome: "verified",
       reason: "canonical_source_audio_verified",
     };
     sync = {
-      outcome: verdict.pass ? "passed" : "failed",
+      outcome: verdict.pass && mandatoryVerdict.pass ? "passed" : "failed",
       policy: "combined_source_relative_v1",
       mode: verdict.mode,
-      reason: verdict.reason,
+      reason: mandatoryVerdict.pass
+        ? `${verdict.reason}; ${mandatoryVerdict.reason}`
+        : mandatoryVerdict.reason,
       metrics: input.syncEvidence.metrics,
       sourceSync: input.syncEvidence.sourceSync,
+    };
+    normalization = {
+      operationId: lampCombinedLipsyncOperationId(input.iteration),
+      inputHash: input.lipsyncOperation.inputHash,
+      predictionId: lipsyncResult.predictionId,
+      artifactIdentityHash: canonicalInputHash({
+        operationId: input.lipsyncOperation.id,
+        inputHash: input.lipsyncOperation.inputHash,
+        result: lipsyncResult,
+      }),
+      videoUrl: lipsyncResult.videoUrl,
+      videoSha256: lipsyncResult.videoSha256,
+      audioMd5: lipsyncResult.audioMd5,
+      recordedAt: input.recordedAt,
+      preSync: lipsyncResult.preSync,
+      postSync: lipsyncResult.postSync,
+      sourceSync: lipsyncResult.sourceSync,
+      windows: lipsyncResult.windows,
     };
   } else {
     if (input.syncEvidence.outcome !== "audio_unverified") {
@@ -357,10 +425,11 @@ export function buildLampCombinedCandidateQualificationReceipt(input: {
     recordedAt: input.recordedAt,
     audio,
     sync,
+    ...(normalization ? { normalization } : {}),
   };
 }
 
-/** V2-only append: prove the one persisted repair against the exact Final. */
+/** @deprecated Legacy pre-normalization receipt migration helper. */
 export function appendLampCombinedRepairQualification(input: {
   receipt: LampCombinedCandidateQualificationReceipt;
   finalGeneration: ProviderOperation;
@@ -461,6 +530,49 @@ function isSourceSync(value: unknown): value is SyncNetMetrics | null {
   return value === null || isSyncNetMetrics(value);
 }
 
+function isCombinedSyncWindow(value: unknown): value is LampCombinedSyncWindowEvidence {
+  return (
+    isRecord(value) &&
+    typeof value.startSec === "number" &&
+    Number.isFinite(value.startSec) &&
+    value.startSec >= 0 &&
+    typeof value.durationSec === "number" &&
+    Number.isFinite(value.durationSec) &&
+    value.durationSec > 0 &&
+    isSyncNetMetrics(value.source) &&
+    isSyncNetMetrics(value.candidate)
+  );
+}
+
+function isNormalizationQualification(
+  value: unknown,
+  iteration: LampCombinedIteration
+): value is LampCombinedLipsyncQualification {
+  return (
+    isRecord(value) &&
+    value.operationId === lampCombinedLipsyncOperationId(iteration) &&
+    typeof value.inputHash === "string" &&
+    SHA256_RE.test(value.inputHash) &&
+    typeof value.predictionId === "string" &&
+    value.predictionId.length > 0 &&
+    typeof value.artifactIdentityHash === "string" &&
+    SHA256_RE.test(value.artifactIdentityHash) &&
+    typeof value.videoUrl === "string" &&
+    value.videoUrl.length > 0 &&
+    typeof value.videoSha256 === "string" &&
+    SHA256_RE.test(value.videoSha256) &&
+    typeof value.audioMd5 === "string" &&
+    /^[a-f0-9]{32}$/.test(value.audioMd5) &&
+    timestamp(value.recordedAt) &&
+    isSyncNetMetrics(value.preSync) &&
+    isSyncNetMetrics(value.postSync) &&
+    isSyncNetMetrics(value.sourceSync) &&
+    Array.isArray(value.windows) &&
+    value.windows.length > 0 &&
+    value.windows.every(isCombinedSyncWindow)
+  );
+}
+
 /** Structural validation used by storage before it can consult provider journals. */
 export function isLampCombinedCandidateQualificationReceipt(
   value: unknown
@@ -502,6 +614,17 @@ export function isLampCombinedCandidateQualificationReceipt(
     ) {
       return false;
     }
+  }
+  // Receipts persisted before mandatory two-take normalization have verified
+  // audio and sync evidence but no `normalization` field. They remain valid
+  // read-only history; eligibility and settlement reject them below.
+  if (
+    (value.normalization !== undefined &&
+      (audioOutcome !== "verified" ||
+        !isNormalizationQualification(value.normalization, value.iteration))) ||
+    (audioOutcome === "silent_source" && value.normalization !== undefined)
+  ) {
+    return false;
   }
   if (value.repair !== undefined) {
     const repair = value.repair;
@@ -545,7 +668,9 @@ export function lampCombinedCandidateReceiptToDeliveryCandidate(
         : "failed";
   const effectiveSync = receipt.repair?.sync ?? receipt.sync;
   const syncStatus =
-    effectiveSync.outcome === "passed"
+    receipt.audio.outcome === "verified" && !receipt.normalization
+      ? "unverified"
+      : effectiveSync.outcome === "passed"
       ? "pass"
       : effectiveSync.outcome === "not_required"
         ? "not-required"
@@ -571,7 +696,7 @@ export function lampCombinedCandidateReceiptEligible(
   );
 }
 
-/** Exact artifact the human sees: repaired Final when present, else generation. */
+/** Exact artifact the human sees; current receipts always prefer normalization. */
 export function lampCombinedCandidateArtifactIdentityHash(
   receipt: LampCombinedCandidateQualificationReceipt
 ): string {
@@ -579,8 +704,67 @@ export function lampCombinedCandidateArtifactIdentityHash(
     throw new Error("Lamp Combined candidate receipt is invalid.");
   }
   return (
+    receipt.normalization?.artifactIdentityHash ??
     receipt.repair?.artifactIdentityHash ??
     receipt.generation.artifactIdentityHash
+  );
+}
+
+/**
+ * Re-prove a pre-normalization receipt for read-only history. This does not
+ * make the take eligible: the delivery projection still requires the exact
+ * mandatory normalization proof introduced by the current contract.
+ */
+export function lampCombinedLegacyCandidateReceiptMatches(input: {
+  receipt: LampCombinedCandidateQualificationReceipt;
+  generationOperation: ProviderOperation;
+  evaluationOperation: PaidOperation;
+  planId: string;
+  planHash: string;
+  sourceHasAudio: boolean | undefined;
+  canonicalSourceSync: unknown;
+}): boolean {
+  const receipt = input.receipt;
+  if (
+    !isLampCombinedCandidateQualificationReceipt(receipt) ||
+    receipt.normalization !== undefined ||
+    receipt.repair !== undefined
+  ) {
+    return false;
+  }
+  const generation = lampCombinedGenerationProof(
+    input.generationOperation,
+    receipt.iteration
+  );
+  const evaluation = lampCombinedEvaluationProof(
+    input.evaluationOperation,
+    receipt.iteration,
+    input.planId,
+    input.planHash
+  );
+  if (
+    !generation ||
+    !evaluation ||
+    !proofsEqual(generation, receipt.generation) ||
+    !evaluationProofsEqual(evaluation, receipt.evaluation)
+  ) {
+    return false;
+  }
+  if (input.sourceHasAudio === false) {
+    return (
+      receipt.audio.outcome === "silent_source" &&
+      receipt.sync.outcome === "not_required"
+    );
+  }
+  return (
+    input.sourceHasAudio === true &&
+    input.generationOperation.result?.audioVerified === true &&
+    receipt.audio.outcome === "verified" &&
+    (receipt.sync.outcome === "passed" || receipt.sync.outcome === "failed") &&
+    v2CandidateSourceSyncMatchesCanonical(
+      receipt.sync.sourceSync,
+      input.canonicalSourceSync
+    )
   );
 }
 
@@ -622,6 +806,7 @@ export function lampCombinedCandidateReceiptMatches(input: {
     ) {
       return false;
     }
+    if (receipt.normalization || input.lipsyncOperation) return false;
   } else if (input.sourceHasAudio === true) {
     if (
       receipt.audio.outcome !== "verified" ||
@@ -630,41 +815,42 @@ export function lampCombinedCandidateReceiptMatches(input: {
       !v2CandidateSourceSyncMatchesCanonical(
         receipt.sync.sourceSync,
         input.canonicalSourceSync
-      )
+      ) ||
+      !receipt.normalization ||
+      !input.lipsyncOperation ||
+      !lampCombinedLipsyncProofMatchesGeneration({
+        runId: input.lipsyncOperation.runId,
+        iteration: receipt.iteration,
+        generation: input.generationOperation,
+        operation: input.lipsyncOperation,
+      })
+    ) {
+      return false;
+    }
+    const normalized = input.lipsyncOperation.result;
+    if (
+      !isLampCombinedLipsyncResult(normalized, receipt.iteration) ||
+      input.lipsyncOperation.inputHash !== receipt.normalization.inputHash ||
+      normalized.predictionId !== receipt.normalization.predictionId ||
+      normalized.videoUrl !== receipt.normalization.videoUrl ||
+      normalized.videoSha256 !== receipt.normalization.videoSha256 ||
+      normalized.audioMd5 !== receipt.normalization.audioMd5 ||
+      canonicalInputHash({
+        operationId: input.lipsyncOperation.id,
+        inputHash: input.lipsyncOperation.inputHash,
+        result: normalized,
+      }) !== receipt.normalization.artifactIdentityHash ||
+      !v2SyncMetricsEqual(normalized.preSync, receipt.normalization.preSync) ||
+      !v2SyncMetricsEqual(normalized.postSync, receipt.normalization.postSync) ||
+      !v2SyncMetricsEqual(normalized.sourceSync, receipt.normalization.sourceSync) ||
+      !lampCombinedMandatorySyncVerdict(normalized).pass ||
+      receipt.sync.outcome !== "passed"
     ) {
       return false;
     }
   } else {
     return false;
   }
-  if (!receipt.repair) return input.lipsyncOperation == null;
-  if (receipt.iteration !== 2 || !input.lipsyncOperation) return false;
-  const repaired = input.lipsyncOperation.result;
-  return (
-    input.lipsyncOperation.id === LIPSYNC_OPERATION_ID &&
-    input.lipsyncOperation.inputHash === receipt.repair.inputHash &&
-    input.lipsyncOperation.status === "completed" &&
-    isLipsyncOperationResult(repaired) &&
-    repaired.predictionId === receipt.repair.predictionId &&
-    canonicalInputHash({
-      operationId: input.lipsyncOperation.id,
-      inputHash: input.lipsyncOperation.inputHash,
-      result: repaired,
-    }) === receipt.repair.artifactIdentityHash &&
-    combinedLipsyncProofMatchesFinal({
-      finalGeneration: input.generationOperation,
-      lipsyncOperation: input.lipsyncOperation,
-      preSync:
-        receipt.sync.outcome === "passed" || receipt.sync.outcome === "failed"
-          ? receipt.sync.metrics
-          : repaired.preSync,
-      requireCanonicalOutput: receipt.repair.sync.outcome === "passed",
-    }) &&
-    v2CandidateSourceSyncMatchesCanonical(
-      receipt.repair.sync.sourceSync,
-      input.canonicalSourceSync
-    ) &&
-    v2SyncVerdict(repaired.postSync, receipt.repair.sync.sourceSync).pass ===
-      (receipt.repair.sync.outcome === "passed")
-  );
+  if (receipt.normalization) return receipt.repair === undefined;
+  return false;
 }

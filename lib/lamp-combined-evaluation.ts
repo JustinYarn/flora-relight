@@ -165,7 +165,7 @@ export const LAMP_COMBINED_EVAL_REGISTRY = [
   },
   {
     id: "motion-lipsync",
-    name: "Motion and lips locked",
+    name: "Motion locked; sync system-gated",
     category: "motion-lipsync",
     method: "holistic-judge",
     contract: "preservation",
@@ -175,9 +175,9 @@ export const LAMP_COMBINED_EVAL_REGISTRY = [
     passThreshold: 90,
     borderlineThreshold: 76,
     description:
-      "Performance timing, gestures, head movement, blinks, speech articulation, and lip sync match the source.",
+      "Performance timing, gestures, head movement, blinks, and mouth-shape continuity match the source; trusted post-Lipsync code owns A/V synchronization.",
     rubric:
-      "Compare complete timelines at corresponding moments. Preserve every gesture, posture shift, head pose, blink timestamp, and spoken mouth shape. Approved gaze changes only eye direction and its minimally implied eyelid pose; approved Beautify work cannot retime phonemes or body motion. Any obvious motion discontinuity or lip-sync drift fails.",
+      "Compare complete timelines at corresponding moments. Preserve every gesture, posture shift, head pose, blink timestamp, and spoken mouth shape. Approved gaze changes only eye direction and its minimally implied eyelid pose; approved Beautify work cannot retime phonemes or body motion. Judge visual performance only; do not infer or score A/V synchronization because trusted code supplies that hard gate.",
     allowedCorrectionActions: ["restore-motion-lipsync"],
   },
   {
@@ -357,7 +357,13 @@ export const LAMP_COMBINED_VISUAL_EVAL_DEFS =
     (definition) => definition.method === "holistic-judge"
   );
 
-/** Stable provider-neutral JSON shape for the one holistic visual response. */
+/**
+ * Stable flat JSON shape for the one holistic visual response. The previous
+ * nested violation-object schema exceeded Gemini's practical structured-output
+ * complexity and JSON mode reshaped those nested rows. One flat issue per
+ * check is enough to compile the capped correction ledger; trusted code still
+ * enforces every id, score, action, and approved plan-item binding.
+ */
 export const LAMP_COMBINED_HOLISTIC_RESULT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -365,8 +371,6 @@ export const LAMP_COMBINED_HOLISTIC_RESULT_SCHEMA = {
   properties: {
     results: {
       type: "array",
-      minItems: LAMP_COMBINED_VISUAL_EVAL_IDS.length,
-      maxItems: LAMP_COMBINED_VISUAL_EVAL_IDS.length,
       items: {
         type: "object",
         additionalProperties: false,
@@ -374,49 +378,42 @@ export const LAMP_COMBINED_HOLISTIC_RESULT_SCHEMA = {
           "evalId",
           "score",
           "confidence",
-          "violations",
+          "issue",
+          "severity",
+          "correctionAction",
+          "planItemIds",
           "reasoning",
         ],
         properties: {
-          evalId: { enum: LAMP_COMBINED_VISUAL_EVAL_IDS },
-          score: { type: "number", minimum: 0, maximum: 100 },
-          confidence: { type: "number", minimum: 0, maximum: 1 },
-          violations: {
+          evalId: {
+            type: "string",
+            enum: LAMP_COMBINED_VISUAL_EVAL_IDS,
+          },
+          score: { type: "number" },
+          confidence: { type: "number" },
+          issue: { type: "string" },
+          severity: {
+            type: "string",
+            enum: ["critical", "major", "minor", "none"],
+          },
+          correctionAction: {
+            type: "string",
+            enum: [...LAMP_COMBINED_CORRECTION_ACTIONS, "none"],
+          },
+          planItemIds: {
             type: "array",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              required: [
-                "aspect",
-                "severity",
-                "description",
-                "correctionAction",
-                "planItemIds",
-              ],
-              properties: {
-                aspect: { type: "string", minLength: 1 },
-                severity: { enum: ["critical", "major", "minor"] },
-                description: { type: "string" },
-                frameTimestampSec: { type: "number", minimum: 0 },
-                correctionAction: {
-                  anyOf: [
-                    { enum: LAMP_COMBINED_CORRECTION_ACTIONS },
-                    { type: "null" },
-                  ],
-                },
-                planItemIds: {
-                  type: "array",
-                  uniqueItems: true,
-                  items: { type: "string", minLength: 1 },
-                },
-              },
-            },
+            items: { type: "string" },
           },
           reasoning: { type: "string" },
         },
       },
     },
   },
+} as const;
+
+export const LAMP_COMBINED_GEMINI_OUTPUT_CONFIG = {
+  responseMimeType: "application/json",
+  responseJsonSchema: LAMP_COMBINED_HOLISTIC_RESULT_SCHEMA,
 } as const;
 
 export interface LampCombinedViolationCorrection {
@@ -991,6 +988,24 @@ function coerceVisualResult(
   const score = clamp(rawScore, 0, 100);
   const confidence = clamp(rawConfidence, 0, 1);
   const previous = previousResults.find((result) => result.evalId === evalId);
+  const flatIssue =
+    typeof value.issue === "string" && value.issue.trim().length > 0
+      ? coerceModelViolation(
+          {
+            aspect: evalId,
+            severity: value.severity === "none" ? "major" : value.severity,
+            description: value.issue,
+            frameTimestampSec: value.frameTimestampSec,
+            correctionAction:
+              value.correctionAction === "none"
+                ? undefined
+                : value.correctionAction,
+            planItemIds: value.planItemIds,
+          },
+          plan,
+          definition
+        )
+      : null;
   return {
     evalId,
     iteration,
@@ -1006,11 +1021,68 @@ function coerceVisualResult(
           const canonical = coerceModelViolation(violation, plan, definition);
           return canonical ? [canonical] : [];
         })
-      : [],
+      : flatIssue
+        ? [flatIssue]
+        : [],
     reasoning:
       typeof value.reasoning === "string" ? value.reasoning.trim() : "",
     ...(previous ? { deltaFromPrevious: score - previous.score } : {}),
   };
+}
+
+function modelValueShape(value: unknown): string {
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (isRecord(value)) {
+    return `object keys ${Object.keys(value).sort().join(",") || "none"}`;
+  }
+  return value === null ? "null" : typeof value;
+}
+
+/**
+ * Gemini JSON mode may wrap a valid row under its check id or call that id
+ * `id`/`checkId`. Normalize only those closed-vocabulary representations; the
+ * full row parser still rejects missing checks, duplicates, bad scores, and
+ * every correction that exceeds the approved plan.
+ */
+function normalizeModelVisualRow(value: unknown): unknown {
+  if (typeof value === "string") {
+    try {
+      return normalizeModelVisualRow(JSON.parse(value));
+    } catch {
+      return value;
+    }
+  }
+  if (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    typeof value[0] === "string" &&
+    LAMP_COMBINED_VISUAL_EVAL_IDS.includes(
+      value[0] as LampCombinedVisualEvalId
+    ) &&
+    isRecord(value[1])
+  ) {
+    return { ...value[1], evalId: value[0] };
+  }
+  if (!isRecord(value)) return value;
+  if (typeof value.evalId === "string") return value;
+  const alias = [value.id, value.checkId].find(
+    (candidate): candidate is LampCombinedVisualEvalId =>
+      typeof candidate === "string" &&
+      LAMP_COMBINED_VISUAL_EVAL_IDS.includes(
+        candidate as LampCombinedVisualEvalId
+      )
+  );
+  if (alias) return { ...value, evalId: alias };
+  const keyed = Object.entries(value).filter(
+    (entry): entry is [LampCombinedVisualEvalId, Record<string, unknown>] =>
+      LAMP_COMBINED_VISUAL_EVAL_IDS.includes(
+        entry[0] as LampCombinedVisualEvalId
+      ) && isRecord(entry[1])
+  );
+  if (keyed.length === 1) {
+    return { ...keyed[0][1], evalId: keyed[0][0] };
+  }
+  return value;
 }
 
 function audioIntegrityResult(
@@ -1045,6 +1117,41 @@ function audioIntegrityResult(
   };
 }
 
+function applyDeterministicSyncGate(
+  visualMotion: LampCombinedEvalResult,
+  syncVerified: boolean,
+  syncReason: string
+): LampCombinedEvalResult {
+  const deterministicNote = `Trusted post-Lipsync gate: ${syncReason.trim()}`;
+  if (syncVerified) {
+    return {
+      ...visualMotion,
+      reasoning: [visualMotion.reasoning, deterministicNote]
+        .filter(Boolean)
+        .join(" "),
+    };
+  }
+  return {
+    ...visualMotion,
+    score: 0,
+    confidence: 1,
+    verdict: "fail",
+    violations: [
+      ...visualMotion.violations,
+      {
+        aspect: "lip-sync-integrity",
+        severity: "critical",
+        description: syncReason.trim(),
+        correction: {
+          action: "restore-motion-lipsync",
+          planItemIds: [],
+        },
+      },
+    ],
+    reasoning: deterministicNote,
+  };
+}
+
 /**
  * Convert one holistic visual response into the plan-bound persisted artifact.
  * The response must contain every visual row exactly once and no audio row.
@@ -1054,6 +1161,8 @@ export async function buildLampCombinedEvaluationArtifact(input: {
   plan: LampCombinedPlan;
   iteration: LampCombinedIteration;
   audioVerified: boolean;
+  syncVerified: boolean;
+  syncReason: string;
   previousArtifact?: LampCombinedEvaluationArtifact;
   usage?: GeminiProUsageSnapshot;
   costUsd?: number;
@@ -1062,6 +1171,13 @@ export async function buildLampCombinedEvaluationArtifact(input: {
   const iteration = canonicalIteration(input.iteration);
   if (typeof input.audioVerified !== "boolean") {
     throw new Error("Lamp Combined deterministic audio result must be boolean.");
+  }
+  if (
+    typeof input.syncVerified !== "boolean" ||
+    typeof input.syncReason !== "string" ||
+    input.syncReason.trim().length < 1
+  ) {
+    throw new Error("Lamp Combined deterministic sync result is invalid.");
   }
   const usage = input.usage ?? {
     promptTokenCount: 0,
@@ -1089,16 +1205,45 @@ export async function buildLampCombinedEvaluationArtifact(input: {
       1
     ).evalResults;
   }
-  if (!isRecord(input.raw) || !Array.isArray(input.raw.results)) {
+  // JSON mode sometimes follows "return the ten rows" literally and emits the
+  // exact row array without its requested wrapper. This normalization changes
+  // no row content or scope; every id and field is still checked below.
+  const rawRecord = isRecord(input.raw) ? input.raw : null;
+  const rawResults = Array.isArray(input.raw)
+    ? input.raw
+    : rawRecord &&
+        [
+          rawRecord.results,
+          rawRecord.evaluations,
+          rawRecord.evalResults,
+          rawRecord.checks,
+        ].some(Array.isArray)
+      ? ([
+          rawRecord.results,
+          rawRecord.evaluations,
+          rawRecord.evalResults,
+          rawRecord.checks,
+        ].find(Array.isArray) as unknown[])
+      : rawRecord &&
+          LAMP_COMBINED_VISUAL_EVAL_IDS.every((evalId) =>
+            isRecord(rawRecord[evalId])
+          )
+        ? LAMP_COMBINED_VISUAL_EVAL_IDS.map((evalId) => ({
+            ...(rawRecord as Record<string, Record<string, unknown>>)[evalId],
+            evalId,
+          }))
+      : null;
+  if (!rawResults) {
     throw new Error(
-      "Lamp Combined holistic evaluator returned an invalid result envelope."
+      `Lamp Combined holistic evaluator returned an invalid result envelope. Received ${modelValueShape(input.raw)}.`
     );
   }
   const byId = new Map<LampCombinedVisualEvalId, LampCombinedEvalResult>();
-  for (const rawResult of input.raw.results) {
+  for (let index = 0; index < rawResults.length; index += 1) {
+    const rawResult = normalizeModelVisualRow(rawResults[index]);
     if (!isRecord(rawResult) || typeof rawResult.evalId !== "string") {
       throw new Error(
-        "Lamp Combined holistic evaluator returned an invalid result row."
+        `Lamp Combined holistic evaluator returned an invalid result row. Row ${index} is ${modelValueShape(rawResult)}.`
       );
     }
     if (
@@ -1116,17 +1261,25 @@ export async function buildLampCombinedEvaluationArtifact(input: {
         `Lamp Combined holistic evaluator returned duplicate result ${evalId}.`
       );
     }
-    const result = coerceVisualResult(
+    const visualResult = coerceVisualResult(
       rawResult,
       plan,
       iteration,
       previousResults
     );
-    if (!result) {
+    if (!visualResult) {
       throw new Error(
         `Lamp Combined holistic evaluator returned invalid result ${evalId}.`
       );
     }
+    const result =
+      evalId === "motion-lipsync"
+        ? applyDeterministicSyncGate(
+            visualResult,
+            input.syncVerified,
+            input.syncReason
+          )
+        : visualResult;
     byId.set(evalId, result);
   }
   const missing = LAMP_COMBINED_VISUAL_EVAL_IDS.filter(

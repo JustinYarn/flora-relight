@@ -704,6 +704,43 @@ export async function trimTo(
   return probed.durationSec;
 }
 
+/**
+ * Frame-accurate A/V segment used by the rolling SyncNet gate. Both source and
+ * candidate take the same re-encode path so the analyzer never compares a
+ * keyframe-rounded source window with a frame-accurate candidate window.
+ */
+export async function extractVideoSegment(
+  srcPath: string,
+  outPath: string,
+  startSec: number,
+  durationSec: number
+): Promise<number> {
+  if (
+    !Number.isFinite(startSec) ||
+    startSec < 0 ||
+    !Number.isFinite(durationSec) ||
+    durationSec <= 0
+  ) {
+    throw new Error("Video segment bounds must be finite and positive.");
+  }
+  const tools = await getTools();
+  await runOrThrow(tools.ffmpeg, [
+    "-y",
+    "-ss", String(startSec),
+    "-i", srcPath,
+    "-t", String(durationSec),
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "18",
+    "-pix_fmt", "yuv420p",
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-movflags", "+faststart",
+    outPath,
+  ]);
+  return (await probe(outPath)).durationSec;
+}
+
 /** sha256 (hex) of a file's bytes, streamed. */
 export async function sha256File(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {

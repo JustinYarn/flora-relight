@@ -282,6 +282,22 @@ export interface StorageDriver {
     }
   ): Promise<{ superseded: boolean; run: Run | null }>;
 
+  /**
+   * Archive one synchronous paid request that the provider definitively
+   * rejected before accepting model work, and withdraw the old approval.
+   * The canonical id is freed only when every echoed journal field matches.
+   */
+  supersedeDefinitiveRejectedPaidOperation(
+    runId: string,
+    input: {
+      operationId: string;
+      archivedOperationId: string;
+      inputHash: string;
+      startedAt: number;
+      expectedError: string;
+    }
+  ): Promise<{ superseded: boolean; run: Run | null }>;
+
   /** Claim the single right to enqueue a poll Workflow for a provider handle. */
   claimProviderWorkflow(
     runId: string,
@@ -332,7 +348,8 @@ export interface StorageDriver {
     runId: string,
     operationId: string,
     inputHash: string,
-    error: string
+    error: string,
+    receipt?: unknown
   ): Promise<PaidOperation | null>;
 
   /**

@@ -4,6 +4,8 @@ import { isTwoPassExecutionId } from "../workflow-mode.ts";
 
 export const LAMP_USER_ACTION_REQUIRED_PREFIX =
   "LAMP_USER_ACTION_REQUIRED:";
+export const LAMP_REJECTED_EVALUATION_ACKNOWLEDGED_PREFIX =
+  "LAMP_REJECTED_EVALUATION_ACKNOWLEDGED:";
 
 export function isLampUserActionRequiredError(error: unknown): boolean {
   return (
@@ -68,6 +70,71 @@ export function isLampLostGenerationAcknowledgeTransition(
     candidate.iteration === current.iteration &&
     candidate.workflowRunId === current.workflowRunId
   );
+}
+
+/**
+ * Guarded reconcile_required exit for a definitively rejected Combined judge
+ * request. The HTTP route proves and archives the exact rejected journal
+ * before constructing this transition. Like lost-generation recovery, this
+ * pauses for a fresh exact approval; it never authorizes provider spend.
+ */
+export function isLampRejectedEvaluationAcknowledgeTransition(
+  current: RunExecution,
+  candidate: RunExecution
+): boolean {
+  return (
+    current.executionId.startsWith("lamp-combined:") &&
+    current.status === "reconcile_required" &&
+    current.phase === "evaluating" &&
+    (current.iteration === 1 || current.iteration === 2) &&
+    candidate.status === "user_action_required" &&
+    candidate.error?.startsWith(
+      `${LAMP_USER_ACTION_REQUIRED_PREFIX}${LAMP_REJECTED_EVALUATION_ACKNOWLEDGED_PREFIX}`
+    ) === true &&
+    candidate.executionId === current.executionId &&
+    candidate.source === current.source &&
+    candidate.batchId === current.batchId &&
+    candidate.phase === current.phase &&
+    candidate.iteration === current.iteration &&
+    candidate.workflowRunId === current.workflowRunId
+  );
+}
+
+export function isAcknowledgedRejectedEvaluationError(
+  error: string | undefined
+): boolean {
+  return error?.startsWith(
+    `${LAMP_USER_ACTION_REQUIRED_PREFIX}${LAMP_REJECTED_EVALUATION_ACKNOWLEDGED_PREFIX}`
+  ) === true;
+}
+
+export function acknowledgeRejectedLampCombinedEvaluation(
+  execution: RunExecution,
+  input: { operationId: string; inputHash: string },
+  now = Date.now()
+): RunExecution {
+  if (
+    !execution.executionId.startsWith("lamp-combined:") ||
+    execution.status !== "reconcile_required" ||
+    execution.phase !== "evaluating" ||
+    (execution.iteration !== 1 && execution.iteration !== 2) ||
+    !/^[a-z0-9:_-]{1,160}$/.test(input.operationId) ||
+    !/^[a-f0-9]{64}$/.test(input.inputHash)
+  ) {
+    throw new Error(
+      "Only a Combined execution stopped on a definitively rejected evaluation can be acknowledged this way."
+    );
+  }
+  return {
+    ...execution,
+    status: "user_action_required",
+    revision: execution.revision + 1,
+    updatedAt: Math.max(now, execution.updatedAt),
+    error: `${LAMP_USER_ACTION_REQUIRED_PREFIX}${LAMP_REJECTED_EVALUATION_ACKNOWLEDGED_PREFIX}${input.operationId}:${input.inputHash}`.slice(
+      0,
+      2_000
+    ),
+  };
 }
 
 /**

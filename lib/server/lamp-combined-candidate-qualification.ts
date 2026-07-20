@@ -12,13 +12,15 @@ import {
   type LampCombinedIteration,
 } from "@/lib/lamp-combined";
 import { lampCombinedEvaluationOperationId } from "@/lib/lamp-combined-operations";
-import { validateLampCombinedExecutionBinding } from "@/lib/server/lamp-combined-execution";
-import { resolveSourceUrl } from "@/lib/server/gemini";
-import { getStorage } from "@/lib/server/storage";
-import { analyzeVideoSync } from "@/lib/server/syncnet";
 import {
-  analyzeV2Candidate,
-  ensureSourceSyncBaseline,
+  isLampCombinedLipsyncResult,
+  lampCombinedLipsyncOperationId,
+  lampCombinedLipsyncProofMatchesGeneration,
+  lampCombinedMandatorySyncVerdict,
+} from "@/lib/lamp-combined-lipsync";
+import { validateLampCombinedExecutionBinding } from "@/lib/server/lamp-combined-execution";
+import { getStorage } from "@/lib/server/storage";
+import {
   type V2CandidateSyncCheck,
 } from "@/lib/server/v2-sync-finalization";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
@@ -27,7 +29,7 @@ import { LIPSYNC_OPERATION_ID } from "@/lib/v2-sync";
 
 export interface LampCombinedCandidateQualificationResult {
   receipt: LampCombinedCandidateQualificationReceipt;
-  /** Exact Final evidence reusable by the existing V2 repair path. */
+  /** Legacy-only V2 sync projection; current Combined never invokes repair. */
   syncCheck: V2CandidateSyncCheck | null;
 }
 
@@ -108,6 +110,7 @@ async function analyzeCandidate(input: {
 }): Promise<{
   evidence: LampCombinedSyncEvidence;
   check: V2CandidateSyncCheck | null;
+  lipsyncOperation: PaidOperation | null;
 }> {
   const generation = input.run.providerOperations?.find(
     (operation) => operation.id === videoGenerationOperationId(input.iteration)
@@ -123,6 +126,7 @@ async function analyzeCandidate(input: {
         videoUrl: generation.result.videoUrl,
         skipReason: "silent_source",
       },
+      lipsyncOperation: null,
     };
   }
   if (
@@ -132,36 +136,47 @@ async function analyzeCandidate(input: {
     return {
       evidence: { outcome: "audio_unverified" },
       check: null,
+      lipsyncOperation: null,
     };
   }
-  if (input.iteration === 2) {
-    const check = await analyzeV2Candidate(input.run.id);
-    if (check.skipped) {
-      throw new Error(
-        "An audio-bearing Combined Final cannot become a silent-source skip."
-      );
-    }
-    return {
-      evidence: {
-        outcome: "measured",
-        metrics: check.metrics,
-        sourceSync: check.sourceSync,
-      },
-      check,
-    };
-  }
-  const metrics = await analyzeVideoSync(
-    await resolveSourceUrl(generation.result.videoUrl)
+  const lipsyncOperation = await getStorage().getPaidOperation(
+    input.run.id,
+    lampCombinedLipsyncOperationId(input.iteration)
   );
-  const sourceSync = await ensureSourceSyncBaseline(input.run.id);
+  const result = lipsyncOperation?.result;
+  if (
+    !lipsyncOperation ||
+    !isLampCombinedLipsyncResult(result, input.iteration) ||
+    !lampCombinedLipsyncProofMatchesGeneration({
+      runId: input.run.id,
+      iteration: input.iteration,
+      generation,
+      operation: lipsyncOperation,
+    })
+  ) {
+    throw new Error(
+      `Lamp Combined Take ${input.iteration} has no exact mandatory Lipsync proof.`
+    );
+  }
+  const verdict = lampCombinedMandatorySyncVerdict(result);
+  if (!verdict.pass) {
+    throw new Error(
+      `Lamp Combined Take ${input.iteration} failed mandatory Lipsync verification: ${verdict.reason}`
+    );
+  }
   return {
-    evidence: { outcome: "measured", metrics, sourceSync },
+    evidence: {
+      outcome: "measured",
+      metrics: result.postSync,
+      sourceSync: result.sourceSync,
+    },
     check: {
       skipped: false,
-      videoUrl: generation.result.videoUrl,
-      metrics,
-      sourceSync,
+      videoUrl: result.videoUrl,
+      metrics: result.postSync,
+      sourceSync: result.sourceSync,
     },
+    lipsyncOperation,
   };
 }
 
@@ -212,8 +227,11 @@ export async function qualifyLampCombinedCandidate(input: {
         sourceHasAudio: state.run.originalVideo.hasAudio,
         canonicalSourceSync: state.run.originalVideo.syncBaseline,
         lipsyncOperation:
-          input.iteration === 2
-            ? await storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID)
+          state.run.originalVideo.hasAudio === true
+            ? await storage.getPaidOperation(
+                input.runId,
+                lampCombinedLipsyncOperationId(input.iteration)
+              )
             : null,
       });
       if (!matches) {
@@ -247,6 +265,7 @@ export async function qualifyLampCombinedCandidate(input: {
       planHash,
       sourceHasAudio: state.run.originalVideo.hasAudio,
       syncEvidence: analyzed.evidence,
+      lipsyncOperation: analyzed.lipsyncOperation,
       recordedAt: updatedAt,
     });
     const candidate: RunExecution = {
@@ -271,7 +290,7 @@ export async function qualifyLampCombinedCandidate(input: {
   throw new Error("Lamp Combined qualification changed too often to journal safely.");
 }
 
-/** Append the one completed Final repair result, pass or definitive fail. */
+/** @deprecated Legacy pre-normalization receipt migration helper. */
 export async function appendLampCombinedFinalRepairReceipt(input: {
   runId: string;
   executionId: string;

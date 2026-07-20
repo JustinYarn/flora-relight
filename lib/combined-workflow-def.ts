@@ -3,7 +3,8 @@
  *
  * Take 1 and Take 2 both condition on the immutable source. Take 2 is never a
  * generation from Take 1's pixels; only the consolidated critique carries
- * forward.
+ * forward. If the critic is unavailable, Take 2 uses the deterministic
+ * approved-plan fallback and detailed scoring remains a separate gate.
  */
 
 import type {
@@ -36,9 +37,9 @@ const nodes: PipelineNode[] = [
   {
     id: "critique",
     kind: "evaluate",
-    label: "Holistic critique",
+    label: "Bounded Take 1 critic",
     description:
-      "Evaluates the complete v1 across every enabled concern and hard preservation gate, then selects at most 12 deterministic corrections for one final pass.",
+      "Attempts one source-bound critique and selects at most 3 deterministic corrections. A technical critic failure cannot hide or block Take 2; the safe approved-plan fallback is used instead.",
     position: { x: STEP * 2, y: MID },
   },
   {
@@ -46,7 +47,7 @@ const nodes: PipelineNode[] = [
     kind: "generate",
     label: "Generate Take 2",
     description:
-      "Creates v2 directly from the same immutable source plus the approved combined plan and consolidated correction ledger; it never chains from v1 pixels.",
+      "Creates v2 directly from the same immutable source plus either the compact correction ledger or its deterministic safe fallback; it never chains from v1 pixels.",
     providerId: "omni",
     position: { x: STEP * 3, y: MID },
   },
@@ -55,7 +56,7 @@ const nodes: PipelineNode[] = [
     kind: "output",
     label: "Pick winner + blind grade",
     description:
-      "Shows both candidates and their qualification status, records one eligible human winner, and grades only that chosen take before revealing its saved AI evaluation.",
+      "Shows both videos as soon as their mandatory lip-sync stage completes. Detailed scoring and exact receipts still fail closed before grading or export; after they pass, the human chooses one eligible winner and grades only that chosen take.",
     position: { x: STEP * 4, y: MID },
   },
 ];
@@ -81,7 +82,7 @@ export const COMBINED_WORKFLOW: WorkflowDefinition = {
   id: "lamp-combined-v1",
   name: "Lamp Combined",
   description:
-    "Approve one Combined plan, generate Take 1 from the source, critique it once, generate Take 2 from the source plus capped corrections, then choose among eligible takes and grade only that winner.",
+    "Approve once, generate and lip-sync both source-rooted takes, keep Take 2 moving through a compact critic fallback, then require detailed scoring before grading or export.",
   nodes,
   edges,
   config: {

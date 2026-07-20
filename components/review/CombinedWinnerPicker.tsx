@@ -23,7 +23,7 @@ const INELIGIBLE_COPY: Record<
 > = {
   "generation-incomplete": "generation did not finish",
   "audio-unverified": "source audio is not verified",
-  "sync-failed": "SyncNet failed; Take 1 cannot be repaired",
+  "sync-failed": "Post-Lipsync verification failed",
   "sync-unverified": "SyncNet proof is incomplete",
   "evaluation-incomplete": "whole-video evaluation is incomplete",
 };
@@ -63,7 +63,10 @@ function candidateState(
       receipt,
       eligible: lampCombinedCandidateReceiptEligible(receipt),
       gradeable: isGradeableLampCombinedCandidate(run, iteration),
-      reason: ineligibility
+      reason:
+        receipt.audio.outcome === "verified" && !receipt.normalization
+          ? "Legacy run: mandatory post-Lipsync proof was not recorded"
+          : ineligibility
         ? INELIGIBLE_COPY[ineligibility]
         : receipt.repair
           ? "qualified after one exact Take 2 sync repair"

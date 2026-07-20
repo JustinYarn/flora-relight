@@ -23,6 +23,7 @@ import {
   type LampCombinedVisualEvalId,
 } from "../lib/lamp-combined-evaluation.ts";
 import {
+  compileLampCombinedFallbackFinalPrompt,
   compileLampCombinedFinalPrompt,
   initialLampCombinedMegaPrompt,
   isPersistedInitialLampCombinedPrompt,
@@ -31,6 +32,7 @@ import {
   LAMP_COMBINED_V1_HEADER,
   LAMP_COMBINED_V1_NEVER_DO_HEADING,
   LAMP_COMBINED_V1_OWNERSHIP_HEADING,
+  resolveLampCombinedFinalPrompt,
 } from "../lib/prompts/lamp-combined.ts";
 
 const RUN_ID = "run-combined-prompt-1";
@@ -79,6 +81,86 @@ function passingHolisticRaw(
   };
 }
 
+test("the Combined evaluator safely normalizes Gemini's bare visual-row array", async () => {
+  const plan = approvedPlan();
+  const wrapped = passingHolisticRaw();
+  const artifact = await buildLampCombinedEvaluationArtifact({
+    raw: wrapped.results,
+    plan,
+    iteration: 1,
+    audioVerified: true,
+    syncVerified: true,
+    syncReason: "test post-Lipsync proof passed",
+  });
+
+  assert.deepEqual(
+    artifact.evalResults.map((result) => result.evalId),
+    LAMP_COMBINED_EVAL_IDS
+  );
+});
+
+test("the Combined evaluator safely unwraps rows keyed by known check ids", async () => {
+  const plan = approvedPlan();
+  const wrapped = passingHolisticRaw();
+  const raw = {
+    evaluations: wrapped.results.map((row) => ({
+      [String(row.evalId)]: Object.fromEntries(
+        Object.entries(row).filter(([key]) => key !== "evalId")
+      ),
+    })),
+  };
+  const artifact = await buildLampCombinedEvaluationArtifact({
+    raw,
+    plan,
+    iteration: 1,
+    audioVerified: true,
+    syncVerified: true,
+    syncReason: "test post-Lipsync proof passed",
+  });
+
+  assert.deepEqual(
+    artifact.evalResults.map((result) => result.evalId),
+    LAMP_COMBINED_EVAL_IDS
+  );
+});
+
+test("the Combined evaluator converts the flat provider row into a scoped violation", async () => {
+  const plan = approvedPlan();
+  const raw = {
+    results: LAMP_COMBINED_VISUAL_EVAL_IDS.map((evalId) => ({
+      evalId,
+      score: evalId === "lighting-target" ? 40 : 95,
+      confidence: 0.9,
+      issue:
+        evalId === "lighting-target"
+          ? "The candidate is flatter than the approved lighting target."
+          : "",
+      severity: evalId === "lighting-target" ? "major" : "none",
+      correctionAction:
+        evalId === "lighting-target" ? "match-lighting-target" : "none",
+      planItemIds: [],
+      reasoning: `${evalId} checked.`,
+    })),
+  };
+  const artifact = await buildLampCombinedEvaluationArtifact({
+    raw,
+    plan,
+    iteration: 1,
+    audioVerified: true,
+    syncVerified: true,
+    syncReason: "test post-Lipsync proof passed",
+  });
+  const lighting = artifact.evalResults.find(
+    (result) => result.evalId === "lighting-target"
+  )!;
+
+  assert.equal(lighting.violations.length, 1);
+  assert.equal(
+    lighting.violations[0].correction?.action,
+    "match-lighting-target"
+  );
+});
+
 async function passingArtifact(
   plan: LampCombinedPlan,
   overrides: Partial<Record<LampCombinedVisualEvalId, Record<string, unknown>>> = {}
@@ -88,6 +170,8 @@ async function passingArtifact(
     plan,
     iteration: 1,
     audioVerified: true,
+    syncVerified: true,
+    syncReason: "test post-Lipsync proof passed",
   });
 }
 
@@ -161,6 +245,59 @@ test("plan hash and relight intensity are independent bindings and Final rejects
         evaluation
       ),
     /exact persisted v1 Initial bytes/
+  );
+});
+
+test("Take 2 has a deterministic fallback when the bounded critic is unavailable", async () => {
+  const plan = approvedPlan();
+  const initial = await initialLampCombinedMegaPrompt(plan, 75);
+  const fallback = await compileLampCombinedFallbackFinalPrompt(
+    initial.rendered,
+    plan,
+    75
+  );
+  assert.equal(fallback.iteration, 2);
+  assert.deepEqual(fallback.corrections, []);
+  assert.match(fallback.rendered, /do not invent a new target/);
+  assert.equal(
+    (
+      await resolveLampCombinedFinalPrompt({
+        persistedInitialRendered: initial.rendered,
+        plan,
+        relightIntensity: 75,
+      })
+    ).rendered,
+    fallback.rendered
+  );
+
+  const evaluated = await compileLampCombinedFinalPrompt(
+    initial.rendered,
+    plan,
+    75,
+    await passingArtifact(plan)
+  );
+  assert.equal(
+    (
+      await resolveLampCombinedFinalPrompt({
+        persistedInitialRendered: initial.rendered,
+        plan,
+        relightIntensity: 75,
+        firstEvaluation: await passingArtifact(plan),
+        persistedFinalRendered: fallback.rendered,
+      })
+    ).rendered,
+    fallback.rendered
+  );
+  assert.equal(evaluated.rendered, fallback.rendered);
+  await assert.rejects(
+    () =>
+      resolveLampCombinedFinalPrompt({
+        persistedInitialRendered: initial.rendered,
+        plan,
+        relightIntensity: 75,
+        persistedFinalRendered: "unbound prompt",
+      }),
+    /neither the bounded-critic prompt nor the deterministic fallback/
   );
 });
 
@@ -318,22 +455,11 @@ test("Final patches only the persisted v1 corrections body with stable capped or
   assert.equal(firstFinal.rendered, secondFinal.rendered);
   assert.equal(firstFinal.iteration, 2);
   assert.equal(firstFinal.corrections.length, LAMP_COMBINED_MAX_CORRECTIONS);
-  const firstNonGate = firstFinal.corrections.findIndex(
-    (correction) => !correction.hardGate
+  assert.ok(firstFinal.corrections.every((correction) => correction.hardGate));
+  assert.deepEqual(
+    firstFinal.corrections.map((correction) => correction.concern),
+    ["preservation", "preservation", "preservation"]
   );
-  assert.ok(firstNonGate > 0);
-  assert.ok(
-    firstFinal.corrections
-      .slice(0, firstNonGate)
-      .every((correction) => correction.hardGate)
-  );
-  for (const concern of ["lighting", "background", "beautify", "iris"] as const) {
-    assert.ok(
-      firstFinal.corrections.some(
-        (correction) => correction.concern === concern
-      )
-    );
-  }
 
   const initialBodyStart =
     initial.rendered.indexOf(LAMP_COMBINED_V1_CORRECTIONS_HEADING) +
@@ -440,6 +566,8 @@ test("holistic schema excludes deterministic audio and turns disabled concerns i
     plan,
     iteration: 1,
     audioVerified: true,
+    syncVerified: true,
+    syncReason: "test post-Lipsync proof passed",
     raw: passingHolisticRaw({
       "beautify-target": {
         score: 20,
@@ -548,6 +676,8 @@ test("evaluation artifacts bind exact plan hashes and discard model attempts to 
     plan,
     iteration: 1,
     audioVerified: true,
+    syncVerified: true,
+    syncReason: "test post-Lipsync proof passed",
   });
   assert.deepEqual(
     artifact.evalResults.find(

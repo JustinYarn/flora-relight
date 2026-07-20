@@ -824,7 +824,7 @@ export default function PromptsPage() {
                 }
                 detail={
                   isCombined
-                    ? `Bind audio and SyncNet proof, then run ${rubricCount} visual checks and cap corrections at 12.`
+                    ? `Bind audio and SyncNet proof, then attempt the bounded critic and cap Take 2 steering at 3 corrections.`
                     : `Run ${rubricCount} plan-bound visual checks and deterministic audio.`
                 }
                 nodeId="critique"
@@ -1088,8 +1088,12 @@ export default function PromptsPage() {
                       Beautify-off and eye-contact-off become preservation hard gates.
                     </DefinitionLine>
                     <DefinitionLine label="Correction pass">
-                      Take 2 changes only the frozen correction body, with at most 12
-                      deterministically ordered actions.
+                      Take 2 changes only the frozen correction body, with at most 3
+                      deterministic actions; critic failures use the safe approved-plan fallback.
+                    </DefinitionLine>
+                    <DefinitionLine label="Scoring">
+                      Both lip-synced videos stay visible while detailed scoring
+                      recovers independently; grading and export remain locked.
                     </DefinitionLine>
                     <DefinitionLine label="Winner">
                       The runtime chooses nobody; a human blindly grades one exact

@@ -18,7 +18,9 @@ export function lampCombinedCandidateReceiptToDeliveryCandidate(
         : "failed";
   const effectiveSync = receipt.repair?.sync ?? receipt.sync;
   const syncStatus =
-    effectiveSync.outcome === "passed"
+    receipt.audio.outcome === "verified" && !receipt.normalization
+      ? "unverified"
+      : effectiveSync.outcome === "passed"
       ? "pass"
       : effectiveSync.outcome === "not_required"
         ? "not-required"
@@ -52,9 +54,10 @@ export function lampCombinedCandidateArtifactIdentityHash(
   receipt: LampCombinedCandidateQualificationReceipt
 ): string {
   const hash =
-    receipt.iteration === 2 && receipt.repair
+    receipt.normalization?.artifactIdentityHash ??
+    (receipt.iteration === 2 && receipt.repair
       ? receipt.repair.artifactIdentityHash
-      : receipt.generation.artifactIdentityHash;
+      : receipt.generation.artifactIdentityHash);
   if (
     receipt.version !== "lamp-combined-candidate-v1" ||
     !SHA256_RE.test(hash)

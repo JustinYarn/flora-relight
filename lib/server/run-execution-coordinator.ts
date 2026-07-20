@@ -42,7 +42,8 @@ import {
 import { lampCombinedCandidateReceiptMatches } from "@/lib/lamp-combined-candidate";
 import { parseLampCombinedEvaluationArtifact } from "@/lib/lamp-combined-evaluation";
 import { lampCombinedEvaluationOperationId } from "@/lib/lamp-combined-operations";
-import { compileLampCombinedFinalPrompt } from "@/lib/prompts/lamp-combined";
+import { resolveLampCombinedFinalPrompt } from "@/lib/prompts/lamp-combined";
+import { lampCombinedLipsyncOperationId } from "@/lib/lamp-combined-lipsync";
 import {
   validateLampCombinedExecutionBinding,
   validateLampCombinedPlanBinding,
@@ -317,7 +318,13 @@ export async function repairCompletedRunExecution(
         isLampIrisEvaluationArtifact(finalEvaluation.result, 2) &&
         finalEvaluation.result.planId === irisPlan.id;
     } else if (workflowMode === "combined") {
-      const [plannerOperations, firstEvaluation, finalEvaluation, lipsync] =
+      const [
+        plannerOperations,
+        firstEvaluation,
+        finalEvaluation,
+        firstLipsync,
+        finalLipsync,
+      ] =
         await Promise.all([
           readCompletedCombinedPlannerEvidence(
             execution.combinedPlanOperationIds,
@@ -332,7 +339,14 @@ export async function repairCompletedRunExecution(
             input.runId,
             lampCombinedEvaluationOperationId(2)
           ),
-          storage.getPaidOperation(input.runId, LIPSYNC_OPERATION_ID),
+          storage.getPaidOperation(
+            input.runId,
+            lampCombinedLipsyncOperationId(1)
+          ),
+          storage.getPaidOperation(
+            input.runId,
+            lampCombinedLipsyncOperationId(2)
+          ),
         ]);
       if (!plannerOperations) return execution;
       let combinedPlan: LampCombinedPlan;
@@ -363,20 +377,23 @@ export async function repairCompletedRunExecution(
             iteration: 2,
           }),
         ]);
-        expectedPrompt = (
-          await compileLampCombinedFinalPrompt(
-            input.renderedPrompt,
-            combinedPlan,
-            execution.relightIntensity,
-            firstArtifact
-          )
-        ).rendered;
         const initialGeneration = run.providerOperations?.find(
           (item) => item.id === videoGenerationOperationId(1)
         );
         const finalGeneration = run.providerOperations?.find(
           (item) => item.id === videoGenerationOperationId(2)
         );
+        expectedPrompt = (
+          await resolveLampCombinedFinalPrompt({
+            persistedInitialRendered: input.renderedPrompt,
+            plan: combinedPlan,
+            relightIntensity: execution.relightIntensity,
+            firstEvaluation: firstArtifact,
+            ...(finalGeneration?.renderedPrompt
+              ? { persistedFinalRendered: finalGeneration.renderedPrompt }
+              : {}),
+          })
+        ).rendered;
         const initialReceipt = execution.combinedCandidateReceipts?.initial;
         const finalReceipt = execution.combinedCandidateReceipts?.final;
         finalEvaluationComplete = finalArtifact.planHash === planHash;
@@ -393,7 +410,7 @@ export async function repairCompletedRunExecution(
               planHash,
               sourceHasAudio: run.originalVideo.hasAudio,
               canonicalSourceSync: run.originalVideo.syncBaseline,
-              lipsyncOperation: null,
+              lipsyncOperation: firstLipsync,
             }) &&
             lampCombinedCandidateReceiptMatches({
               receipt: finalReceipt,
@@ -403,7 +420,7 @@ export async function repairCompletedRunExecution(
               planHash,
               sourceHasAudio: run.originalVideo.hasAudio,
               canonicalSourceSync: run.originalVideo.syncBaseline,
-              lipsyncOperation: lipsync,
+              lipsyncOperation: finalLipsync,
             })
         );
       } catch {
