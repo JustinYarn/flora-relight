@@ -11,6 +11,22 @@ A fresh chat with no prior context can work from these two files alone.
 
 ## 0. TL;DR for the next agent
 
+> **UPDATE 2026-07-20 (later session): THE BUILD IS COMPLETE.** Everything in
+> §4.1 and §4.2 below is implemented and committed (`3fb3267`); §4.3 ($0
+> verification) is done end-to-end in the browser in mock mode — order picker,
+> ChainPlanReview approval, deliver-first proven live (run DELIVERED and
+> gradeable at 0/4 measurements; report card attached 0→4 afterwards),
+> ChainEvalReport drift deltas, and `/chain-sweep` grouping two order variants
+> (H0 vs H2) of one clip with the final-stage matrix. `npx tsc --noEmit`
+> clean; `npm test` **304/304**. A code review confirmed and fixed 11 findings
+> (4 critical/major: PUT chain-field protection, live-chain read-model
+> delivery surfacing, grade-CTA predicate). Mock demo runs persist in `data/`
+> (`run_mrtjxj3u` H0, `run_mrtk7cb4` H2). A `combined-v2-mock` launch config
+> (provider keys blanked → mock mode, same port 3005) was added beside
+> `combined-v2` in the parent `.claude/launch.json`. **Remaining: §4.4 paid
+> smoke — blocked on Justin's answers to §6.** Sections below are kept as
+> written for spec/reference.
+
 Version 2 ("Lamp Chain") is a new fifth-and-a-half workflow mode where the
 original clip enters the pipeline **once** and each enabled concern runs as
 its own **single-pass generation over the previous stage's output**. The
