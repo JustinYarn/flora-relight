@@ -13,6 +13,7 @@ import { BACKGROUND_WORKFLOW } from "./background-workflow-def.ts";
 import { BEAUTIFY_WORKFLOW } from "./beautify-workflow-def.ts";
 import { IRIS_WORKFLOW } from "./iris-workflow-def.ts";
 import { COMBINED_WORKFLOW } from "./combined-workflow-def.ts";
+import { CHAIN_WORKFLOW } from "./chain-workflow-def.ts";
 import type {
   PipelineEdge,
   PipelineNode,
@@ -232,12 +233,14 @@ export function workflowForMode(mode: WorkflowMode): WorkflowDefinition {
   if (mode === "background") return BACKGROUND_WORKFLOW;
   if (mode === "iris") return IRIS_WORKFLOW;
   if (mode === "combined") return COMBINED_WORKFLOW;
+  if (mode === "chain") return CHAIN_WORKFLOW;
   return BEAUTIFY_WORKFLOW;
 }
 
 export {
   BACKGROUND_WORKFLOW,
   BEAUTIFY_WORKFLOW,
+  CHAIN_WORKFLOW,
   COMBINED_WORKFLOW,
   FLORA_WORKFLOW,
   IRIS_WORKFLOW,

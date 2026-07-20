@@ -22,6 +22,7 @@ import {
 } from "@/lib/lamp-beautify";
 import { lampBeautifyPlanOperationId } from "@/lib/lamp-beautify-operations";
 import { LAMP_COMBINED_BEAUTIFY_PLAN_OPERATION_ID } from "@/lib/lamp-combined-operations";
+import { LAMP_CHAIN_BEAUTIFY_PLAN_OPERATION_ID } from "@/lib/lamp-chain-operations";
 import {
   beginPaidOperation,
   completePaidOperation,
@@ -317,8 +318,10 @@ export function isLampBeautifyPlanArtifact(
 export async function runLampBeautifyPlanner(
   runId: string,
   combined?: {
-    workflowMode: "combined";
-    operationId: typeof LAMP_COMBINED_BEAUTIFY_PLAN_OPERATION_ID;
+    workflowMode: "combined" | "chain";
+    operationId:
+      | typeof LAMP_COMBINED_BEAUTIFY_PLAN_OPERATION_ID
+      | typeof LAMP_CHAIN_BEAUTIFY_PLAN_OPERATION_ID;
   }
 ): Promise<LampBeautifyPlanArtifact> {
   const storage = getStorage();

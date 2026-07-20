@@ -1,6 +1,9 @@
 import type { RunExecution } from "../types.ts";
 import { isProviderLostInteractionError } from "../lost-interaction.ts";
-import { isTwoPassExecutionId } from "../workflow-mode.ts";
+import {
+  isLampChainExecutionId,
+  isTwoPassExecutionId,
+} from "../workflow-mode.ts";
 
 export const LAMP_USER_ACTION_REQUIRED_PREFIX =
   "LAMP_USER_ACTION_REQUIRED:";
@@ -21,7 +24,8 @@ export function isLampApprovalReplayTransition(
     current.status === "user_action_required" &&
     current.error?.startsWith(LAMP_USER_ACTION_REQUIRED_PREFIX) === true &&
     candidate.status === "queued" &&
-    isTwoPassExecutionId(current.executionId) &&
+    (isTwoPassExecutionId(current.executionId) ||
+      isLampChainExecutionId(current.executionId)) &&
     candidate.source === current.source &&
     candidate.batchId === current.batchId &&
     candidate.phase === "queued" &&
@@ -56,7 +60,8 @@ export function isLampLostGenerationAcknowledgeTransition(
   candidate: RunExecution
 ): boolean {
   return (
-    isTwoPassExecutionId(current.executionId) &&
+    (isTwoPassExecutionId(current.executionId) ||
+      isLampChainExecutionId(current.executionId)) &&
     current.status === "reconcile_required" &&
     isProviderLostInteractionError(current.error) &&
     candidate.status === "user_action_required" &&
@@ -80,7 +85,8 @@ export function acknowledgeLostLampGeneration(
   now = Date.now()
 ): RunExecution {
   if (
-    !isTwoPassExecutionId(execution.executionId) ||
+    (!isTwoPassExecutionId(execution.executionId) &&
+      !isLampChainExecutionId(execution.executionId)) ||
     execution.status !== "reconcile_required" ||
     !isProviderLostInteractionError(execution.error)
   ) {
@@ -113,7 +119,8 @@ export function requeueLampExecutionAfterApproval(
   now = Date.now()
 ): RunExecution {
   if (
-    !isTwoPassExecutionId(execution.executionId) ||
+    (!isTwoPassExecutionId(execution.executionId) &&
+      !isLampChainExecutionId(execution.executionId)) ||
     execution.status !== "user_action_required" ||
     !execution.error?.startsWith(LAMP_USER_ACTION_REQUIRED_PREFIX)
   ) {

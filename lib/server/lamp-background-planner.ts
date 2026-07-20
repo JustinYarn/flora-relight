@@ -20,6 +20,7 @@ import {
 } from "@/lib/lamp-background";
 import { lampBackgroundPlanOperationId } from "@/lib/lamp-background-operations";
 import { LAMP_COMBINED_BACKGROUND_PLAN_OPERATION_ID } from "@/lib/lamp-combined-operations";
+import { LAMP_CHAIN_BACKGROUND_PLAN_OPERATION_ID } from "@/lib/lamp-chain-operations";
 import {
   beginPaidOperation,
   completePaidOperation,
@@ -345,8 +346,10 @@ export function isLampBackgroundPlanArtifact(
 export async function runLampBackgroundPlanner(
   runId: string,
   combined?: {
-    workflowMode: "combined";
-    operationId: typeof LAMP_COMBINED_BACKGROUND_PLAN_OPERATION_ID;
+    workflowMode: "combined" | "chain";
+    operationId:
+      | typeof LAMP_COMBINED_BACKGROUND_PLAN_OPERATION_ID
+      | typeof LAMP_CHAIN_BACKGROUND_PLAN_OPERATION_ID;
   }
 ): Promise<LampBackgroundPlanArtifact> {
   const storage = getStorage();

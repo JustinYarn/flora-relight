@@ -17,6 +17,7 @@ export const LAMP_BEAUTIFY_BATCH_EXECUTION_PREFIX = "lamp-beautify-batch:";
 export const LAMP_IRIS_EXECUTION_PREFIX = "lamp-iris:";
 export const LAMP_IRIS_BATCH_EXECUTION_PREFIX = "lamp-iris-batch:";
 export const LAMP_COMBINED_EXECUTION_PREFIX = "lamp-combined:";
+export const LAMP_CHAIN_EXECUTION_PREFIX = "lamp-chain:";
 
 export function parseWorkflowMode(value: unknown): WorkflowMode | null {
   return value === "flora" ||
@@ -24,7 +25,8 @@ export function parseWorkflowMode(value: unknown): WorkflowMode | null {
     value === "background" ||
     value === "beautify" ||
     value === "iris" ||
-    value === "combined"
+    value === "combined" ||
+    value === "chain"
     ? value
     : null;
 }
@@ -77,12 +79,14 @@ export function workflowModeLabel(
   | "Lamp Background"
   | "Lamp Beautify"
   | "Lamp Iris"
-  | "Lamp Combined" {
+  | "Lamp Combined"
+  | "Lamp Chain" {
   if (mode === "flora") return "Flora";
   if (mode === "lamp") return "Lamp";
   if (mode === "background") return "Lamp Background";
   if (mode === "iris") return "Lamp Iris";
   if (mode === "combined") return "Lamp Combined";
+  if (mode === "chain") return "Lamp Chain";
   return "Lamp Beautify";
 }
 
@@ -92,6 +96,7 @@ export function workflowOutputLabel(mode: WorkflowMode): string {
   if (mode === "beautify") return "ENHANCED";
   if (mode === "iris") return "GAZE-CORRECTED";
   if (mode === "combined") return "FINISHED";
+  if (mode === "chain") return "CHAIN-FINISHED";
   return "RELIT";
 }
 
@@ -107,6 +112,7 @@ export function runWorkflowMode(
   if (run.workflowId === "lamp-beautify-v1") return "beautify";
   if (run.workflowId === "lamp-background-v1") return "background";
   if (run.workflowId === "lamp-combined-v1") return "combined";
+  if (run.workflowId === "lamp-chain-v1") return "chain";
   return run.workflowId === "lamp-v1" ? "lamp" : "flora";
 }
 
@@ -133,6 +139,9 @@ export function isTwoPassWorkflowMode(
 export function workflowModeFromExecutionId(
   executionId: string
 ): WorkflowMode {
+  if (executionId.startsWith(LAMP_CHAIN_EXECUTION_PREFIX)) {
+    return "chain";
+  }
   if (executionId.startsWith(LAMP_COMBINED_EXECUTION_PREFIX)) {
     return "combined";
   }
@@ -165,6 +174,15 @@ export function workflowModeFromExecutionId(
 
 export function isTwoPassExecutionId(executionId: string): boolean {
   return isTwoPassWorkflowMode(workflowModeFromExecutionId(executionId));
+}
+
+/**
+ * Chain is deliberately NOT a two-pass mode: it runs one generation per
+ * enabled concern (2–4), each conditioning on the previous stage's output.
+ * Shared plumbing that pauses for approval renewal admits chain explicitly.
+ */
+export function isLampChainExecutionId(executionId: string): boolean {
+  return executionId.startsWith(LAMP_CHAIN_EXECUTION_PREFIX);
 }
 
 /** True once the run holds any spend, provider, judged, or graded state. */

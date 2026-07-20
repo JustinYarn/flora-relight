@@ -36,7 +36,9 @@ export function buildRun(
     id: video.runId ?? uid("run"),
     workflowId: workflow.id,
     workflowMode,
-    ...(workflowMode === "lamp" || workflowMode === "combined"
+    ...(workflowMode === "lamp" ||
+    workflowMode === "combined" ||
+    workflowMode === "chain"
       ? { relightIntensity: normalizeRelightIntensity(relightIntensity) }
       : {}),
     createdAt: now,

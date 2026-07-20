@@ -22,6 +22,7 @@ import {
 } from "@/lib/lamp-iris";
 import { lampIrisPlanOperationId } from "@/lib/lamp-iris-operations";
 import { LAMP_COMBINED_IRIS_PLAN_OPERATION_ID } from "@/lib/lamp-combined-operations";
+import { LAMP_CHAIN_IRIS_PLAN_OPERATION_ID } from "@/lib/lamp-chain-operations";
 import {
   beginPaidOperation,
   completePaidOperation,
@@ -317,8 +318,10 @@ export function isLampIrisPlanArtifact(
 export async function runLampIrisPlanner(
   runId: string,
   combined?: {
-    workflowMode: "combined";
-    operationId: typeof LAMP_COMBINED_IRIS_PLAN_OPERATION_ID;
+    workflowMode: "combined" | "chain";
+    operationId:
+      | typeof LAMP_COMBINED_IRIS_PLAN_OPERATION_ID
+      | typeof LAMP_CHAIN_IRIS_PLAN_OPERATION_ID;
   }
 ): Promise<LampIrisPlanArtifact> {
   const storage = getStorage();

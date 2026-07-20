@@ -14,10 +14,15 @@ import {
   isLampLostGenerationAcknowledgeTransition,
   LAMP_USER_ACTION_REQUIRED_PREFIX,
 } from "../run-execution-resume.ts";
-import { isTwoPassExecutionId } from "../../workflow-mode.ts";
+import {
+  isLampChainExecutionId,
+  isTwoPassExecutionId,
+} from "../../workflow-mode.ts";
 import { isRelightIntensity } from "../../relight-intensity.ts";
 import { isV2CandidateSyncVerdict } from "../../v2-sync.ts";
 import { isLampCombinedCandidateQualificationReceipt } from "../../lamp-combined-candidate.ts";
+import { isLampChainStageReceipt } from "../../lamp-chain-candidate.ts";
+import { LAMP_CHAIN_STAGE_PROMPT_LINEAGE } from "../../prompts/lamp-chain.ts";
 import { createHash } from "node:crypto";
 
 const EXECUTION_ID_RE = /^[a-z0-9:_-]{1,160}$/;
@@ -254,14 +259,15 @@ export function assertRunExecution(execution: unknown): RunExecution {
       }
     }
   }
+  const chained = isLampChainExecutionId(candidate.executionId);
   if (
-    combined !==
+    (combined || chained) !==
     Boolean(
       candidate.combinedPlanOperationIds && candidate.approvedPlanHash
     )
   ) {
     throw new Error(
-      "A Combined execution requires its exact planner set and approved plan hash"
+      "A Combined or Chain execution requires its exact planner set and approved plan hash"
     );
   }
   if (
@@ -277,11 +283,75 @@ export function assertRunExecution(execution: unknown): RunExecution {
       "Lamp Combined is single-run only and cannot use legacy plan, sync, or winner fields"
     );
   }
+  if (
+    chained &&
+    (candidate.source !== "single" ||
+      candidate.batchId !== undefined ||
+      candidate.planOperationId !== undefined ||
+      candidate.candidateSyncVerdict !== undefined ||
+      candidate.deliveredIteration !== undefined ||
+      candidate.combinedCandidateReceipts !== undefined ||
+      candidate.relightIntensity === undefined)
+  ) {
+    throw new Error(
+      "Lamp Chain is single-run only and cannot use legacy plan, sync, winner, or Combined receipt fields"
+    );
+  }
   if (!combined && candidate.combinedCandidateReceipts !== undefined) {
     throw new Error("Combined candidate receipts are invalid on other executions");
   }
-  if (!combined && candidate.combinedPlanOperationIds !== undefined) {
+  if (!combined && !chained && candidate.combinedPlanOperationIds !== undefined) {
     throw new Error("Combined planner ids are invalid on other executions");
+  }
+  if (!chained && candidate.chainStageReceipts !== undefined) {
+    throw new Error("Chain stage receipts are invalid on other executions");
+  }
+  let chainStageCount: number | null = null;
+  if (chained) {
+    // The chain renderedPrompt is the serialized frozen prompt envelope; its
+    // stage list is the delivery contract every receipt must line up against.
+    try {
+      const envelope = JSON.parse(candidate.renderedPrompt) as {
+        lineage?: unknown;
+        stagePrompts?: unknown;
+      };
+      if (
+        envelope.lineage !== LAMP_CHAIN_STAGE_PROMPT_LINEAGE ||
+        !Array.isArray(envelope.stagePrompts) ||
+        envelope.stagePrompts.length < 2 ||
+        envelope.stagePrompts.length > 4
+      ) {
+        throw new Error("wrong shape");
+      }
+      chainStageCount = envelope.stagePrompts.length;
+    } catch {
+      throw new Error(
+        "A Chain execution must bind a valid serialized stage-prompt envelope"
+      );
+    }
+    const receipts = candidate.chainStageReceipts ?? [];
+    if (!Array.isArray(receipts)) {
+      throw new Error("Chain stage receipts must be an array");
+    }
+    if (receipts.length > chainStageCount) {
+      throw new Error("Chain stage receipts exceed the bound stage count");
+    }
+    receipts.forEach((receipt, index) => {
+      if (!isLampChainStageReceipt(receipt)) {
+        throw new Error(`Chain stage receipt ${index + 1} is invalid`);
+      }
+      if (receipt.stage !== index + 1) {
+        throw new Error("Chain stage receipts must be contiguous from stage 1");
+      }
+      if (
+        receipt.recordedAt < candidate.startedAt ||
+        receipt.recordedAt > candidate.updatedAt
+      ) {
+        throw new Error(
+          "Chain stage receipt timestamps must fall inside the execution timeline"
+        );
+      }
+    });
   }
   if (
     candidate.candidateSyncVerdict !== undefined &&
@@ -323,6 +393,15 @@ export function assertRunExecution(execution: unknown): RunExecution {
       "A completed Combined execution requires explicit receipts for both candidates"
     );
   }
+  if (
+    candidate.status === "awaiting_review" &&
+    chained &&
+    (candidate.chainStageReceipts?.length ?? 0) !== chainStageCount
+  ) {
+    throw new Error(
+      "A delivered Chain execution requires a structural receipt for every stage"
+    );
+  }
 
   if (candidate.status === "queued" && candidate.phase !== "queued") {
     throw new Error("A queued execution must be in the queued phase");
@@ -341,7 +420,8 @@ export function assertRunExecution(execution: unknown): RunExecution {
   }
   if (
     candidate.status === "user_action_required" &&
-    (!isTwoPassExecutionId(candidate.executionId) ||
+    ((!isTwoPassExecutionId(candidate.executionId) &&
+      !isLampChainExecutionId(candidate.executionId)) ||
       candidate.phase === "queued" ||
       candidate.phase === "complete" ||
       !candidate.workflowRunId ||
@@ -364,7 +444,8 @@ export function assertNewRunExecution(execution: RunExecution): RunExecution {
     execution.phase !== "queued" ||
     execution.iteration !== 0 ||
     execution.candidateSyncVerdict !== undefined ||
-    execution.combinedCandidateReceipts !== undefined
+    execution.combinedCandidateReceipts !== undefined ||
+    (execution.chainStageReceipts?.length ?? 0) !== 0
   ) {
     throw new Error(
       "A new run execution must start queued at iteration 0 and revision 1"
@@ -477,6 +558,30 @@ export function assertRunExecutionTransition(
     nextReceipts === undefined
   ) {
     throw new Error("Combined candidate receipts cannot be removed");
+  }
+  const currentChainReceipts = current.chainStageReceipts ?? [];
+  const nextChainReceipts = candidate.chainStageReceipts ?? [];
+  if (nextChainReceipts.length < currentChainReceipts.length) {
+    throw new Error("Chain stage receipts cannot be removed");
+  }
+  currentChainReceipts.forEach((receipt, index) => {
+    if (
+      JSON.stringify(nextChainReceipts[index]) !== JSON.stringify(receipt)
+    ) {
+      throw new Error("Recorded chain stage receipts are immutable");
+    }
+  });
+  if (
+    nextChainReceipts.length > currentChainReceipts.length &&
+    (current.status !== "running" ||
+      candidate.status !== "running" ||
+      nextChainReceipts.length > candidate.iteration)
+  ) {
+    // A stage receipt may only be journaled while the chain is actively on or
+    // past that stage; settlement then requires the full contiguous set.
+    throw new Error(
+      "Chain stage receipts may only be appended on the active stage"
+    );
   }
   if (
     !approvalReplay &&

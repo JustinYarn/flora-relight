@@ -9,6 +9,7 @@ const PRIMARY_LINKS = [
   { href: "/", label: "Create" },
   { href: "/library", label: "Runs" },
   { href: "/batch", label: "Batches" },
+  { href: "/chain-sweep", label: "Chain sweep" },
   { href: "/grade", label: "Grade" },
 ] as const;
 

@@ -388,7 +388,8 @@ export type WorkflowMode =
   | "background"
   | "beautify"
   | "iris"
-  | "combined";
+  | "combined"
+  | "chain";
 
 export type NodeRunStatus =
   | "idle"
@@ -500,6 +501,12 @@ export interface RunExecution {
     initial?: import("./lamp-combined-candidate").LampCombinedCandidateQualificationReceipt;
     final?: import("./lamp-combined-candidate").LampCombinedCandidateQualificationReceipt;
   };
+  /**
+   * Lamp Chain only: append-only structural proof per completed stage
+   * (generation + canonical audio). Deliberately carries no evaluation or
+   * sync evidence — chain evals are detached and never gate delivery.
+   */
+  chainStageReceipts?: import("./lamp-chain-candidate").LampChainStageReceipt[];
   source: "single" | "batch";
   batchId?: string;
   status: RunExecutionStatus;
@@ -674,7 +681,9 @@ export interface SpendApproval {
     | "iris_plan"
     | "iris_two_pass"
     | "combined_plan"
-    | "combined_two_pass";
+    | "combined_two_pass"
+    | "chain_plan"
+    | "chain_sequence";
   batchId?: string;
   /** Canonical durable ingest identity and facts this approval was priced for. */
   runId: string;
@@ -686,7 +695,11 @@ export interface SpendApproval {
   maxUsd: number;
   /** Zero for planner-only approval; otherwise the generation-attempt ceiling. */
   maxIterations: number;
-  /** Exact Combined control set covered by this approval, when applicable. */
+  /**
+   * Exact Combined control set covered by this approval, when applicable.
+   * Chain approvals bind the same triple; stage order binds through the
+   * order-bearing chain plan hash on the execution record instead.
+   */
   combinedControls?: import("./lamp-combined").LampCombinedControls;
 }
 
@@ -740,6 +753,8 @@ export interface Run {
   relightIntensity?: number;
   /** Lamp Combined's run-bound controls, separate from relight intensity. */
   combinedControls?: import("./lamp-combined").LampCombinedControls;
+  /** Lamp Chain's run-bound controls: the Combined triple plus stage order. */
+  chainControls?: import("./lamp-chain").LampChainControls;
   createdAt: number;
   originalVideo: VideoAsset;
   status: RunStatus;
@@ -762,6 +777,8 @@ export interface Run {
   irisPlan?: import("./lamp-iris").LampIrisPlan;
   /** One aggregate draft/approval for the Combined product. */
   combinedPlan?: import("./lamp-combined").LampCombinedPlan;
+  /** One order-bearing aggregate draft/approval for the Chain product. */
+  chainPlan?: import("./lamp-chain").LampChainPlan;
   iterations: Iteration[];
   /** Legacy best-of tracking. Lamp leaves this unset because v2 is always Final. */
   bestIterationIndex?: number;

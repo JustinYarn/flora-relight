@@ -42,6 +42,11 @@ import {
 import { lampCombinedCandidateReceiptMatches } from "@/lib/lamp-combined-candidate";
 import { parseLampCombinedEvaluationArtifact } from "@/lib/lamp-combined-evaluation";
 import { lampCombinedEvaluationOperationId } from "@/lib/lamp-combined-operations";
+import {
+  hashLampChainPlan,
+  parseLampChainPlan,
+} from "@/lib/lamp-chain";
+import { parseLampChainPromptEnvelope } from "@/lib/prompts/lamp-chain";
 import { compileLampCombinedFinalPrompt } from "@/lib/prompts/lamp-combined";
 import {
   validateLampCombinedExecutionBinding,
@@ -62,6 +67,7 @@ import {
   hasReusableLampIrisApproval,
   hasReusableLampApproval,
   hasReusableLampCombinedApproval,
+  hasReusableLampChainApproval,
 } from "@/lib/server/spend-approval";
 import { videoGenerationOperationId } from "@/lib/server/videogen-operation";
 import {
@@ -140,6 +146,12 @@ export async function repairCompletedRunExecution(
     }
 
     const workflowMode = workflowModeFromExecutionId(execution.executionId);
+    if (workflowMode === "chain") {
+      // Chain settlement repair is owned by the durable workflow's own
+      // failure path (it re-settles from stage receipts). The coordinator
+      // never reconstructs a chain settlement.
+      return execution;
+    }
     const twoPass = workflowMode !== "flora";
     const targetIteration = twoPass ? 2 : 1;
     const operation = run.providerOperations?.find(
@@ -504,7 +516,8 @@ export async function enqueueRunExecution(
   if (!run) throw new Error("Run not found.");
   const workflowMode = workflowModeFromExecutionId(input.executionId);
   const lamp = workflowMode === "lamp";
-  const relightBound = lamp || workflowMode === "combined";
+  const relightBound =
+    lamp || workflowMode === "combined" || workflowMode === "chain";
   if (
     workflowMode === "combined" &&
     (input.executionId !== `lamp-combined:${input.runId}` ||
@@ -512,6 +525,14 @@ export async function enqueueRunExecution(
       input.batchId !== undefined)
   ) {
     throw new Error("Lamp Combined execution is single-run only.");
+  }
+  if (
+    workflowMode === "chain" &&
+    (input.executionId !== `lamp-chain:${input.runId}` ||
+      input.source !== "single" ||
+      input.batchId !== undefined)
+  ) {
+    throw new Error("Lamp Chain execution is single-run only.");
   }
   const relightIntensity = relightBound
     ? normalizeRelightIntensity(
@@ -539,6 +560,7 @@ export async function enqueueRunExecution(
     workflowMode === "beautify" ||
     workflowMode === "iris";
   const combinedMode = workflowMode === "combined";
+  const chainMode = workflowMode === "chain";
   if (
     planMode &&
     (!boundRenderedPrompt ||
@@ -550,13 +572,15 @@ export async function enqueueRunExecution(
     );
   }
   if (
-    combinedMode &&
+    (combinedMode || chainMode) &&
     (!boundRenderedPrompt ||
       !boundCombinedPlanOperationIds ||
       !boundApprovedPlanHash)
   ) {
     throw new Error(
-      "Lamp Combined execution requires the compiled prompt and exact aggregate planner binding."
+      combinedMode
+        ? "Lamp Combined execution requires the compiled prompt and exact aggregate planner binding."
+        : "Lamp Chain execution requires the frozen stage-prompt envelope and exact aggregate planner binding."
     );
   }
   if (workflowMode === "background") {
@@ -612,6 +636,39 @@ export async function enqueueRunExecution(
       approvedPlanHash: boundApprovedPlanHash,
       combinedPlanOperationIds: boundCombinedPlanOperationIds,
       planOperations: operations,
+      relightIntensity,
+    });
+  } else if (chainMode) {
+    if (!run.chainPlan) {
+      throw new Error("Lamp Chain execution requires the approved chain plan.");
+    }
+    const plan = parseLampChainPlan(run.chainPlan);
+    if (plan.aggregate.approval.status !== "approved") {
+      throw new Error("Lamp Chain execution requires the human-approved plan.");
+    }
+    if ((await hashLampChainPlan(plan)) !== boundApprovedPlanHash) {
+      throw new Error(
+        "Lamp Chain approved plan hash does not match the bound execution."
+      );
+    }
+    for (const operationId of boundCombinedPlanOperationIds!) {
+      const operation = await storage.getPaidOperation(
+        input.runId,
+        operationId
+      );
+      if (
+        !operation ||
+        operation.status !== "completed" ||
+        operation.kind !== "plan"
+      ) {
+        throw new Error(
+          `Lamp Chain planner journal ${operationId} is missing or incomplete.`
+        );
+      }
+    }
+    // Byte-validates every frozen stage prompt against the approved plan.
+    parseLampChainPromptEnvelope(JSON.parse(boundRenderedPrompt!), {
+      plan,
       relightIntensity,
     });
   }
@@ -677,6 +734,12 @@ export async function enqueueRunExecution(
           )) ||
         (workflowMode === "combined" &&
           !hasReusableLampCombinedApproval(
+            run,
+            input.source,
+            input.batchId
+          )) ||
+        (workflowMode === "chain" &&
+          !hasReusableLampChainApproval(
             run,
             input.source,
             input.batchId
@@ -773,6 +836,12 @@ export async function enqueueRunExecution(
                   input.source,
                   input.batchId
                 )
+              : workflowMode === "chain"
+                ? hasReusableLampChainApproval(
+                    run,
+                    input.source,
+                    input.batchId
+                  )
             : hasReusableFirstCutApproval(
               run,
               input.source === "batch" ? "batch" : "single",

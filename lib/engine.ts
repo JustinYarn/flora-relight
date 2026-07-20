@@ -22,6 +22,20 @@ import {
 } from "@/lib/mock/scenario";
 import { workflowForMode } from "@/lib/workflow-def";
 import {
+  assertLampChainPlanBinding,
+  lampChainEnabledStages,
+  parseLampChainPlan,
+  type LampChainPlan,
+  type LampChainStage,
+} from "@/lib/lamp-chain";
+import {
+  buildLampChainEvaluationArtifact,
+  lampChainEvalDefinitions,
+  LAMP_CHAIN_VISUAL_EVAL_IDS,
+  type LampChainEvaluationArtifact,
+} from "@/lib/lamp-chain-evaluation";
+import { compileLampChainStagePrompts } from "@/lib/prompts/lamp-chain";
+import {
   estimateLampBackgroundPlan,
   estimateLampBackgroundTwoPass,
   estimateLampCombinedPlan,
@@ -31,6 +45,8 @@ import {
   formatUsd,
   judgeCallUsd,
   PRICE_TABLE,
+  estimateLampChainPlan,
+  estimateLampChainSequence,
 } from "@/lib/cost";
 import {
   getLampEvalDef,
@@ -2032,6 +2048,346 @@ async function runLampCombinedMockWorkflow(input: {
   );
 }
 
+
+const CHAIN_STAGE_FILTERS: Record<LampChainStage, string> = {
+  background: "saturate(0.97) contrast(1.015)",
+  lamp: "brightness(1.08) contrast(1.03)",
+  beautify: "brightness(1.025) saturate(1.05)",
+  iris: "contrast(1.02)",
+};
+
+const CHAIN_STAGE_VERBS: Record<LampChainStage, string> = {
+  background: "tidying the room",
+  lamp: "relighting the scene",
+  beautify: "camera-ready touch-up",
+  iris: "eye-contact correction",
+};
+
+function lampChainPromptForRun(
+  rendered: string,
+  stage: number,
+  relightIntensity: number
+): MegaPrompt {
+  const presentation = initialMegaPrompt("lamp", relightIntensity);
+  return {
+    ...presentation,
+    version: stage,
+    corrections: [],
+    rendered,
+  };
+}
+
+function lampChainArtifactResultsForRun(
+  artifact: LampChainEvaluationArtifact
+): EvalResult[] {
+  return artifact.evalResults.map((result) => {
+    const violations: Violation[] = result.violations.map((violation) => ({
+      aspect: violation.aspect,
+      severity: violation.severity,
+      description: violation.description,
+      ...(violation.frameTimestampSec !== undefined
+        ? { frameTimestampSec: violation.frameTimestampSec }
+        : {}),
+      correction:
+        "Detached measurement only — the chain never runs a correction pass.",
+    }));
+    return {
+      evalId: result.evalId,
+      iteration: result.stage,
+      verdicts:
+        result.evalId === "audio-integrity"
+          ? []
+          : [
+              {
+                judge: "gemini" as const,
+                score: result.score,
+                verdict: result.verdict,
+                violations,
+                reasoning: result.reasoning,
+              },
+            ],
+      score: result.score,
+      confidence: result.confidence,
+      verdict: result.verdict,
+      violations,
+      ...(result.deltaFromPrevious !== undefined
+        ? { deltaFromPrevious: result.deltaFromPrevious }
+        : {}),
+    };
+  });
+}
+
+function lampChainCompositeForResults(
+  plan: LampChainPlan,
+  stage: number,
+  results: EvalResult[]
+): Iteration["composite"] {
+  const definitions = lampChainEvalDefinitions(plan, stage);
+  const byId = new Map(results.map((result) => [result.evalId, result]));
+  let weighted = 0;
+  let totalWeight = 0;
+  const hardGateFailures: string[] = [];
+  for (const definition of definitions) {
+    const result = byId.get(definition.id);
+    if (!result) continue;
+    weighted += result.score * definition.weight;
+    totalWeight += definition.weight;
+    if (definition.hardGate && result.verdict !== "pass") {
+      hardGateFailures.push(definition.id);
+    }
+  }
+  const score = round1(totalWeight > 0 ? weighted / totalWeight : 0);
+  return {
+    score,
+    hardGateFailures,
+    passed: score >= 75 && hardGateFailures.length === 0,
+  };
+}
+
+/**
+ * Deterministic-ish detached measurement for the demo: preservation rows lose
+ * a little ground with every chained re-render (the compounding-drift story),
+ * the concern executed at this stage lands its target, and pending concerns
+ * read as untouched source.
+ */
+async function mockLampChainStageEvaluation(
+  plan: LampChainPlan,
+  stage: number,
+  previousArtifact?: LampChainEvaluationArtifact
+): Promise<LampChainEvaluationArtifact> {
+  const definitions = lampChainEvalDefinitions(plan, stage);
+  const results = LAMP_CHAIN_VISUAL_EVAL_IDS.map((evalId) => {
+    const definition = definitions.find((entry) => entry.id === evalId)!;
+    const drift = (stage - 1) * 1.4;
+    let score: number;
+    if (definition.contract === "target") {
+      const executedNow =
+        plan.stageOrder[stage - 1] ===
+        (evalId === "lighting-target"
+          ? "lamp"
+          : evalId === "background-cleanliness"
+            ? "background"
+            : evalId === "beautify-target"
+              ? "beautify"
+              : "iris");
+      score = definition.passThreshold + (executedNow ? 6 : 4) - drift * 0.4;
+    } else {
+      // Preservation (including pending gates): starts high, drifts down the
+      // chain — identity-adjacent rows drift the fastest.
+      const fragile =
+        evalId === "identity" ||
+        evalId === "motion-lipsync" ||
+        evalId === "temporal-hallucination";
+      score =
+        definition.passThreshold + 7 - drift * (fragile ? 1.6 : 0.9);
+    }
+    return {
+      evalId,
+      score: Math.max(40, Math.min(99, Math.round(score * 10) / 10)),
+      confidence: 0.86,
+      violations: [],
+      reasoning:
+        "Simulated detached measurement for the provider-free chain demo.",
+    };
+  });
+  return buildLampChainEvaluationArtifact({
+    raw: { results },
+    plan,
+    stage,
+    audioVerified: true,
+    previousArtifact,
+    costUsd: 0,
+  });
+}
+
+/** Provider-free Chain rehearsal proving the deliver-first, evaluate-after shape. */
+async function runLampChainMockWorkflow(input: {
+  runId: string;
+  original: VideoAsset;
+  chainPlan: LampChainPlan;
+  chainControls: NonNullable<Run["chainControls"]>;
+  relightIntensity: number;
+  instant: boolean;
+  pace: (minMs?: number, maxMs?: number) => Promise<void>;
+}): Promise<void> {
+  const {
+    runId,
+    original,
+    chainPlan,
+    chainControls,
+    relightIntensity,
+    instant,
+    pace,
+  } = input;
+  const plan = parseLampChainPlan(chainPlan);
+  if (plan.aggregate.approval.status !== "approved") {
+    throw new Error(
+      "Lamp Chain mock execution requires one approved ordered plan."
+    );
+  }
+  assertLampChainPlanBinding(plan, {
+    runId,
+    controls: chainControls,
+    relightIntensity,
+  });
+
+  const providers = getProviders("mock", { instant });
+  const planningEstimate = estimateLampChainPlan(chainControls);
+  const sequenceEstimate = estimateLampChainSequence(
+    chainControls,
+    original.durationSec
+  );
+  const estimate = {
+    totalUsd: planningEstimate.totalUsd + sequenceEstimate.totalUsd,
+    items: [...planningEstimate.items, ...sequenceEstimate.items],
+  };
+  const stagePrompts = compileLampChainStagePrompts(plan, relightIntensity);
+  const stageCount = stagePrompts.length;
+  const encode = (iteration: number) =>
+    encodeScenarioIteration(original.id, iteration);
+
+  mutateRun(runId, (run) => {
+    run.live = false;
+    run.chainControls = chainControls;
+    run.chainPlan = plan;
+    run.iterations = [];
+    run.cost = {
+      estimatedUsd: estimate.totalUsd,
+      actualUsd: 0,
+      items: estimate.items.map((item) => ({
+        label: item.label,
+        usd: item.usd,
+        estimated: true,
+      })),
+    };
+    delete run.bestIterationIndex;
+    delete run.finalVideo;
+    delete run.fallback;
+  });
+
+  setNode(runId, "plan", "running");
+  await pace(80, 180);
+  setNode(
+    runId,
+    "plan",
+    "succeeded",
+    `one ordered plan locked — ${plan.stageOrder.join(" → ")}`
+  );
+  for (let slot = stageCount + 1; slot <= 4; slot += 1) {
+    setNode(runId, `stage-${slot}`, "skipped", "not enabled by controls");
+  }
+
+  let accumulatedFilter = "";
+  let lastVideo: VideoAsset | undefined;
+  for (const stagePrompt of stagePrompts) {
+    const stage = stagePrompt.stage;
+    const stageKind = stagePrompt.stageKind;
+    setNode(
+      runId,
+      `stage-${stage}`,
+      "running",
+      stage === 1
+        ? `${CHAIN_STAGE_VERBS[stageKind]} — conditioning on the source`
+        : `${CHAIN_STAGE_VERBS[stageKind]} — conditioning on stage ${stage - 1}'s cut`
+    );
+    const presentationPrompt = lampChainPromptForRun(
+      stagePrompt.rendered,
+      stage,
+      relightIntensity
+    );
+    mutateRun(runId, (run) => {
+      run.iterations.push({
+        index: stage,
+        megaPrompt: presentationPrompt,
+        beforeFrames: [],
+        afterFrames: [],
+        evalResults: [],
+        status: "running",
+      });
+    });
+    const generated = await providers.videoGen.generate({
+      originalVideo: original,
+      megaPrompt: presentationPrompt,
+      seed: 133742,
+      iteration: encode(stage),
+    });
+    accumulatedFilter = [accumulatedFilter, CHAIN_STAGE_FILTERS[stageKind]]
+      .filter(Boolean)
+      .join(" ");
+    const stageVideo: VideoAsset = {
+      ...generated.video,
+      url: original.url,
+      hasAudio: original.hasAudio,
+      label: `Lamp Chain stage ${stage}/${stageCount} — ${stageKind} (simulated)`,
+      simulatedFilter: accumulatedFilter,
+    };
+    lastVideo = stageVideo;
+    patchIteration(runId, stage, (candidate) => {
+      candidate.generatedVideo = stageVideo;
+      candidate.status = "ungraded";
+    });
+    setNode(
+      runId,
+      `stage-${stage}`,
+      "succeeded",
+      "structural proof journaled (generation + canonical audio)"
+    );
+  }
+
+  // DELIVERY FIRST. The report card has not run yet, on purpose.
+  setNode(runId, "deliver", "running");
+  await pace(60, 140);
+  mutateRun(runId, (run) => {
+    run.status = "awaiting-review";
+    if (lastVideo) run.finalVideo = lastVideo;
+  });
+  setNode(
+    runId,
+    "deliver",
+    "succeeded",
+    "delivered on structural proof — before any evaluation"
+  );
+  log(
+    runId,
+    "info",
+    `Lamp Chain demo delivered stage ${stageCount}'s cut immediately; the detached report card is still measuring. Actual provider spend: $0.00.`,
+    "deliver"
+  );
+
+  setNode(runId, "report", "running", "detached measurement per stage");
+  let previousArtifact: LampChainEvaluationArtifact | undefined;
+  for (const stagePrompt of stagePrompts) {
+    await pace(160, 320);
+    const artifact = await mockLampChainStageEvaluation(
+      plan,
+      stagePrompt.stage,
+      previousArtifact
+    );
+    previousArtifact = artifact;
+    const results = lampChainArtifactResultsForRun(artifact);
+    patchIteration(runId, stagePrompt.stage, (candidate) => {
+      candidate.evalResults = results;
+      candidate.composite = lampChainCompositeForResults(
+        plan,
+        stagePrompt.stage,
+        results
+      );
+    });
+  }
+  setNode(
+    runId,
+    "report",
+    "succeeded",
+    "report card attached after delivery"
+  );
+  log(
+    runId,
+    "info",
+    "Lamp Chain demo complete: delivery never waited on measurement; per-stage drift trajectory is on each stage's evaluation row.",
+    "report"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The engine
 // ---------------------------------------------------------------------------
@@ -2059,6 +2415,33 @@ export async function runWorkflow(
     throw new Error(
       "Live browser execution is disabled. Durable server Workflows own all provider dispatch."
     );
+  }
+  if (workflowMode === "chain") {
+    try {
+      if (!run0.chainPlan || !run0.chainControls) {
+        throw new Error(
+          "Lamp Chain mock execution cannot start without its ordered plan and bound controls."
+        );
+      }
+      await runLampChainMockWorkflow({
+        runId,
+        original,
+        chainPlan: run0.chainPlan,
+        chainControls: run0.chainControls,
+        relightIntensity,
+        instant,
+        pace,
+      });
+    } catch (error) {
+      log(runId, "error", `Lamp Chain demo error: ${errText(error)}`);
+      mutateRun(runId, (run) => {
+        run.status = "failed";
+        for (const state of Object.values(run.nodeStates)) {
+          if (state.status === "running") state.status = "failed";
+        }
+      });
+    }
+    return;
   }
   if (workflowMode === "combined") {
     try {

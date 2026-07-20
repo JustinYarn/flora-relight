@@ -1,5 +1,22 @@
 import { getWorkflowMetadata, sleep } from "workflow";
 import {
+  hashLampChainPlan,
+  parseLampChainPlan,
+  type LampChainPlan,
+  type LampChainStage,
+} from "@/lib/lamp-chain";
+import {
+  parseLampChainPromptEnvelope,
+  type LampChainPromptEnvelope,
+} from "@/lib/prompts/lamp-chain";
+import {
+  buildLampChainStageReceipt,
+  lampChainStageReceiptMatches,
+} from "@/lib/lamp-chain-candidate";
+import type { LampChainEvaluationArtifact } from "@/lib/lamp-chain-evaluation";
+import { prepareLampChainStageStart } from "@/lib/server/lamp-chain-source";
+import { runLampChainStageEvaluation } from "@/lib/server/lamp-chain-evaluator";
+import {
   compileLampFinalPrompt,
   isLampEvaluationArtifact,
   lampEvaluationOperationId,
@@ -112,6 +129,7 @@ import {
   hasReusableLampIrisApproval,
   hasReusableLampApproval,
   hasReusableLampCombinedApproval,
+  hasReusableLampChainApproval,
 } from "@/lib/server/spend-approval";
 import {
   markVideoGenerationWorkflowError,
@@ -180,6 +198,9 @@ export async function durableRelightRun(
   const workflowMode = workflowModeFromExecutionId(input.executionId);
   if (workflowMode === "combined") {
     return durableLampCombinedRun(input, workflowRunId);
+  }
+  if (workflowMode === "chain") {
+    return durableLampChainRun(input, workflowRunId);
   }
 
   try {
@@ -1065,7 +1086,7 @@ type GenerationCheckpoint =
 async function readGenerationCheckpoint(
   input: DurableRelightRunInput,
   workflowRunId: string,
-  iteration: 1 | 2,
+  iteration: number,
   renderedPrompt: string
 ): Promise<GenerationCheckpoint> {
   "use step";
@@ -1103,7 +1124,7 @@ readGenerationCheckpoint.maxRetries = 2;
 async function readGenerationCheckpointWithRecovery(
   input: DurableRelightRunInput,
   workflowRunId: string,
-  iteration: 1 | 2,
+  iteration: number,
   renderedPrompt: string
 ): Promise<GenerationCheckpoint> {
   let lastError: unknown;
@@ -1523,7 +1544,7 @@ prepareAttempt.maxRetries = 2;
 async function startAttempt(
   input: DurableRelightRunInput,
   workflowRunId: string,
-  iteration: 1 | 2,
+  iteration: number,
   renderedPrompt: string,
   preparedUploadUri: string
 ): Promise<ClaimAndStartVideoGenerationResult> {
@@ -1553,7 +1574,7 @@ startAttempt.maxRetries = 0;
 async function assertGenerationOwner(
   input: DurableRelightRunInput,
   workflowRunId: string,
-  iteration: 1 | 2
+  iteration: number
 ): Promise<void> {
   const current = await getStorage().getRunExecution(input.runId);
   if (
@@ -2753,7 +2774,7 @@ compileCombinedFinalPromptStep.maxRetries = 2;
 async function recordProviderWorkflowRunning(
   input: DurableRelightRunInput,
   workflowRunId: string,
-  iteration: 1 | 2
+  iteration: number
 ): Promise<void> {
   "use step";
   await setVideoGenerationWorkflowState(
@@ -2769,7 +2790,7 @@ recordProviderWorkflowRunning.maxRetries = 4;
 async function recordProviderWorkflowCompleted(
   input: DurableRelightRunInput,
   workflowRunId: string,
-  iteration: 1 | 2
+  iteration: number
 ): Promise<void> {
   "use step";
   await setVideoGenerationWorkflowState(
@@ -2799,7 +2820,7 @@ pollAttempt.maxRetries = 0;
 async function inspectAttemptAfterPollError(
   input: DurableRelightRunInput,
   workflowRunId: string,
-  iteration: 1 | 2,
+  iteration: number,
   renderedPrompt: string
 ): Promise<VideoGenerationPollErrorDisposition> {
   "use step";
@@ -2830,7 +2851,7 @@ inspectAttemptAfterPollError.maxRetries = 2;
 async function inspectAttemptAfterPollErrorWithRecovery(
   input: DurableRelightRunInput,
   workflowRunId: string,
-  iteration: 1 | 2,
+  iteration: number,
   renderedPrompt: string
 ): Promise<VideoGenerationPollErrorDisposition> {
   let lastError: unknown;
@@ -2856,7 +2877,7 @@ async function inspectAttemptAfterPollErrorWithRecovery(
 
 async function readCompletedGeneration(
   runId: string,
-  iteration: 1 | 2
+  iteration: number
 ): Promise<VideoGenerationOperationResult> {
   "use step";
   const run = await getStorage().getRun(runId);
@@ -2873,7 +2894,7 @@ readCompletedGeneration.maxRetries = 2;
 
 async function readCompletedGenerationWithRecovery(
   runId: string,
-  iteration: 1 | 2
+  iteration: number
 ): Promise<VideoGenerationOperationResult> {
   let lastError: unknown;
   for (let attempt = 0; attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS; attempt += 1) {
@@ -3514,7 +3535,7 @@ settleIrisExecution.maxRetries = 4;
 async function settleExecutionRecord(
   execution: RunExecution,
   workflowRunId: string,
-  iteration: 1 | 2,
+  iteration: number,
   executionId: string,
   deliveredIteration?: 1 | 2
 ): Promise<void> {
@@ -3974,3 +3995,830 @@ async function recordExecutionFailure(
 }
 
 recordExecutionFailure.maxRetries = 4;
+
+// ---------------------------------------------------------------------------
+// Lamp Chain — Combined Version 2.
+//
+// Sequential single-pass stages: stage N's generation conditions on stage
+// N-1's audio-remuxed delivered cut (stage 1 on the canonical original). The
+// regenerate-from-original law is deliberately suspended here — that is the
+// experiment — while frozen prompts, exact paid journals, and the original-
+// audio remux/hash law hold for every stage.
+//
+// Delivery settles on structural proof alone (every stage generated, audio
+// verified). All evaluation — judge calls, SyncNet, luma, gaze — runs AFTER
+// settlement as detached measurement journals that can never hold, repair,
+// or un-deliver the artifact. A detached-evaluation failure surfaces as a
+// missing/reconcile-marked judge journal on the run, nothing more.
+// ---------------------------------------------------------------------------
+
+interface BoundChainPlan {
+  plan: LampChainPlan;
+  envelope: LampChainPromptEnvelope;
+}
+
+async function durableLampChainRun(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<DurableRelightRunResult> {
+  try {
+    const bound = await readBoundChainPlan(input, workflowRunId);
+    const stageCount = bound.envelope.stagePrompts.length;
+    let lastResult: VideoGenerationOperationResult | undefined;
+    for (let stage = 1; stage <= stageCount; stage += 1) {
+      const stagePrompt = bound.envelope.stagePrompts[stage - 1]!;
+      lastResult = await runChainGenerationAttempt(
+        input,
+        workflowRunId,
+        stage,
+        stagePrompt.rendered
+      );
+      await appendChainStageReceiptStep(
+        input,
+        workflowRunId,
+        stage,
+        stagePrompt.stageKind
+      );
+    }
+    await settleChainExecution(input, workflowRunId);
+    // Delivered. Everything after this line is detached measurement.
+    await runChainDetachedEvaluations(input, workflowRunId, stageCount);
+    return {
+      runId: input.runId,
+      executionId: input.executionId,
+      status: "awaiting_review",
+      videoUrl: lastResult?.videoUrl,
+      audioVerified: lastResult?.audioVerified,
+    };
+  } catch (error) {
+    const safeError =
+      error instanceof Error
+        ? error.message
+        : "Durable Lamp Chain execution failed.";
+    const failure = await recordChainExecutionFailure(
+      input,
+      workflowRunId,
+      safeError
+    );
+    if (failure === "chain_completed") {
+      // Every stage's structural proof exists; only settlement was lost.
+      await settleChainExecution(input, workflowRunId);
+      const bound = await readBoundChainPlan(input, workflowRunId);
+      await runChainDetachedEvaluations(
+        input,
+        workflowRunId,
+        bound.envelope.stagePrompts.length
+      );
+      return {
+        runId: input.runId,
+        executionId: input.executionId,
+        status: "awaiting_review",
+      };
+    }
+    if (failure === "awaiting_review") {
+      // Already delivered (for example a crash between settlement and the
+      // detached tail). Finish the measurement pass best-effort and return.
+      try {
+        const bound = await readBoundChainPlan(input, workflowRunId);
+        await runChainDetachedEvaluations(
+          input,
+          workflowRunId,
+          bound.envelope.stagePrompts.length
+        );
+      } catch {
+        // The delivered artifact is untouchable; measurement gaps are visible
+        // on the run's evaluation journals.
+      }
+      return {
+        runId: input.runId,
+        executionId: input.executionId,
+        status: "awaiting_review",
+      };
+    }
+    throw new Error(
+      failure === "user_action_required"
+        ? "Lamp Chain paused until its exact spend approval is renewed."
+        : failure === "reconcile_required"
+          ? "Lamp Chain requires provider reconciliation."
+          : "Lamp Chain stopped before every stage held a structural delivery proof."
+    );
+  }
+}
+
+async function readBoundChainPlan(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<BoundChainPlan> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    execution.executionId !== `lamp-chain:${input.runId}`
+  ) {
+    throw new Error(
+      "Durable run execution no longer owns the approved Lamp Chain plan."
+    );
+  }
+  if (!run.chainPlan) {
+    throw new Error("Lamp Chain lost its approved plan before execution.");
+  }
+  const plan = parseLampChainPlan(run.chainPlan);
+  if (plan.aggregate.approval.status !== "approved") {
+    throw new Error("Lamp Chain execution requires the human-approved plan.");
+  }
+  const planHash = await hashLampChainPlan(plan);
+  if (execution.approvedPlanHash !== planHash) {
+    throw new Error(
+      "Lamp Chain approved plan hash no longer matches the bound execution."
+    );
+  }
+  for (const operationId of execution.combinedPlanOperationIds ?? []) {
+    const operation = await storage.getPaidOperation(input.runId, operationId);
+    if (
+      !operation ||
+      operation.status !== "completed" ||
+      operation.kind !== "plan"
+    ) {
+      throw new Error(
+        `Lamp Chain planner journal ${operationId} is missing or incomplete.`
+      );
+    }
+  }
+  // Byte-validates every frozen stage prompt against a fresh compile of the
+  // exact approved plan (persisted-format law, read side).
+  const envelope = parseLampChainPromptEnvelope(
+    JSON.parse(execution.renderedPrompt),
+    { plan, relightIntensity: execution.relightIntensity }
+  );
+  return { plan, envelope };
+}
+
+readBoundChainPlan.maxRetries = 2;
+
+async function enterChainGenerationPhase(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  stage: number
+): Promise<boolean> {
+  "use step";
+  const storage = getStorage();
+  const current = await storage.getRunExecution(input.runId);
+  if (
+    !current ||
+    current.executionId !== input.executionId ||
+    current.workflowRunId !== workflowRunId ||
+    current.status !== "running"
+  ) {
+    return false;
+  }
+  if (current.iteration === stage && current.phase === "video_generation") {
+    return true;
+  }
+  // No evaluating phase between chain stages: stage k follows stage k-1's
+  // video_generation directly. Stage 1 follows binding's preparing phase.
+  const validPrior =
+    stage === 1
+      ? current.iteration === 0 && current.phase === "preparing"
+      : current.iteration === stage - 1 &&
+        current.phase === "video_generation";
+  if (!validPrior) return false;
+  const candidate: RunExecution = {
+    ...current,
+    iteration: stage,
+    phase: "video_generation",
+    revision: current.revision + 1,
+    updatedAt: Math.max(Date.now(), current.updatedAt),
+  };
+  const advanced = await storage.advanceRunExecution(candidate, current.revision);
+  return Boolean(
+    advanced.execution?.workflowRunId === workflowRunId &&
+      advanced.execution.status === "running" &&
+      advanced.execution.iteration === stage &&
+      advanced.execution.phase === "video_generation"
+  );
+}
+
+enterChainGenerationPhase.maxRetries = 2;
+
+async function chainGenerationPhaseDisposition(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  stage: number
+): Promise<PhaseRecoveryDisposition> {
+  "use step";
+  const current = await getStorage().getRunExecution(input.runId);
+  if (
+    !current ||
+    current.executionId !== input.executionId ||
+    current.workflowRunId !== workflowRunId ||
+    current.status !== "running"
+  ) {
+    return "terminal";
+  }
+  if (current.iteration === stage && current.phase === "video_generation") {
+    return "entered";
+  }
+  const validPrior =
+    stage === 1
+      ? current.iteration === 0 && current.phase === "preparing"
+      : current.iteration === stage - 1 &&
+        current.phase === "video_generation";
+  return validPrior ? "retryable" : "terminal";
+}
+
+chainGenerationPhaseDisposition.maxRetries = 2;
+
+async function enterChainGenerationPhaseWithRecovery(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  stage: number
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS; attempt += 1) {
+    try {
+      if (await enterChainGenerationPhase(input, workflowRunId, stage)) return;
+    } catch (error) {
+      lastError = error;
+    }
+    let disposition: PhaseRecoveryDisposition;
+    try {
+      disposition = await chainGenerationPhaseDisposition(
+        input,
+        workflowRunId,
+        stage
+      );
+    } catch (error) {
+      lastError = error;
+      await sleep("5m");
+      continue;
+    }
+    if (disposition === "entered") return;
+    if (disposition === "terminal") {
+      throw (lastError instanceof Error
+        ? lastError
+        : new Error("Durable run execution no longer owns chain generation."));
+    }
+    await sleep("5m");
+  }
+  throw new Error(
+    `Chain stage ${stage} could not cross its retry-safe phase checkpoint within seven days.`
+  );
+}
+
+async function prepareChainAttempt(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  stage: number
+): Promise<string> {
+  "use step";
+  await assertGenerationOwner(input, workflowRunId, stage);
+  const [run, execution] = await Promise.all([
+    getStorage().getRun(input.runId),
+    getStorage().getRunExecution(input.runId),
+  ]);
+  if (!run || !execution || execution.executionId !== input.executionId) {
+    throw new Error("Run not found during Lamp Chain preparation.");
+  }
+  if (!run.chainPlan) {
+    throw new Error("Lamp Chain lost its approved plan before preparation.");
+  }
+  const plan = parseLampChainPlan(run.chainPlan);
+  if (
+    plan.aggregate.approval.status !== "approved" ||
+    execution.approvedPlanHash !== (await hashLampChainPlan(plan))
+  ) {
+    throw new Error(
+      "Lamp Chain preparation no longer matches the approved plan."
+    );
+  }
+  try {
+    assertVideoGenerationAuthorized(run, stage);
+  } catch (error) {
+    // A valid exact chain grant means this is an orchestration invariant;
+    // only an absent/expired/mismatched grant is resumable by a human click.
+    if (
+      hasReusableLampChainApproval(run, execution.source, execution.batchId)
+    ) {
+      throw error;
+    }
+    throw new Error(
+      `${LAMP_USER_ACTION_REQUIRED_PREFIX}${error instanceof Error ? error.message : "Chain spend approval must be renewed."}`
+    );
+  }
+  return prepareLampChainStageStart(input.runId, stage);
+}
+
+prepareChainAttempt.maxRetries = 2;
+
+async function runChainGenerationAttempt(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  stage: number,
+  renderedPrompt: string
+): Promise<VideoGenerationOperationResult> {
+  await enterChainGenerationPhaseWithRecovery(input, workflowRunId, stage);
+  let checkpoint = await readGenerationCheckpointWithRecovery(
+    input,
+    workflowRunId,
+    stage,
+    renderedPrompt
+  );
+  for (
+    let attempt = 0;
+    checkpoint.state === "unclaimed" && attempt < MAX_RETRY_SAFE_GAP_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      const preparedUploadUri = await prepareChainAttempt(
+        input,
+        workflowRunId,
+        stage
+      );
+      const started = await startAttempt(
+        input,
+        workflowRunId,
+        stage,
+        renderedPrompt,
+        preparedUploadUri
+      );
+      checkpoint = {
+        state: "started",
+        interactionId: started.interactionId,
+      };
+    } catch (error) {
+      if (error instanceof Error && isLampUserActionRequiredError(error)) {
+        throw error;
+      }
+      checkpoint = await readGenerationCheckpointWithRecovery(
+        input,
+        workflowRunId,
+        stage,
+        renderedPrompt
+      );
+      if (checkpoint.state === "ambiguous") throw error;
+      if (checkpoint.state === "unclaimed") await sleep("5m");
+    }
+  }
+  if (checkpoint.state === "completed") {
+    try {
+      await recordProviderWorkflowCompleted(input, workflowRunId, stage);
+    } catch {
+      // The completed artifact journal is authoritative.
+    }
+    return checkpoint.result;
+  }
+  if (checkpoint.state !== "started") {
+    throw new Error(
+      checkpoint.state === "ambiguous"
+        ? `Chain stage ${stage} has an ambiguous durable start and requires reconciliation.`
+        : `Chain stage ${stage} could not pass its retry-safe preparation boundary within seven days.`
+    );
+  }
+  try {
+    await recordProviderWorkflowRunning(input, workflowRunId, stage);
+  } catch {
+    // The provider handle is already durable.
+  }
+
+  for (let poll = 0; poll < MAX_POLLS; poll += 1) {
+    await sleep("8s");
+    try {
+      const result = await pollAttempt({
+        runId: input.runId,
+        iteration: stage,
+        interactionId: checkpoint.interactionId,
+      });
+      if (result.done) {
+        try {
+          await recordProviderWorkflowCompleted(input, workflowRunId, stage);
+        } catch {
+          // Result commitment, not this marker, is the paid boundary.
+        }
+        return result;
+      }
+    } catch (pollError) {
+      const disposition = await inspectAttemptAfterPollErrorWithRecovery(
+        input,
+        workflowRunId,
+        stage,
+        renderedPrompt
+      );
+      if (disposition === "completed") {
+        const completed = await readCompletedGenerationWithRecovery(
+          input.runId,
+          stage
+        );
+        try {
+          await recordProviderWorkflowCompleted(input, workflowRunId, stage);
+        } catch {
+          // The committed provider result remains safe to continue from.
+        }
+        return completed;
+      }
+      if (disposition !== "retryable") throw pollError;
+    }
+  }
+
+  for (let poll = 0; poll < MAX_RECONCILIATION_POLLS; poll += 1) {
+    await sleep("5m");
+    try {
+      const result = await pollAttempt({
+        runId: input.runId,
+        iteration: stage,
+        interactionId: checkpoint.interactionId,
+      });
+      if (result.done) {
+        try {
+          await recordProviderWorkflowCompleted(input, workflowRunId, stage);
+        } catch {
+          // The committed provider result remains safe to continue from.
+        }
+        return result;
+      }
+    } catch (pollError) {
+      const disposition = await inspectAttemptAfterPollErrorWithRecovery(
+        input,
+        workflowRunId,
+        stage,
+        renderedPrompt
+      );
+      if (disposition === "completed") {
+        const completed = await readCompletedGenerationWithRecovery(
+          input.runId,
+          stage
+        );
+        try {
+          await recordProviderWorkflowCompleted(input, workflowRunId, stage);
+        } catch {
+          // The committed provider result remains safe to continue from.
+        }
+        return completed;
+      }
+      if (disposition !== "retryable") throw pollError;
+    }
+  }
+  throw new Error(
+    `Chain stage ${stage} remained unresolved after seven days of non-billed reconciliation.`
+  );
+}
+
+async function appendChainStageReceiptStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  stage: number,
+  stageKind: LampChainStage
+): Promise<void> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.status !== "running" ||
+    execution.iteration !== stage
+  ) {
+    throw new Error(
+      "Durable run execution no longer owns the chain stage receipt."
+    );
+  }
+  const existing = execution.chainStageReceipts ?? [];
+  const already = existing.find((receipt) => receipt.stage === stage);
+  if (already) {
+    if (already.stageKind !== stageKind) {
+      throw new Error(
+        `Chain stage ${stage} receipt binds a different stage kind.`
+      );
+    }
+    return;
+  }
+  if (existing.length !== stage - 1) {
+    throw new Error(
+      `Chain stage receipts must be contiguous; stage ${stage} cannot follow ${existing.length}.`
+    );
+  }
+  const generationOperation = run.providerOperations?.find(
+    (operation) => operation.id === videoGenerationOperationId(stage)
+  );
+  const receipt = buildLampChainStageReceipt({
+    stage,
+    stageKind,
+    generationOperation,
+    sourceHasAudio: run.originalVideo.hasAudio,
+    recordedAt: Date.now(),
+  });
+  const candidate: RunExecution = {
+    ...execution,
+    chainStageReceipts: [...existing, receipt],
+    revision: execution.revision + 1,
+    updatedAt: Math.max(Date.now(), execution.updatedAt),
+  };
+  const advanced = await storage.advanceRunExecution(candidate, execution.revision);
+  const durable = advanced.execution;
+  if (
+    !durable ||
+    durable.workflowRunId !== workflowRunId ||
+    (durable.chainStageReceipts?.length ?? 0) < stage
+  ) {
+    throw new Error("Chain stage receipt journaling lost durable ownership.");
+  }
+}
+
+appendChainStageReceiptStep.maxRetries = 4;
+
+async function settleChainExecution(
+  input: DurableRelightRunInput,
+  workflowRunId: string
+): Promise<void> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.executionId !== `lamp-chain:${input.runId}` ||
+    execution.renderedPrompt !== input.renderedPrompt ||
+    execution.inputHash !== runExecutionInputHash(input.renderedPrompt)
+  ) {
+    throw new Error("Lamp Chain settlement no longer owns its durable execution.");
+  }
+  if (execution.status === "awaiting_review" && execution.phase === "complete") {
+    return;
+  }
+  if (!run.chainPlan) {
+    throw new Error("Lamp Chain settlement lost the approved plan.");
+  }
+  const plan = parseLampChainPlan(run.chainPlan);
+  const envelope = parseLampChainPromptEnvelope(
+    JSON.parse(execution.renderedPrompt),
+    { plan, relightIntensity: execution.relightIntensity }
+  );
+  const stageCount = envelope.stagePrompts.length;
+  const receipts = execution.chainStageReceipts ?? [];
+  if (receipts.length !== stageCount) {
+    throw new Error(
+      "Lamp Chain settlement requires a structural receipt for every stage."
+    );
+  }
+  for (const stagePrompt of envelope.stagePrompts) {
+    const receipt = receipts[stagePrompt.stage - 1]!;
+    const generationOperation = run.providerOperations?.find(
+      (operation) =>
+        operation.id === videoGenerationOperationId(stagePrompt.stage)
+    );
+    if (
+      !generationOperation ||
+      !lampChainStageReceiptMatches({
+        receipt,
+        generationOperation,
+        expectedRenderedPrompt: stagePrompt.rendered,
+        stage: stagePrompt.stage,
+        stageKind: stagePrompt.stageKind,
+        sourceHasAudio: run.originalVideo.hasAudio,
+      })
+    ) {
+      throw new Error(
+        `Lamp Chain stage ${stagePrompt.stage} requires exact generation and audio proof.`
+      );
+    }
+  }
+  await settleExecutionRecord(
+    execution,
+    workflowRunId,
+    stageCount,
+    input.executionId
+  );
+  await setVideoGenerationWorkflowState(
+    input.runId,
+    stageCount,
+    workflowRunId,
+    "completed"
+  );
+}
+
+settleChainExecution.maxRetries = 4;
+
+async function chainStageEvaluationStep(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  stage: number,
+  previousArtifact: LampChainEvaluationArtifact | undefined
+): Promise<LampChainEvaluationArtifact> {
+  "use step";
+  const storage = getStorage();
+  const [execution, run] = await Promise.all([
+    storage.getRunExecution(input.runId),
+    storage.getRun(input.runId),
+  ]);
+  if (
+    !execution ||
+    !run ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId ||
+    execution.status !== "awaiting_review"
+  ) {
+    throw new Error(
+      "Detached chain evaluation runs only for the delivered execution it measures."
+    );
+  }
+  if (!run.chainPlan) {
+    throw new Error("Detached chain evaluation lost the approved plan.");
+  }
+  return runLampChainStageEvaluation({
+    runId: input.runId,
+    stage,
+    plan: parseLampChainPlan(run.chainPlan),
+    previousArtifact,
+  });
+}
+
+chainStageEvaluationStep.maxRetries = 2;
+
+/**
+ * The detached measurement tail. Per-stage failures are contained: the stage's
+ * judge journal (absent or reconcile-marked) is the durable record, the delta
+ * chain restarts at the next stage, and delivery is never revisited.
+ */
+async function runChainDetachedEvaluations(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  stageCount: number
+): Promise<void> {
+  let previous: LampChainEvaluationArtifact | undefined;
+  for (let stage = 1; stage <= stageCount; stage += 1) {
+    try {
+      previous = await chainStageEvaluationStep(
+        input,
+        workflowRunId,
+        stage,
+        previous
+      );
+    } catch {
+      previous = undefined;
+    }
+  }
+}
+
+type ChainFailureRecord =
+  | "chain_completed"
+  | "awaiting_review"
+  | "user_action_required"
+  | "failed"
+  | "reconcile_required"
+  | "not_owner";
+
+async function recordChainExecutionFailure(
+  input: DurableRelightRunInput,
+  workflowRunId: string,
+  error: string
+): Promise<ChainFailureRecord> {
+  "use step";
+  const storage = getStorage();
+  let execution = await storage.getRunExecution(input.runId);
+  if (
+    !execution ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId
+  ) {
+    return "not_owner";
+  }
+  if (execution.status === "awaiting_review") return "awaiting_review";
+  if (execution.status === "user_action_required") {
+    return "user_action_required";
+  }
+  if (execution.status === "failed") return "failed";
+  if (execution.status === "reconcile_required") return "reconcile_required";
+
+  if (error.startsWith(LAMP_USER_ACTION_REQUIRED_PREFIX)) {
+    const candidate: RunExecution = {
+      ...execution,
+      status: "user_action_required",
+      revision: execution.revision + 1,
+      updatedAt: Math.max(Date.now(), execution.updatedAt),
+      error: error.slice(0, 2_000),
+    };
+    const advanced = await storage.advanceRunExecution(
+      candidate,
+      execution.revision
+    );
+    const durable = advanced.execution;
+    if (
+      durable?.executionId === input.executionId &&
+      durable.workflowRunId === workflowRunId &&
+      durable.status === "user_action_required"
+    ) {
+      return "user_action_required";
+    }
+    if (durable?.status === "awaiting_review") return "awaiting_review";
+    if (durable?.status === "reconcile_required") return "reconcile_required";
+    if (durable?.status === "failed") return "failed";
+    return "not_owner";
+  }
+
+  let run = await storage.getRun(input.runId);
+  let currentGeneration = run?.providerOperations?.find(
+    (operation) =>
+      operation.id === videoGenerationOperationId(execution!.iteration)
+  );
+  if (
+    execution.phase === "video_generation" &&
+    (currentGeneration?.status === "in_progress" ||
+      currentGeneration?.status === "reconcile_required")
+  ) {
+    await markVideoGenerationWorkflowError(
+      input.runId,
+      execution.iteration,
+      error
+    );
+    run = await storage.getRun(input.runId);
+    currentGeneration = run?.providerOperations?.find(
+      (operation) =>
+        operation.id === videoGenerationOperationId(execution!.iteration)
+    );
+  }
+
+  // Structural completion: every stage already holds its receipt. Settlement
+  // (not this recorder) re-proves the receipts against the exact journals.
+  let stageCount = 0;
+  try {
+    const envelope = JSON.parse(execution.renderedPrompt) as {
+      stagePrompts?: unknown[];
+    };
+    stageCount = Array.isArray(envelope.stagePrompts)
+      ? envelope.stagePrompts.length
+      : 0;
+  } catch {
+    stageCount = 0;
+  }
+  if (
+    stageCount >= 2 &&
+    (execution.chainStageReceipts?.length ?? 0) === stageCount
+  ) {
+    return "chain_completed";
+  }
+
+  // Chain has no delivery-blocking evaluations; only the active generation
+  // journal can make the stop ambiguous.
+  const status = runExecutionFailureStatus({
+    evaluationAmbiguous: false,
+    generation: currentGeneration,
+  });
+  execution = await storage.getRunExecution(input.runId);
+  if (
+    !execution ||
+    execution.executionId !== input.executionId ||
+    execution.workflowRunId !== workflowRunId
+  ) {
+    return "not_owner";
+  }
+  if (execution.status === "awaiting_review") return "awaiting_review";
+  if (execution.status === "user_action_required") {
+    return "user_action_required";
+  }
+  if (execution.status === "failed") return "failed";
+  if (execution.status === "reconcile_required") return "reconcile_required";
+  const candidate: RunExecution = {
+    ...execution,
+    status,
+    revision: execution.revision + 1,
+    updatedAt: Math.max(Date.now(), execution.updatedAt),
+    error: error.slice(0, 2_000),
+  };
+  const advanced = await storage.advanceRunExecution(candidate, execution.revision);
+  const durable = advanced.execution;
+  if (!durable) return "not_owner";
+  if (
+    durable.executionId !== input.executionId ||
+    durable.workflowRunId !== workflowRunId
+  ) {
+    return "not_owner";
+  }
+  if (
+    durable.status === "awaiting_review" ||
+    durable.status === "user_action_required" ||
+    durable.status === "failed" ||
+    durable.status === "reconcile_required"
+  ) {
+    return durable.status;
+  }
+  throw new Error("Run execution changed while chain failure was recorded.");
+}
+
+recordChainExecutionFailure.maxRetries = 4;

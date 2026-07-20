@@ -4,6 +4,9 @@ import {
   estimateRun,
   lampBackgroundPlanReservationUsd,
   lampBackgroundTwoPassReservationUsd,
+  lampChainPlanReservationUsd,
+  lampChainSequenceReservationUsd,
+  lampChainStageCount,
   lampCombinedPlanReservationUsd,
   lampCombinedTwoPassReservationUsd,
   lampRunReservationUsd,
@@ -38,6 +41,11 @@ import {
   parseLampCombinedControls,
   type LampCombinedControls,
 } from "../lamp-combined.ts";
+import {
+  lampChainEvaluationOperationId,
+  lampChainPlanOperationIds,
+  LAMP_CHAIN_HOLISTIC_EVAL_ID,
+} from "../lamp-chain-operations.ts";
 import { lampEvaluationOperationId } from "../lamp-evaluation.ts";
 import { LIPSYNC_OPERATION_ID } from "../v2-sync.ts";
 import type {
@@ -87,6 +95,21 @@ export function lampCombinedTwoPassMaximumMicros(): number {
   return lampCombinedMaximumMicros();
 }
 
+export function lampChainPlanMaximumMicros(
+  controls: LampCombinedControls
+): number {
+  return usdToMicros(lampChainPlanReservationUsd(controls));
+}
+
+/** Chain worst case scales with the enabled stage count (2–4 gens + evals). */
+export function lampChainSequenceMaximumMicros(
+  controls: LampCombinedControls
+): number {
+  return usdToMicros(
+    lampChainSequenceReservationUsd(controls, FIRST_CUT_MAX_OUTPUT_SECONDS)
+  );
+}
+
 function approvalLifetimeMs(source: SpendApproval["source"]): number {
   return source === "batch"
     ? BATCH_APPROVAL_LIFETIME_MS
@@ -117,7 +140,10 @@ export function createSpendApproval(
     throw new Error("Single-run spend approval cannot carry a batch identity.");
   }
   const combinedScope =
-    scope === "combined_plan" || scope === "combined_two_pass";
+    scope === "combined_plan" ||
+    scope === "combined_two_pass" ||
+    scope === "chain_plan" ||
+    scope === "chain_sequence";
   if (combinedScope && combinedControls === undefined) {
     throw new Error("Lamp Combined spend approval requires exact controls.");
   }
@@ -131,7 +157,8 @@ export function createSpendApproval(
     scope === "background_plan" ||
     scope === "beautify_plan" ||
     scope === "iris_plan" ||
-    scope === "combined_plan"
+    scope === "combined_plan" ||
+    scope === "chain_plan"
       ? 0
       : scope === "first_cut"
         ? 1
@@ -141,7 +168,9 @@ export function createSpendApproval(
             scope === "iris_two_pass" ||
             scope === "combined_two_pass"
           ? 2
-          : FLORA_WORKFLOW.config.maxIterations;
+          : scope === "chain_sequence"
+            ? lampChainStageCount(canonicalCombinedControls!)
+            : FLORA_WORKFLOW.config.maxIterations;
   return {
     id: randomUUID(),
     source,
@@ -168,12 +197,20 @@ export function createSpendApproval(
               ? microsToUsd(
                   lampCombinedPlanMaximumMicros(canonicalCombinedControls!)
                 )
+            : scope === "chain_plan"
+              ? microsToUsd(
+                  lampChainPlanMaximumMicros(canonicalCombinedControls!)
+                )
             : scope === "background_two_pass" ||
                 scope === "beautify_two_pass" ||
                 scope === "iris_two_pass"
               ? microsToUsd(lampBackgroundMaximumMicros())
               : scope === "combined_two_pass"
                 ? microsToUsd(lampCombinedMaximumMicros())
+                : scope === "chain_sequence"
+                  ? microsToUsd(
+                      lampChainSequenceMaximumMicros(canonicalCombinedControls!)
+                    )
               : estimateRun(video.durationSec, maxIterations).totalUsd,
     maxIterations,
   };
@@ -181,14 +218,16 @@ export function createSpendApproval(
 
 function approvalIterationsAreValid(
   scope: SpendApproval["scope"],
-  maxIterations: number
+  maxIterations: number,
+  combinedControls?: LampCombinedControls
 ): boolean {
   if (!Number.isSafeInteger(maxIterations)) return false;
   if (
     scope === "background_plan" ||
     scope === "beautify_plan" ||
     scope === "iris_plan" ||
-    scope === "combined_plan"
+    scope === "combined_plan" ||
+    scope === "chain_plan"
   ) {
     return maxIterations === 0;
   }
@@ -202,6 +241,16 @@ function approvalIterationsAreValid(
   ) {
     return maxIterations === 2;
   }
+  if (scope === "chain_sequence") {
+    try {
+      return (
+        maxIterations ===
+        lampChainStageCount(parseLampCombinedControls(combinedControls))
+      );
+    } catch {
+      return false;
+    }
+  }
   return maxIterations >= 1 && maxIterations <= LEGACY_MAX_ITERATIONS;
 }
 
@@ -209,10 +258,31 @@ function approvalCombinedControlsAreValid(
   run: Run,
   approval: SpendApproval
 ): boolean {
+  const chainScope =
+    approval.scope === "chain_plan" || approval.scope === "chain_sequence";
   const combinedScope =
     approval.scope === "combined_plan" ||
     approval.scope === "combined_two_pass";
-  if (!combinedScope) return approval.combinedControls === undefined;
+  if (!combinedScope && !chainScope) {
+    return approval.combinedControls === undefined;
+  }
+  if (chainScope) {
+    // Chain binds the same triple; stage order is enforced through the
+    // order-bearing plan hash bound to the execution record, not here.
+    if (run.workflowMode !== "chain") return false;
+    try {
+      const approved = parseLampCombinedControls(approval.combinedControls);
+      const current = run.chainControls;
+      return (
+        current !== undefined &&
+        approved.beautifyLevel === current.beautifyLevel &&
+        approved.cleanlinessLevel === current.cleanlinessLevel &&
+        approved.eyeContact === current.eyeContact
+      );
+    } catch {
+      return false;
+    }
+  }
   if (run.workflowMode !== "combined") return false;
   try {
     const approved = parseLampCombinedControls(approval.combinedControls);
@@ -264,8 +334,14 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
       approval.scope !== "iris_plan" &&
       approval.scope !== "iris_two_pass" &&
       approval.scope !== "combined_plan" &&
-      approval.scope !== "combined_two_pass") ||
-    !approvalIterationsAreValid(approval.scope, approval.maxIterations) ||
+      approval.scope !== "combined_two_pass" &&
+      approval.scope !== "chain_plan" &&
+      approval.scope !== "chain_sequence") ||
+    !approvalIterationsAreValid(
+      approval.scope,
+      approval.maxIterations,
+      approval.combinedControls
+    ) ||
     !approvalCombinedControlsAreValid(run, approval)
   ) {
     throw new Error("Live spend approval is invalid.");
@@ -288,12 +364,24 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
                   parseLampCombinedControls(approval.combinedControls)
                 )
               )
+          : approval.scope === "chain_plan"
+            ? microsToUsd(
+                lampChainPlanMaximumMicros(
+                  parseLampCombinedControls(approval.combinedControls)
+                )
+              )
           : approval.scope === "background_two_pass" ||
               approval.scope === "beautify_two_pass" ||
               approval.scope === "iris_two_pass"
             ? microsToUsd(lampBackgroundMaximumMicros())
             : approval.scope === "combined_two_pass"
               ? microsToUsd(lampCombinedMaximumMicros())
+              : approval.scope === "chain_sequence"
+                ? microsToUsd(
+                    lampChainSequenceMaximumMicros(
+                      parseLampCombinedControls(approval.combinedControls)
+                    )
+                  )
             : estimateRun(
                 run.originalVideo.durationSec,
                 approval.maxIterations
@@ -311,12 +399,20 @@ function assertApprovalCoversRun(run: Run, now: number): SpendApproval {
             ? lampCombinedPlanMaximumMicros(
                 parseLampCombinedControls(approval.combinedControls)
               )
+          : approval.scope === "chain_plan"
+            ? lampChainPlanMaximumMicros(
+                parseLampCombinedControls(approval.combinedControls)
+              )
           : approval.scope === "background_two_pass" ||
               approval.scope === "beautify_two_pass" ||
               approval.scope === "iris_two_pass"
             ? lampBackgroundMaximumMicros()
             : approval.scope === "combined_two_pass"
               ? lampCombinedMaximumMicros()
+              : approval.scope === "chain_sequence"
+                ? lampChainSequenceMaximumMicros(
+                    parseLampCombinedControls(approval.combinedControls)
+                  )
             : null;
   if (
     approval.maxUsd + Number.EPSILON < authorizedWorstCase ||
@@ -547,6 +643,47 @@ export function hasReusableLampCombinedApproval(
 export const hasReusableLampCombinedTwoPassApproval =
   hasReusableLampCombinedApproval;
 
+/** Reuse only the exact enabled-planner grant bound to unchanged Chain controls. */
+export function hasReusableLampChainPlanApproval(
+  run: Run,
+  source: SpendApproval["source"] = "single",
+  batchId?: string,
+  now = Date.now()
+): boolean {
+  try {
+    const approval = assertApprovalCoversRun(run, now);
+    return (
+      approval.scope === "chain_plan" &&
+      approval.source === source &&
+      approval.batchId === batchId &&
+      approval.maxIterations === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Reuse only the exact chain-sequence grant; planning remains separate. */
+export function hasReusableLampChainApproval(
+  run: Run,
+  source: SpendApproval["source"] = "single",
+  batchId?: string,
+  now = Date.now()
+): boolean {
+  try {
+    const approval = assertApprovalCoversRun(run, now);
+    return (
+      approval.scope === "chain_sequence" &&
+      approval.source === source &&
+      approval.batchId === batchId &&
+      approval.maxIterations >= 2 &&
+      approval.maxIterations <= 4
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Authorize a new synchronous paid operation. Cache reads and reconciliation
  * never call this because they cannot incur new provider spend.
@@ -714,6 +851,39 @@ export function assertPaidOperationAuthorized(
     }
     return;
   }
+  if (approval.scope === "chain_plan") {
+    const allowedOperationIds = lampChainPlanOperationIds(
+      parseLampCombinedControls(approval.combinedControls)
+    );
+    const enabledPlanOperation =
+      kind === "plan" &&
+      iteration === undefined &&
+      evalId === undefined &&
+      operationId !== undefined &&
+      allowedOperationIds.includes(operationId);
+    if (!enabledPlanOperation) {
+      throw new Error(
+        "Lamp Chain planning authorizes exactly the enabled planner operations and no generation or evaluation spend."
+      );
+    }
+    return;
+  }
+  if (approval.scope === "chain_sequence") {
+    // One detached holistic evaluation per completed stage; never a repair.
+    const stageEvaluation =
+      kind === "judge" &&
+      Number.isSafeInteger(iteration) &&
+      (iteration as number) >= 1 &&
+      (iteration as number) <= approval.maxIterations &&
+      evalId === LAMP_CHAIN_HOLISTIC_EVAL_ID &&
+      operationId === lampChainEvaluationOperationId(iteration as number);
+    if (!stageEvaluation) {
+      throw new Error(
+        "Lamp Chain authorizes one detached holistic evaluation per completed stage and never a Lipsync repair; planning requires a separate approval."
+      );
+    }
+    return;
+  }
   if (kind === "plan") {
     throw new Error(
       "Legacy Flora approvals do not authorize plan-first workflows."
@@ -749,7 +919,8 @@ export function assertVideoGenerationAuthorized(
     approval.scope === "background_plan" ||
     approval.scope === "beautify_plan" ||
     approval.scope === "iris_plan" ||
-    approval.scope === "combined_plan"
+    approval.scope === "combined_plan" ||
+    approval.scope === "chain_plan"
   ) {
     throw new Error(
       "Plan-only approval authorizes zero video generation attempts."
@@ -776,6 +947,14 @@ export function assertVideoGenerationAuthorized(
     );
   }
   if (
+    approval.scope === "chain_sequence" &&
+    (iteration < 1 || iteration > approval.maxIterations)
+  ) {
+    throw new Error(
+      "Lamp Chain authorizes exactly one generation per enabled stage."
+    );
+  }
+  if (
     iteration < 1 ||
     iteration > approval.maxIterations ||
     iteration >
@@ -783,7 +962,9 @@ export function assertVideoGenerationAuthorized(
       approval.scope === "background_two_pass" ||
       approval.scope === "combined_two_pass"
         ? 2
-        : LEGACY_MAX_ITERATIONS)
+        : approval.scope === "chain_sequence"
+          ? approval.maxIterations
+          : LEGACY_MAX_ITERATIONS)
   ) {
     throw new Error("This generation attempt is outside the approved limit.");
   }

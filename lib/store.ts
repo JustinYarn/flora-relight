@@ -60,6 +60,13 @@ import {
   type LampCombinedControls,
 } from "@/lib/lamp-combined";
 import {
+  approveLampChainPlan,
+  assertLampChainPlanBinding,
+  hashLampChainPlan,
+  parseLampChainControls,
+  type LampChainControls,
+} from "@/lib/lamp-chain";
+import {
   isRecoverableBatchRun,
   isTerminalRun,
   summarizeBatchRecovery,
@@ -168,6 +175,7 @@ interface AppStore {
       workflowMode?: WorkflowMode;
       relightIntensity?: number;
       combinedControls?: LampCombinedControls;
+      chainControls?: LampChainControls;
       prepareOnly?: boolean;
     }
   ): Promise<string>;
@@ -196,6 +204,11 @@ interface AppStore {
   ): Promise<void>;
   /** Approve the one aggregate Combined plan and launch its fixed two-pass run. */
   approveCombinedPlan(
+    runId: string,
+    opts?: { approveLiveSpend?: boolean }
+  ): Promise<void>;
+  /** Approve the one ordered Chain plan and launch its sequential stages. */
+  approveChainPlan(
     runId: string,
     opts?: { approveLiveSpend?: boolean }
   ): Promise<void>;
@@ -806,6 +819,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       workflowMode?: WorkflowMode;
       relightIntensity?: number;
       combinedControls?: LampCombinedControls;
+      chainControls?: LampChainControls;
       prepareOnly?: boolean;
     }
   ) => {
@@ -830,6 +844,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         mock,
         relightIntensity,
         combinedControls: opts?.combinedControls,
+        chainControls: opts?.chainControls,
         prepareOnly: opts?.prepareOnly,
       }),
     });
@@ -967,6 +982,106 @@ export const useAppStore = create<AppStore>()((set, get) => ({
                   level: "info" as const,
                   message:
                     "Combined plan approved. Starting two separately source-rooted demo takes.",
+                },
+              ],
+            }
+          : item
+      ),
+    }));
+    void runWorkflow(runId);
+  },
+
+  approveChainPlan: async (runId, opts) => {
+    const run = get().runs.find((item) => item.id === runId);
+    if (!run || run.workflowMode !== "chain") {
+      throw new Error("Lamp Chain run not found.");
+    }
+    const plan = run.chainPlan;
+    if (!plan) {
+      throw new Error("This run does not have a Chain plan to approve.");
+    }
+    const controls = parseLampChainControls(
+      run.chainControls ?? {
+        ...plan.aggregate.controls,
+        stageOrder: plan.stageOrder,
+      }
+    );
+    const relightIntensity = normalizeRelightIntensity(run.relightIntensity);
+    assertLampChainPlanBinding(plan, {
+      runId,
+      controls,
+      relightIntensity,
+    });
+    const liveRun = run.live === true;
+    const resumingPausedLiveChain =
+      liveRun &&
+      plan.aggregate.approval.status === "approved" &&
+      (run.serverExecution?.status === "user_action_required" ||
+        run.serverExecution === undefined);
+    if (
+      plan.aggregate.approval.status === "approved" &&
+      !resumingPausedLiveChain
+    ) {
+      return;
+    }
+
+    if (liveRun) {
+      const planHash = await hashLampChainPlan(plan);
+      const response = await fetch("/api/chain-plan/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runId,
+          planHash,
+          controls,
+          relightIntensity,
+          approveLiveSpend: opts?.approveLiveSpend === true,
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { run?: Run; serverOwned?: boolean; error?: string }
+        | null;
+      if (!response.ok || !payload?.run) {
+        throw new Error(
+          payload?.error ?? `Chain-plan approval failed (${response.status}).`
+        );
+      }
+      if (payload.serverOwned !== true) {
+        throw new Error(
+          "The live server did not claim the approved Chain run, so browser execution was refused."
+        );
+      }
+      set((state) => ({
+        runs: state.runs.map((item) =>
+          item.id === runId ? payload.run! : item
+        ),
+      }));
+      return;
+    }
+
+    const approvedPlan = approveLampChainPlan(plan, Date.now());
+    set((state) => ({
+      runs: state.runs.map((item) =>
+        item.id === runId
+          ? {
+              ...item,
+              chainControls: controls,
+              chainPlan: approvedPlan,
+              nodeStates: {
+                ...item.nodeStates,
+                plan: {
+                  nodeId: "plan",
+                  status: "succeeded",
+                  detail: "one ordered chain plan approved",
+                },
+              },
+              log: [
+                ...item.log,
+                {
+                  at: Date.now(),
+                  nodeId: "plan",
+                  level: "info" as const,
+                  message: `Chain plan approved — ${approvedPlan.stageOrder.join(" → ")}. Delivery will not wait for the report card.`,
                 },
               ],
             }

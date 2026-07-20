@@ -24,6 +24,7 @@ import {
   parseLampCombinedControls,
   type LampCombinedControls,
 } from "./lamp-combined.ts";
+import { lampChainEnabledStages } from "./lamp-chain.ts";
 import type {
   GeminiProUsageSnapshot,
   JudgeId,
@@ -420,6 +421,37 @@ export function lampCombinedTwoPassReservationUsd(
   return lampBackgroundTwoPassReservationUsd(durationSec);
 }
 
+/**
+ * Lamp Chain — Combined V2. One single-pass generation per enabled stage
+ * (2–4), then one detached holistic evaluation per stage after delivery.
+ * There is never a Lipsync repair: chain treats sync as measurement only.
+ */
+export function lampChainStageCount(controls: LampCombinedControls): number {
+  return lampChainEnabledStages(parseLampCombinedControls(controls)).length;
+}
+
+export function lampChainPlanReservationUsd(
+  controls: LampCombinedControls
+): number {
+  return lampCombinedPlanReservationUsd(controls);
+}
+
+export function lampChainSequenceReservationUsd(
+  controls: LampCombinedControls,
+  durationSec: number
+): number {
+  const stages = lampChainStageCount(controls);
+  const evaluatorReservationUsd = geminiProCostFromUsage({
+    promptTokenCount: LAMP_BACKGROUND_EVALUATOR_INPUT_RESERVATION_TOKENS,
+    candidatesTokenCount:
+      LAMP_BACKGROUND_EVALUATOR_OUTPUT_AND_THINKING_RESERVATION_TOKENS,
+  });
+  return (
+    omniGenerationReservationUsd(durationSec) * stages +
+    evaluatorReservationUsd * stages
+  );
+}
+
 /** Price a completed Lipsync-2-Pro repair from its actual output duration. */
 export function lipsync2ProCostFromDuration(durationSec: number): number {
   if (!Number.isFinite(durationSec) || durationSec <= 0) {
@@ -803,6 +835,90 @@ export function estimateLampCombinedTwoPass(
         .replace(/Final/gi, "Take 2"),
     }))
   );
+}
+
+/** One explicit planner row-pair per concern that will actually be billed. */
+export function estimateLampChainPlan(
+  controls: LampCombinedControls
+): CostEstimate {
+  return total(
+    estimateLampCombinedPlan(controls).items.map((item) => ({
+      ...item,
+      label: item.label.replace(/^Combined /, "Chain "),
+    }))
+  );
+}
+
+/**
+ * Chain execution after plan approval: one single-pass generation per enabled
+ * stage, each conditioning on the previous stage's audio-remuxed output, then
+ * one DETACHED holistic evaluation per stage fired after delivery. Delivery
+ * never waits on evaluation spend, and no Lipsync repair is ever billed.
+ */
+export function estimateLampChainSequence(
+  controls: LampCombinedControls,
+  durationSec: number
+): CostEstimate {
+  const stages = lampChainStageCount(controls);
+  const evaluatorInputEstimate = geminiProCostFromUsage({
+    promptTokenCount: ESTIMATED_LAMP_BACKGROUND_EVALUATOR_INPUT_TOKENS,
+    candidatesTokenCount: 0,
+  });
+  const evaluatorOutputEstimate = geminiProCostFromUsage({
+    promptTokenCount: 0,
+    candidatesTokenCount:
+      ESTIMATED_LAMP_BACKGROUND_EVALUATOR_OUTPUT_AND_THINKING_TOKENS,
+  });
+  return total([
+    {
+      label: `${stages} chained stage generations (${durationSec.toFixed(1)}s each)`,
+      provider: PRICE_TABLE.omniFlashPerOutputSecond.provider,
+      units: durationSec * stages,
+      unitLabel: PRICE_TABLE.omniFlashPerOutputSecond.unitLabel,
+      usd: durationSec * stages * PRICE_TABLE.omniFlashPerOutputSecond.usd,
+    },
+    {
+      label: `${stages} stage generation inputs (estimated)`,
+      provider: PRICE_TABLE.omniFlashInputPerMillionTokens.provider,
+      units: ESTIMATED_OMNI_INPUT_TOKENS * stages,
+      unitLabel: "input tokens",
+      usd:
+        (ESTIMATED_OMNI_INPUT_TOKENS *
+          stages *
+          PRICE_TABLE.omniFlashInputPerMillionTokens.usd) /
+        TOKENS_PER_MILLION,
+    },
+    {
+      label: `${stages} detached stage-evaluation inputs (after delivery, estimated)`,
+      provider: PRICE_TABLE.geminiProInputPerMillionTokens.provider,
+      units: ESTIMATED_LAMP_BACKGROUND_EVALUATOR_INPUT_TOKENS * stages,
+      unitLabel: "input tokens",
+      usd: evaluatorInputEstimate * stages,
+    },
+    {
+      label: `${stages} detached stage-evaluation outputs (after delivery, estimated)`,
+      provider: PRICE_TABLE.geminiProOutputPerMillionTokens.provider,
+      units:
+        ESTIMATED_LAMP_BACKGROUND_EVALUATOR_OUTPUT_AND_THINKING_TOKENS *
+        stages,
+      unitLabel: "output/thinking tokens",
+      usd: evaluatorOutputEstimate * stages,
+    },
+    {
+      label: "Original-audio remux and verification (every stage cut)",
+      provider: "local",
+      units: stages,
+      unitLabel: "cuts",
+      usd: 0,
+    },
+    {
+      label: "Detached SyncNet, luma, and gaze measurements (every stage)",
+      provider: "local",
+      units: stages,
+      unitLabel: "stages",
+      usd: 0,
+    },
+  ]);
 }
 
 /**
