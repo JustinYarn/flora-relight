@@ -39,6 +39,7 @@ import {
   hasReusableLampBackgroundPlanApproval,
   hasReusableLampBeautifyPlanApproval,
   hasReusableLampIrisPlanApproval,
+  hasReusableLampChainPlanApproval,
   hasReusableLampCombinedPlanApproval,
   hasReusableLampApproval,
 } from "@/lib/server/spend-approval";
@@ -50,6 +51,8 @@ import {
   estimateLampBeautifyTwoPass,
   estimateLampIrisPlan,
   estimateLampIrisTwoPass,
+  estimateLampChainPlan,
+  estimateLampChainSequence,
   estimateLampCombinedPlan,
   estimateLampCombinedTwoPass,
   estimateLampRun,
@@ -82,6 +85,28 @@ import {
 } from "@/lib/lamp-combined-operations";
 import { prepareLampCombinedPlan } from "@/lib/server/lamp-combined-planner";
 import { validateLampCombinedExecutionBinding } from "@/lib/server/lamp-combined-execution";
+import {
+  lampChainCombinedControls,
+  parseLampChainControls,
+  parseLampChainPlan,
+  LAMP_CHAIN_MAX_STAGES,
+  type LampChainControls,
+  type LampChainPlan,
+  type LampChainStage,
+} from "@/lib/lamp-chain";
+import {
+  LAMP_CHAIN_EVAL_IDS,
+  parseLampChainEvaluationArtifact,
+  type LampChainEvaluationArtifact,
+} from "@/lib/lamp-chain-evaluation";
+import { lampChainGenerationProof } from "@/lib/lamp-chain-candidate";
+import {
+  lampChainEvaluationOperationId,
+  LAMP_CHAIN_BACKGROUND_PLAN_OPERATION_ID,
+  LAMP_CHAIN_BEAUTIFY_PLAN_OPERATION_ID,
+  LAMP_CHAIN_IRIS_PLAN_OPERATION_ID,
+} from "@/lib/lamp-chain-operations";
+import { prepareLampChainPlan } from "@/lib/server/lamp-chain-planner";
 import { EVAL_DEFS } from "@/lib/prompts/eval-defs";
 import { parseHumanGrade } from "@/lib/human-grade";
 import { initialMegaPrompt } from "@/lib/prompts/mega-prompt";
@@ -175,6 +200,7 @@ import {
 import {
   canAcceptMockBackgroundPlanApproval,
   canAcceptMockBeautifyPlanApproval,
+  canAcceptMockChainPlanApproval,
   canAcceptMockCombinedPlanApproval,
   canAcceptMockIrisPlanApproval,
 } from "@/lib/mock-plan-approval";
@@ -200,6 +226,7 @@ import {
   FLORA_RETIRED_RUN_ERROR,
   floraRetiredForNewWork,
   isApprovedPlanNoOp,
+  isLampChainExecutionId,
   runHasStartedWork,
   runWorkflowMode,
   workflowModeFromExecutionId,
@@ -601,6 +628,65 @@ async function prepareLampCombinedAggregate(input: {
   }
 }
 
+async function prepareLampChainAggregate(input: {
+  run: Run;
+  controls: LampChainControls;
+  mock: boolean;
+}): Promise<
+  | { ok: true; run: Run; plan: LampChainPlan; actualPlannerCostUsd: number }
+  | { ok: false; status: number; message: string; run: Run }
+> {
+  const storage = getStorage();
+  const failPlan = async (message: string): Promise<Run> => {
+    const failed: Run = {
+      ...input.run,
+      status: "failed",
+      nodeStates: {
+        ...input.run.nodeStates,
+        plan: { nodeId: "plan", status: "failed", detail: message },
+      },
+      log: [
+        ...input.run.log,
+        { at: Date.now(), nodeId: "plan", level: "error", message },
+      ],
+    };
+    await storage.putRun(failed);
+    return failed;
+  };
+  try {
+    const prepared = await prepareLampChainPlan({
+      runId: input.run.id,
+      controls: input.controls,
+      mock: input.mock,
+    });
+    const plan = parseLampChainPlan(prepared.plan);
+    const updated: Run = {
+      ...input.run,
+      chainControls: input.controls,
+      chainPlan: plan,
+      ...(input.mock ? {} : { live: true }),
+    };
+    await storage.putRun(updated);
+    return {
+      ok: true,
+      run: updated,
+      plan,
+      actualPlannerCostUsd: prepared.actualPlannerCostUsd,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Lamp Chain planning could not be completed safely.";
+    return {
+      ok: false,
+      status: 502,
+      message,
+      run: await failPlan(message),
+    };
+  }
+}
+
 async function enqueueSingleRun(run: Run, workflowMode: WorkflowMode) {
   const approval = run.spendApproval;
   if (!approval) throw new Error("Live spend approval was not persisted.");
@@ -888,7 +974,7 @@ function mergeServerGeneratedVideos(
             }
             return lampIrisPromptForRun(prompt);
           }
-          if (recoveredMode === "combined") {
+          if (recoveredMode === "combined" || recoveredMode === "chain") {
             const prompt = initialMegaPrompt(
               "lamp",
               candidate.relightIntensity
@@ -1861,6 +1947,188 @@ function mergeLampCombinedEvaluationResults(
   }
 }
 
+interface LampChainStageReadProjection {
+  /** 1-based; doubles as the stage's generation iteration. */
+  stage: number;
+  stageKind: LampChainStage;
+  status: "pending" | "completed" | "invalid" | "not-started";
+  videoUrl?: string;
+  artifact?: LampChainEvaluationArtifact;
+  costUsd?: number;
+}
+
+interface LampChainExecutionReadProjection {
+  stageOrder: LampChainStage[];
+  stages: LampChainStageReadProjection[];
+}
+
+function isLampChainStageKind(value: unknown): value is LampChainStage {
+  return (
+    value === "background" ||
+    value === "lamp" ||
+    value === "beautify" ||
+    value === "iris"
+  );
+}
+
+/**
+ * The frozen envelope on the execution is the authoritative stage order for
+ * what actually ran; the approved plan and bound controls are read fallbacks.
+ */
+function lampChainStageOrderForRead(
+  run: Run,
+  execution: RunExecution
+): LampChainStage[] | null {
+  try {
+    const envelope = JSON.parse(execution.renderedPrompt) as {
+      stagePrompts?: Array<{ stageKind?: unknown }>;
+    };
+    if (
+      Array.isArray(envelope.stagePrompts) &&
+      envelope.stagePrompts.length >= 1 &&
+      envelope.stagePrompts.length <= LAMP_CHAIN_MAX_STAGES &&
+      envelope.stagePrompts.every((prompt) =>
+        isLampChainStageKind(prompt?.stageKind)
+      )
+    ) {
+      return envelope.stagePrompts.map(
+        (prompt) => prompt.stageKind as LampChainStage
+      );
+    }
+  } catch {
+    // Fall through to the run-bound order.
+  }
+  try {
+    return parseLampChainPlan(run.chainPlan).stageOrder;
+  } catch {
+    // Fall through to the raw controls.
+  }
+  try {
+    return parseLampChainControls(run.chainControls).stageOrder;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Detached chain read model: per-stage video from the exact generation
+ * journal, per-stage report card from the paid detached-evaluation journal.
+ * A missing evaluation is "pending" — never an error — because chain delivery
+ * settles before any evaluation exists and grading must work with zero evals.
+ */
+async function readLampChainExecutionProjection(input: {
+  storage: ReturnType<typeof getStorage>;
+  run: Run | null;
+  execution: RunExecution | null;
+  hideEvaluations: boolean;
+}): Promise<LampChainExecutionReadProjection | undefined> {
+  const { run, execution } = input;
+  if (!run || !execution || !isLampChainExecutionId(execution.executionId)) {
+    return undefined;
+  }
+  const stageOrder = lampChainStageOrderForRead(run, execution);
+  if (!stageOrder) return undefined;
+  let plan: LampChainPlan | null = null;
+  try {
+    plan = parseLampChainPlan(run.chainPlan);
+  } catch {
+    plan = null;
+  }
+  // Blind grading: the same hiding rule Combined applies — evaluations stay
+  // invisible (indistinguishable from not-yet-landed) until the grade saves.
+  const hidden =
+    input.hideEvaluations &&
+    run.humanGrade === undefined &&
+    execution.status === "awaiting_review";
+  const evaluationOperations = await Promise.all(
+    stageOrder.map((_, index) =>
+      input.storage.getPaidOperation(
+        run.id,
+        lampChainEvaluationOperationId(index + 1)
+      )
+    )
+  );
+  const stages = await Promise.all(
+    stageOrder.map(
+      async (stageKind, index): Promise<LampChainStageReadProjection> => {
+        const stage = index + 1;
+        const generationOperation = run.providerOperations?.find(
+          (operation) =>
+            operation.id === videoGenerationOperationId(stage) &&
+            !isArchivedLostGenerationId(operation.id)
+        );
+        const generationResult =
+          generationOperation?.status === "completed"
+            ? generationOperation.result
+            : undefined;
+        const receipt = execution.chainStageReceipts?.find(
+          (candidate) => candidate.stage === stage
+        );
+        let status: LampChainStageReadProjection["status"] =
+          generationResult || receipt ? "pending" : "not-started";
+        let artifact: LampChainEvaluationArtifact | undefined;
+        let evaluationCostUsd: number | undefined;
+        if (evaluationOperations[index]?.status === "completed" && !hidden) {
+          if (plan) {
+            try {
+              artifact = await parseLampChainEvaluationArtifact(
+                evaluationOperations[index]!.result,
+                { plan, stage }
+              );
+              status = "completed";
+              evaluationCostUsd = artifact.costUsd;
+            } catch {
+              status = "invalid";
+            }
+          } else {
+            status = "invalid";
+          }
+        }
+        const costUsd =
+          generationResult || evaluationCostUsd !== undefined
+            ? (generationResult?.costUsd ?? 0) + (evaluationCostUsd ?? 0)
+            : undefined;
+        return {
+          stage,
+          stageKind,
+          status,
+          ...(generationResult?.videoUrl
+            ? { videoUrl: generationResult.videoUrl }
+            : {}),
+          ...(artifact ? { artifact } : {}),
+          ...(costUsd !== undefined ? { costUsd } : {}),
+        };
+      }
+    )
+  );
+  return { stageOrder, stages };
+}
+
+/**
+ * Chain's renderedPrompt is the frozen stage-prompt envelope, never a stage's
+ * prompt bytes, so a chain generation journal binds through its append-only
+ * stage receipt: the exact journaled artifact identity must match the proof
+ * the durable workflow recorded for that stage.
+ */
+function providerOperationMatchesLampChainExecution(
+  operation: ProviderOperation,
+  execution: RunExecution
+): boolean {
+  if (execution.inputHash !== runExecutionInputHash(execution.renderedPrompt)) {
+    return false;
+  }
+  if (operation.kind !== "video_generation") return true;
+  const receipt = execution.chainStageReceipts?.find(
+    (candidate) => candidate.stage === operation.iteration
+  );
+  if (!receipt) return false;
+  const proof = lampChainGenerationProof(operation, operation.iteration);
+  return (
+    proof !== null &&
+    proof.artifactIdentityHash === receipt.generation.artifactIdentityHash
+  );
+}
+
 function providerOperationMatchesLampExecution(
   operation: ProviderOperation,
   execution: RunExecution,
@@ -2013,6 +2281,20 @@ function paidCostLabel(
   if (entry.id === lampCombinedEvaluationOperationId(2)) {
     return "Lamp Combined Take 2 whole-video evaluation (Gemini)";
   }
+  if (entry.id === LAMP_CHAIN_BACKGROUND_PLAN_OPERATION_ID) {
+    return "Lamp Chain Background plan (Gemini)";
+  }
+  if (entry.id === LAMP_CHAIN_BEAUTIFY_PLAN_OPERATION_ID) {
+    return "Lamp Chain Beautify plan (Gemini)";
+  }
+  if (entry.id === LAMP_CHAIN_IRIS_PLAN_OPERATION_ID) {
+    return "Lamp Chain eye-contact plan (Gemini)";
+  }
+  for (let stage = 1; stage <= LAMP_CHAIN_MAX_STAGES; stage += 1) {
+    if (entry.id === lampChainEvaluationOperationId(stage)) {
+      return `Lamp Chain Stage ${stage} detached evaluation (Gemini)`;
+    }
+  }
   if (entry.id === lampBackgroundPlanOperationId()) {
     return "Lamp Background cleanup plan (Gemini)";
   }
@@ -2107,6 +2389,9 @@ function materializeServerResults(
   const combined = Boolean(
     execution?.executionId.startsWith("lamp-combined:")
   );
+  const chain = Boolean(
+    execution && isLampChainExecutionId(execution.executionId)
+  );
   const firstCutOperation = firstCutProviderOperation(materialized);
   const secondCutOperation = materialized.providerOperations?.find(
     (operation) =>
@@ -2117,7 +2402,10 @@ function materializeServerResults(
   const executionBindingMismatch = Boolean(
     execution &&
       (execution.inputHash !== runExecutionInputHash(execution.renderedPrompt) ||
+        // Chain's renderedPrompt is the serialized stage-prompt envelope, not
+        // the stage-1 prompt bytes; its journals bind through stage receipts.
         (firstCutOperation &&
+          !chain &&
           !providerOperationMatchesExecution(firstCutOperation, execution)) ||
         (lamp &&
           secondCutOperation &&
@@ -2231,6 +2519,8 @@ function materializeServerResults(
                   execution,
                   combinedEvaluations
                 )
+            : chain
+              ? providerOperationMatchesLampChainExecution(operation, execution)
             : operation.iteration === 1 &&
               providerOperationMatchesExecution(operation, execution))
       )
@@ -2277,7 +2567,9 @@ function materializeServerResults(
     const generationLabel =
       runWorkflowMode(materialized) === "combined"
         ? `Take ${operation.iteration}`
-        : `Video generation v${operation.iteration}`;
+        : runWorkflowMode(materialized) === "chain"
+          ? `Stage ${operation.iteration} generation`
+          : `Video generation v${operation.iteration}`;
     const label = `${generationLabel} (${operation.result.durationSec.toFixed(1)}s, Omni Flash)`;
     if (!actualItems.some((item) => item.label === label)) {
       actualItems.push({
@@ -2306,6 +2598,24 @@ function materializeServerResults(
           return {
             totalUsd: plan.totalUsd + execution.totalUsd,
             items: [...plan.items, ...execution.items],
+          };
+        })()
+      : runWorkflowMode(materialized) === "chain"
+      ? (() => {
+          const controls = parseLampChainControls(materialized.chainControls);
+          const plan = estimateLampChainPlan(controls);
+          if (
+            materialized.chainPlan?.aggregate.approval.status !== "approved"
+          ) {
+            return plan;
+          }
+          const sequence = estimateLampChainSequence(
+            controls,
+            materialized.originalVideo.durationSec
+          );
+          return {
+            totalUsd: plan.totalUsd + sequence.totalUsd,
+            items: [...plan.items, ...sequence.items],
           };
         })()
       : isLampBackgroundRun(materialized)
@@ -2367,6 +2677,7 @@ function materializeServerResults(
     const iris = isLampIrisExecution(execution);
     const combined =
       workflowModeFromExecutionId(execution.executionId) === "combined";
+    const chain = isLampChainExecutionId(execution.executionId);
     const twoPass = lamp || background || beautify || iris || combined;
     const budgetSkipped = execution.error?.startsWith("BATCH_BUDGET_SKIPPED") === true;
     const estimate = combined
@@ -2381,6 +2692,19 @@ function materializeServerResults(
           return {
             totalUsd: plan.totalUsd + combinedExecution.totalUsd,
             items: [...plan.items, ...combinedExecution.items],
+          };
+        })()
+      : chain
+      ? (() => {
+          const controls = parseLampChainControls(materialized.chainControls);
+          const plan = estimateLampChainPlan(controls);
+          const sequence = estimateLampChainSequence(
+            controls,
+            materialized.originalVideo.durationSec
+          );
+          return {
+            totalUsd: plan.totalUsd + sequence.totalUsd,
+            items: [...plan.items, ...sequence.items],
           };
         })()
       : background || beautify || iris
@@ -2428,9 +2752,10 @@ function materializeServerResults(
     };
     const legacyReviewed =
       !twoPass &&
+      !chain &&
       (materialized.status === "approved" ||
         materialized.status === "needs-changes");
-    if (twoPass && materialized.humanGrade) {
+    if ((twoPass || chain) && materialized.humanGrade) {
       materialized.status = materialized.humanGrade.shipIt
         ? "approved"
         : "needs-changes";
@@ -2442,6 +2767,58 @@ function materializeServerResults(
               execution.status === "reconcile_required"
             ? "failed"
             : "running";
+    }
+
+    if (chain) {
+      // Each receipt-proven stage journal was reconstructed as an iteration
+      // above, so the delivered final cut is watchable and gradeable with
+      // ZERO evaluation artifacts persisted; the detached report card rides
+      // the separate chainExecution projection, never these iterations.
+      // Completed evidence outranks the terminal flag: a proven stage stays
+      // ungraded even when a later stage stopped the chain.
+      for (const iteration of materialized.iterations) {
+        if (iteration.recoveredFromProviderOperation === true) {
+          iteration.status = "ungraded";
+        }
+      }
+      delete materialized.bestIterationIndex;
+      delete materialized.finalVideo;
+      delete materialized.fallback;
+      const logKey = `server execution ${execution.executionId}`;
+      if (!materialized.log.some((entry) => entry.message.includes(logKey))) {
+        const safeExecutionError = execution.error
+          ?.replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 240);
+        const terminal =
+          execution.status === "failed" ||
+          execution.status === "reconcile_required";
+        const message =
+          execution.status === "awaiting_review"
+            ? `${logKey}: Lamp Chain delivered the final stage on structural proof — gradeable now; the detached report card attaches as each stage evaluation lands`
+            : execution.status === "user_action_required"
+              ? `${logKey}: paused before the next paid operation; renew the exact Chain approval to resume without rebilling completed journals`
+              : terminal
+                ? `${logKey}: durable Lamp Chain execution stopped before every stage receipt was proven${safeExecutionError ? ` — ${safeExecutionError}` : ""}`
+                : `${logKey}: durable server Workflow owns Lamp Chain's approved staged sequence; this browser may close safely`;
+        materialized.log.push({
+          at: execution.updatedAt,
+          nodeId:
+            execution.status === "awaiting_review"
+              ? "deliver"
+              : `stage-${Math.min(
+                  LAMP_CHAIN_MAX_STAGES,
+                  Math.max(1, execution.iteration)
+                )}`,
+          level: terminal
+            ? "error"
+            : execution.status === "user_action_required"
+              ? "warn"
+              : "info",
+          message,
+        });
+      }
+      return materialized;
     }
 
     const videoOperation = firstCutProviderOperation(materialized);
@@ -3446,8 +3823,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       execution,
       raw: combinedRawEvaluations,
     });
+    const chainExecutionProjection = await readLampChainExecutionProjection({
+      storage,
+      run: storedRun,
+      execution,
+      hideEvaluations: hideFinalEvaluation,
+    });
     const run = storedRun
-      ? materializeServerResults(
+      ? (materializeServerResults(
           storedRun,
           paidCosts,
           execution,
@@ -3458,9 +3841,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           irisEvaluations,
           combinedEvaluations,
           combinedBlindIteration
-        )
+        ) as Run & { chainExecution?: LampChainExecutionReadProjection })
       : null;
     if (!run) return NextResponse.json({ error: "Run not found." }, { status: 404 });
+    if (chainExecutionProjection) {
+      run.chainExecution = chainExecutionProjection;
+    }
     // Old records may contain several megabytes of frame data. Return it only
     // while comfortably below the platform response cap; otherwise preserve
     // access to every run fact/media URL through the compact representation.
@@ -3515,7 +3901,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           execution,
           raw: combinedRawEvaluations,
         });
-      return compactRun(
+      const chainExecutionProjection = await readLampChainExecutionProjection({
+        storage,
+        run,
+        execution,
+        hideEvaluations: hideFinalEvaluation,
+      });
+      const compact = compactRun(
         materializeServerResults(
           run,
           paidCosts,
@@ -3528,7 +3920,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           combinedEvaluations,
           combinedBlindIteration
         )
-      );
+      ) as Run & { chainExecution?: LampChainExecutionReadProjection };
+      if (chainExecutionProjection) {
+        compact.chainExecution = chainExecutionProjection;
+      }
+      return compact;
     })
   );
   let truncatedForBytes = false;
@@ -3577,6 +3973,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     mock?: unknown;
     relightIntensity?: unknown;
     combinedControls?: unknown;
+    chainControls?: unknown;
     prepareOnly?: unknown;
   };
   try {
@@ -3588,6 +3985,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       mock?: unknown;
       relightIntensity?: unknown;
       combinedControls?: unknown;
+      chainControls?: unknown;
       prepareOnly?: unknown;
     };
   } catch {
@@ -3657,12 +4055,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     body.workflowMode !== "background" &&
     body.workflowMode !== "beautify" &&
     body.workflowMode !== "iris" &&
-    body.workflowMode !== "combined"
+    body.workflowMode !== "combined" &&
+    body.workflowMode !== "chain"
   ) {
     return NextResponse.json(
       {
         error:
-          'workflowMode must be "flora", "lamp", "background", "beautify", "iris", or "combined".',
+          'workflowMode must be "flora", "lamp", "background", "beautify", "iris", "combined", or "chain".',
       },
       { status: 400 }
     );
@@ -3678,7 +4077,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             ? "iris"
             : body.workflowMode === "combined"
               ? "combined"
-              : "lamp";
+              : body.workflowMode === "chain"
+                ? "chain"
+                : "lamp";
   let combinedControls: LampCombinedControls | undefined;
   if (workflowMode === "combined") {
     try {
@@ -3700,9 +4101,34 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 400 }
     );
   }
+  let chainControls: LampChainControls | undefined;
+  if (workflowMode === "chain") {
+    try {
+      chainControls = parseLampChainControls(body.chainControls);
+    } catch (error) {
+      return NextResponse.json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Lamp Chain controls are required and invalid.",
+        },
+        { status: 400 }
+      );
+    }
+  } else if (body.chainControls !== undefined) {
+    return NextResponse.json(
+      { error: "chainControls applies only to Lamp Chain runs." },
+      { status: 400 }
+    );
+  }
   if (
-    (workflowMode === "lamp" || workflowMode === "combined") &&
-    (body.relightIntensity !== undefined || workflowMode === "combined") &&
+    (workflowMode === "lamp" ||
+      workflowMode === "combined" ||
+      workflowMode === "chain") &&
+    (body.relightIntensity !== undefined ||
+      workflowMode === "combined" ||
+      workflowMode === "chain") &&
     !isRelightIntensity(body.relightIntensity)
   ) {
     return NextResponse.json(
@@ -3715,7 +4141,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const relightIntensity =
     workflowMode === "lamp"
       ? normalizeRelightIntensity(body.relightIntensity)
-      : workflowMode === "combined"
+      : workflowMode === "combined" || workflowMode === "chain"
         ? (body.relightIntensity as number)
         : undefined;
   if (
@@ -3723,7 +4149,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     (workflowMode === "background" ||
       workflowMode === "beautify" ||
       workflowMode === "iris" ||
-      workflowMode === "combined")
+      workflowMode === "combined" ||
+      workflowMode === "chain")
   ) {
     return NextResponse.json(
       {
@@ -3732,6 +4159,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             ? "Approve the source-specific Lamp Background cleanup plan before authorizing the two-pass generation."
             : workflowMode === "combined"
               ? "Approve the source-specific Lamp Combined aggregate plan before authorizing the two-pass generation."
+            : workflowMode === "chain"
+              ? "Approve the source-specific Lamp Chain ordered plan before authorizing the staged sequence."
             : workflowMode === "iris"
               ? "Approve the source-specific Lamp Iris gaze plan before authorizing the two-pass generation."
               : "Approve the source-specific Lamp Beautify enhancement plan before authorizing the two-pass generation.",
@@ -3753,12 +4182,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     workflowMode !== "background" &&
     workflowMode !== "beautify" &&
     workflowMode !== "iris" &&
-    workflowMode !== "combined"
+    workflowMode !== "combined" &&
+    workflowMode !== "chain"
   ) {
     return NextResponse.json(
       {
         error:
-          "Plan spend applies only to Lamp Background, Lamp Beautify, Lamp Iris, and Lamp Combined runs.",
+          "Plan spend applies only to Lamp Background, Lamp Beautify, Lamp Iris, Lamp Combined, and Lamp Chain runs.",
       },
       { status: 400 }
     );
@@ -3838,6 +4268,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 400 }
     );
   }
+  if (
+    workflowMode === "chain" &&
+    body.mock !== true &&
+    body.prepareOnly !== true &&
+    body.approvePlanSpend !== true &&
+    (!existing?.chainPlan || existing.live !== true)
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "Approve the enabled Chain planner analyses before starting a live Lamp Chain run.",
+      },
+      { status: 400 }
+    );
+  }
   // Flora admission requires a run that already carries real Flora work; a
   // fresh run id or a never-started Flora draft is new work and is refused
   // before the ingest read downloads and probes any media.
@@ -3901,6 +4346,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
     let combinedControlsChanged = false;
+    let chainControlsChanged = false;
     if (existingMode !== workflowMode && !canRetargetPreparedRun) {
       return NextResponse.json(
         {
@@ -3914,7 +4360,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
     if (
-      (workflowMode === "lamp" || workflowMode === "combined") &&
+      (workflowMode === "lamp" ||
+        workflowMode === "combined" ||
+        workflowMode === "chain") &&
       normalizeRelightIntensity(existing.relightIntensity) !==
         relightIntensity &&
       !canRetargetPreparedRun
@@ -3954,6 +4402,41 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
       }
     }
+    if (workflowMode === "chain" && existingMode === "chain") {
+      let savedControls: LampChainControls | null;
+      try {
+        savedControls = parseLampChainControls(existing.chainControls);
+      } catch {
+        if (!canRetargetPreparedRun) {
+          return NextResponse.json(
+            { error: "This saved Chain run has invalid bound controls." },
+            { status: 409 }
+          );
+        }
+        savedControls = null;
+      }
+      if (
+        !savedControls ||
+        savedControls.beautifyLevel !== chainControls!.beautifyLevel ||
+        savedControls.cleanlinessLevel !== chainControls!.cleanlinessLevel ||
+        savedControls.eyeContact !== chainControls!.eyeContact ||
+        savedControls.stageOrder.length !== chainControls!.stageOrder.length ||
+        savedControls.stageOrder.some(
+          (stage, index) => stage !== chainControls!.stageOrder[index]
+        )
+      ) {
+        chainControlsChanged = true;
+        if (!canRetargetPreparedRun) {
+          return NextResponse.json(
+            {
+              error:
+                "This saved clip already has different Chain controls bound to it — the stage order is approved identity. Upload it again as a fresh run so planner authorization cannot expand.",
+            },
+            { status: 409 }
+          );
+        }
+      }
+    }
     if (
       existingExecution &&
       workflowModeFromExecutionId(existingExecution.executionId) !==
@@ -3978,6 +4461,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               ? hasReusableLampIrisPlanApproval(existing)
               : workflowMode === "combined"
                 ? hasReusableLampCombinedPlanApproval(existing)
+              : workflowMode === "chain"
+                ? hasReusableLampChainPlanApproval(existing)
               : hasReusableFirstCutApproval(existing, "single")) &&
       existing.originalVideo.runId === canonicalVideo.runId &&
       existing.originalVideo.url === canonicalVideo.url &&
@@ -4004,8 +4489,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
                     ? "iris_plan"
                     : workflowMode === "combined"
                       ? "combined_plan"
-                      : "first_cut",
-            workflowMode === "combined" ? combinedControls : undefined
+                      : workflowMode === "chain"
+                        ? "chain_plan"
+                        : "first_cut",
+            workflowMode === "combined"
+              ? combinedControls
+              : workflowMode === "chain"
+                ? lampChainCombinedControls(chainControls!)
+                : undefined
           )
         : undefined
     );
@@ -4022,6 +4513,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         relightIntensity,
         combinedControls
       );
+      // prepareRunForConfirmation predates Chain: bind (or clear) the chain
+      // fields here so a prepared chain draft freezes its exact controls.
+      delete updated.chainControls;
+      delete updated.chainPlan;
+      if (workflowMode === "chain") {
+        updated.relightIntensity = normalizeRelightIntensity(relightIntensity);
+        updated.chainControls = chainControls!;
+      }
       await storage.putRun(updated);
       return NextResponse.json({
         ok: true,
@@ -4033,12 +4532,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     if (
       existingMode !== workflowMode ||
-      ((workflowMode === "lamp" || workflowMode === "combined") &&
+      ((workflowMode === "lamp" ||
+        workflowMode === "combined" ||
+        workflowMode === "chain") &&
         canRetargetPreparedRun &&
         existing.relightIntensity !== relightIntensity) ||
       (workflowMode === "combined" &&
         canRetargetPreparedRun &&
-        combinedControlsChanged)
+        combinedControlsChanged) ||
+      (workflowMode === "chain" &&
+        canRetargetPreparedRun &&
+        chainControlsChanged)
     ) {
       const workflow = workflowForMode(workflowMode);
       const retargetedBase =
@@ -4049,13 +4553,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               delete rest.combinedPlan;
               return rest;
             })()
-          : updated;
+          : workflowMode === "chain" &&
+              (existingMode !== workflowMode || chainControlsChanged)
+            ? (() => {
+                const rest = { ...updated };
+                delete rest.chainPlan;
+                return rest;
+              })()
+            : updated;
       updated = {
         ...retargetedBase,
         workflowId: workflow.id,
         workflowMode,
         ...(relightIntensity !== undefined ? { relightIntensity } : {}),
         ...(combinedControls ? { combinedControls } : {}),
+        ...(chainControls ? { chainControls } : {}),
         nodeStates: freshNodeStates(workflowMode),
       };
       await storage.putRun(updated);
@@ -4142,6 +4654,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         serverOwned: body.mock !== true,
       });
     }
+    if (workflowMode === "chain") {
+      const prepared = await prepareLampChainAggregate({
+        run: updated,
+        controls: chainControls!,
+        mock: body.mock === true,
+      });
+      if (!prepared.ok) {
+        return NextResponse.json(
+          { error: prepared.message, run: prepared.run },
+          { status: prepared.status }
+        );
+      }
+      return NextResponse.json({
+        ok: true,
+        created: false,
+        run: prepared.run,
+        planReviewRequired:
+          prepared.plan.aggregate.approval.status !== "approved",
+        costEstimate: estimateLampChainPlan(chainControls!),
+        actualPlannerCostUsd: prepared.actualPlannerCostUsd,
+        serverOwned: body.mock !== true,
+      });
+    }
     if (body.approveLiveSpend === true) {
       try {
         const launch = await enqueueSingleRun(updated, workflowMode);
@@ -4196,6 +4731,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (workflowMode === "combined") {
     run.combinedControls = combinedControls!;
   }
+  if (workflowMode === "chain") {
+    run.chainControls = chainControls!;
+  }
   if (body.approveLiveSpend === true || body.approvePlanSpend === true) {
     run.spendApproval = createSpendApproval(
       canonicalVideo,
@@ -4212,8 +4750,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               ? "iris_plan"
               : workflowMode === "combined"
                 ? "combined_plan"
-                : "first_cut",
-      workflowMode === "combined" ? combinedControls : undefined
+                : workflowMode === "chain"
+                  ? "chain_plan"
+                  : "first_cut",
+      workflowMode === "combined"
+        ? combinedControls
+        : workflowMode === "chain"
+          ? lampChainCombinedControls(chainControls!)
+          : undefined
     );
   }
   await storage.putRun(run);
@@ -4323,6 +4867,32 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 201 }
     );
   }
+  if (workflowMode === "chain") {
+    const prepared = await prepareLampChainAggregate({
+      run,
+      controls: chainControls!,
+      mock: body.mock === true,
+    });
+    if (!prepared.ok) {
+      return NextResponse.json(
+        { error: prepared.message, run: prepared.run },
+        { status: prepared.status }
+      );
+    }
+    return NextResponse.json(
+      {
+        ok: true,
+        created: true,
+        run: prepared.run,
+        planReviewRequired:
+          prepared.plan.aggregate.approval.status !== "approved",
+        costEstimate: estimateLampChainPlan(chainControls!),
+        actualPlannerCostUsd: prepared.actualPlannerCostUsd,
+        serverOwned: body.mock !== true,
+      },
+      { status: 201 }
+    );
+  }
   if (body.approveLiveSpend === true) {
     try {
       const launch = await enqueueSingleRun(run, workflowMode);
@@ -4409,11 +4979,15 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const persisted = expandCompactRun(candidate, current);
   // Read-model only. Durable execution lives in the separate CAS record.
   delete persisted.serverExecution;
+  delete (persisted as Run & { chainExecution?: LampChainExecutionReadProjection })
+    .chainExecution;
   persisted.originalVideo = current.originalVideo;
   persisted.workflowId = current.workflowId;
   persisted.workflowMode = current.workflowMode;
   persisted.relightIntensity = current.relightIntensity;
   persisted.combinedControls = current.combinedControls;
+  // Stage order is approved identity: chain controls are frozen server-side.
+  persisted.chainControls = current.chainControls;
   persisted.live = current.live;
   persisted.providerOperations = current.providerOperations;
   clearProviderTrustMarkers(persisted);
@@ -4435,6 +5009,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   let acceptsMockBeautifyPlanApproval = false;
   let acceptsMockIrisPlanApproval = false;
   let acceptsMockCombinedPlanApproval = false;
+  let acceptsMockChainPlanApproval = false;
   const mockApprovalInput = {
     hasSpendApproval: current.spendApproval !== undefined,
   };
@@ -4443,6 +5018,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     acceptsMockBeautifyPlanApproval,
     acceptsMockIrisPlanApproval,
     acceptsMockCombinedPlanApproval,
+    acceptsMockChainPlanApproval,
   ] = await Promise.all([
     canAcceptMockBackgroundPlanApproval({
       ...mockApprovalInput,
@@ -4464,6 +5040,11 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
       currentPlan: current.combinedPlan,
       candidatePlan: candidate.combinedPlan,
     }),
+    canAcceptMockChainPlanApproval({
+      ...mockApprovalInput,
+      currentPlan: current.chainPlan,
+      candidatePlan: candidate.chainPlan,
+    }),
   ]);
   if (acceptsMockPlanApproval) {
     // Provider-free mock plans still require a deliberate human approval.
@@ -4482,6 +5063,9 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   persisted.combinedPlan = acceptsMockCombinedPlanApproval
     ? candidate.combinedPlan
     : current.combinedPlan;
+  persisted.chainPlan = acceptsMockChainPlanApproval
+    ? candidate.chainPlan
+    : current.chainPlan;
   persisted.cost = mergeCost(candidate.cost, current.cost);
   await storage.putRun(persisted);
   return NextResponse.json({ ok: true, id: candidate.id });
@@ -4576,7 +5160,15 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     (authoritativeExecution
       ? authoritativeExecution.executionId.startsWith("lamp-combined:")
       : persistedWorkflowMode(materialized) === "combined");
-  const lamp = !background && !beautify && !iris && !combined &&
+  const chain =
+    !background &&
+    !beautify &&
+    !iris &&
+    !combined &&
+    (authoritativeExecution
+      ? isLampChainExecutionId(authoritativeExecution.executionId)
+      : persistedWorkflowMode(materialized) === "chain");
+  const lamp = !background && !beautify && !iris && !combined && !chain &&
     (authoritativeExecution
       ? isLampExecution(authoritativeExecution)
       : persistedWorkflowMode(materialized) === "lamp");
@@ -4585,6 +5177,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     value: body.humanGrade,
     requiredEvalIds: combined
       ? LAMP_COMBINED_EVAL_IDS
+      : chain
+      ? LAMP_CHAIN_EVAL_IDS
       : background
       ? LAMP_BACKGROUND_EVAL_IDS
       : beautify
@@ -4602,14 +5196,37 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
   const lastIteration = materialized.iterations.at(-1);
   const selectedIndex = materialized.bestIterationIndex;
+  // Chain always delivers its final stage; the frozen envelope carries the
+  // exact stage count (2–4) the sequence was approved for.
+  const chainStageCount = (() => {
+    if (!chain) return undefined;
+    if (authoritativeExecution) {
+      try {
+        const envelope = JSON.parse(authoritativeExecution.renderedPrompt) as {
+          stagePrompts?: unknown;
+        };
+        if (
+          Array.isArray(envelope.stagePrompts) &&
+          envelope.stagePrompts.length > 0
+        ) {
+          return envelope.stagePrompts.length;
+        }
+      } catch {
+        // Fall through to the run-bound controls.
+      }
+    }
+    return materialized.chainControls?.stageOrder.length;
+  })();
   // Iris settlement chooses automatically. Combined never does: the exact
   // grade target is the human's permanent candidate choice.
   const deliveredIteration = combined
     ? grade.gradedIteration!
-    : iris
-      ? authoritativeExecution?.deliveredIteration ?? 2
-      : 2;
-  const shipped = twoPass
+    : chain
+      ? chainStageCount ?? 2
+      : iris
+        ? authoritativeExecution?.deliveredIteration ?? 2
+        : 2;
+  const shipped = twoPass || chain
     ? materialized.iterations.find(
         (iteration) => iteration.index === deliveredIteration
       )
@@ -4646,7 +5263,36 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         operation.result?.videoUrl === shipped?.generatedVideo?.url)
   );
   const executionOwnsArtifact = (() => {
-    if (!authoritativeExecution) return !combined;
+    if (!authoritativeExecution) return !combined && !chain;
+    if (chain) {
+      // Delivery is structural proof only: a settled chain run parks at
+      // awaiting_review with its full contiguous receipt trail, and grading
+      // must work with ZERO detached evaluation artifacts persisted. The
+      // graded artifact is the final stage's exact journaled generation.
+      if (
+        authoritativeExecution.status !== "awaiting_review" ||
+        chainStageCount === undefined
+      ) {
+        return false;
+      }
+      const receipts = authoritativeExecution.chainStageReceipts ?? [];
+      if (receipts.length !== chainStageCount) return false;
+      const finalReceipt = receipts[chainStageCount - 1];
+      if (!finalReceipt) return false;
+      const finalOperation = materialized.providerOperations?.find(
+        (operation) =>
+          operation.id === videoGenerationOperationId(chainStageCount)
+      );
+      const finalProof = lampChainGenerationProof(
+        finalOperation,
+        chainStageCount
+      );
+      return Boolean(
+        finalProof &&
+          finalProof.artifactIdentityHash ===
+            finalReceipt.generation.artifactIdentityHash
+      );
+    }
     if (combined) {
       const artifact =
         deliveredIteration === 1
@@ -4749,7 +5395,10 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     materialized.status === "awaiting-review" &&
     shipped?.generatedVideo?.url === materialized.originalVideo.url;
   const canonicalArtifact =
-    (!combined && approvedPlanNoOp) ||
+    (!combined && !chain && approvedPlanNoOp) ||
+    // Chain iterations are not reconstructed into the read model; the final
+    // stage's receipt-vs-journal proof above is the whole ownership check.
+    (chain && executionOwnsArtifact) ||
     (shipped?.recoveredFromProviderOperation === true &&
       shipped.generatedVideo !== undefined &&
       shippedOperation !== undefined &&

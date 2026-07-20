@@ -22,6 +22,7 @@ import type {
 import { EVAL_DEFS } from "../../lib/prompts/eval-defs.ts";
 import {
   evalDefsForRun,
+  isLampChainRun,
   isLampRun,
   lampCompositeForResults,
   LAMP_EVAL_DEFS,
@@ -49,7 +50,10 @@ import {
   lampCombinedCandidateArtifactIdentityHash,
   lampCombinedCandidateReceiptEligible,
 } from "../../lib/lamp-combined-candidate-read.ts";
-import { isApprovedPlanNoOp } from "../../lib/workflow-mode.ts";
+import {
+  isApprovedPlanNoOp,
+  runWorkflowMode,
+} from "../../lib/workflow-mode.ts";
 
 // ---------------------------------------------------------------------------
 // The 5-point scale
@@ -178,6 +182,15 @@ export function finalLampIteration(
   if (deliveredInitialBestOfTwo(run)) {
     return run.iterations.find((iteration) => iteration.index === 1);
   }
+  // Chain always delivers its FINAL stage — like lamp's "always 2", but the
+  // stage count (2–4) comes from the approved order instead of a constant.
+  if (runWorkflowMode(run) === "chain") {
+    const stageCount =
+      run.chainPlan?.stageOrder.length ?? run.chainControls?.stageOrder.length;
+    return stageCount !== undefined
+      ? run.iterations.find((iteration) => iteration.index === stageCount)
+      : run.iterations.at(-1);
+  }
   if (
     isLampRun(run) ||
     isLampBackgroundRun(run) ||
@@ -253,7 +266,8 @@ export function needsLampHumanGrade(run: Run): boolean {
       (run.serverExecution.executionId.startsWith("lamp:") ||
         run.serverExecution.executionId.startsWith("lamp-background:") ||
         run.serverExecution.executionId.startsWith("lamp-beautify:") ||
-        run.serverExecution.executionId.startsWith("lamp-iris:")) &&
+        run.serverExecution.executionId.startsWith("lamp-iris:") ||
+        run.serverExecution.executionId.startsWith("lamp-chain:")) &&
       run.serverExecution.status === "awaiting_review") ||
       approvedPlanNoOp) &&
     run.humanGrade === undefined
@@ -372,7 +386,8 @@ export function evalDefsForRuns(runs: Run[]): EvalDefinition[] {
         !isLampBackgroundRun(run) &&
         !isLampBeautifyRun(run) &&
         !isLampIrisRun(run) &&
-        !isLampCombinedRun(run)
+        !isLampCombinedRun(run) &&
+        !isLampChainRun(run)
     )
       ? [EVAL_DEFS]
       : []),
@@ -388,6 +403,13 @@ export function evalDefsForRuns(runs: Run[]): EvalDefinition[] {
       : []),
     ...(runs.some((run) => isLampCombinedRun(run))
       ? [lampCombinedUiEvalDefs(runs.find(isLampCombinedRun)?.combinedPlan)]
+      : []),
+    ...(runs.some((run) => isLampChainRun(run))
+      ? [
+          lampCombinedUiEvalDefs(
+            runs.find(isLampChainRun)?.chainPlan?.aggregate
+          ),
+        ]
       : []),
   ];
   const definitions = new Map<string, EvalDefinition>();

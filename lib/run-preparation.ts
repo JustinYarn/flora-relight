@@ -30,7 +30,8 @@ export function isPristinePreparedRun(
     run.backgroundCleanupPlan === undefined &&
     run.beautifyPlan === undefined &&
     run.irisPlan === undefined &&
-    run.combinedPlan === undefined
+    run.combinedPlan === undefined &&
+    run.chainPlan === undefined
   );
 }
 

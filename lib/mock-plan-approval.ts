@@ -16,6 +16,7 @@ import {
   hashLampCombinedPlan,
   parseLampCombinedPlan,
 } from "./lamp-combined.ts";
+import { hashLampChainPlan, parseLampChainPlan } from "./lamp-chain.ts";
 
 type MockApprovalInput = {
   currentPlan: unknown;
@@ -99,6 +100,27 @@ export async function canAcceptMockIrisPlanApproval({
       candidate.decision !== "correct" ||
       new Set(candidate.correct.map((item) => item.intensity)).size === 1;
     return exactPlan || oneGlobalOverride;
+  } catch {
+    return false;
+  }
+}
+
+/** Chain's one click must approve the exact aggregate AND the exact stage order. */
+export async function canAcceptMockChainPlanApproval({
+  currentPlan,
+  candidatePlan,
+  hasSpendApproval,
+}: MockApprovalInput): Promise<boolean> {
+  if (hasSpendApproval) return false;
+  try {
+    const current = parseLampChainPlan(currentPlan);
+    const candidate = parseLampChainPlan(candidatePlan);
+    return (
+      current.aggregate.approval.status === "draft" &&
+      candidate.aggregate.approval.status === "approved" &&
+      (await hashLampChainPlan(current)) ===
+        (await hashLampChainPlan(candidate))
+    );
   } catch {
     return false;
   }

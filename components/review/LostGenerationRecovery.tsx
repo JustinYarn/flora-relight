@@ -46,9 +46,13 @@ export function LostGenerationRecovery({ run }: { run: Run }) {
 
   const workflowMode = workflowModeFromExecutionId(execution.executionId);
   const combinedRecoveryUnsupported = workflowMode === "combined";
+  // Chain owns its own settlement/failure path inside the durable workflow;
+  // browser-side lost-generation recovery is intentionally unavailable.
+  const chainRecoveryUnsupported = workflowMode === "chain";
   const lostGeneration =
     workflowMode !== "flora" &&
     !combinedRecoveryUnsupported &&
+    !chainRecoveryUnsupported &&
     isProviderLostInteractionError(execution.error);
   // Prefer the canonical journal entry; fall back to the archived :lost:
   // entry so an acknowledgment that crashed between its two durable writes
@@ -177,7 +181,9 @@ export function LostGenerationRecovery({ run }: { run: Run }) {
         <p className="text-2xs text-faint">
           {combinedRecoveryUnsupported
             ? "Combined preserves its aggregate plan and both candidate journal sets, but browser recovery is intentionally unavailable. Inspect the journals before any operator action; no provider work is replayed automatically."
-            : "Inspect the provider journal before any re-run; nothing is re-billed automatically."}
+            : chainRecoveryUnsupported
+              ? "Chain preserves its ordered plan and every stage receipt, but browser recovery is intentionally unavailable — the durable workflow owns chain settlement. Inspect the journals before any operator action; no provider work is replayed automatically."
+              : "Inspect the provider journal before any re-run; nothing is re-billed automatically."}
         </p>
       )}
     </Card>

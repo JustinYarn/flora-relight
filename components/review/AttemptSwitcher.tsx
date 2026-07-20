@@ -36,6 +36,30 @@ export function AttemptSwitcher({
   const workflowMode = runWorkflowMode(run);
   const combined = workflowMode === "combined";
   if (run.iterations.length === 0) {
+    // Chain has no mega prompt and live chain reads only materialize
+    // receipt-proven stage iterations — derive state from the durable
+    // execution record instead of claiming an initial video is in progress.
+    if (workflowMode === "chain") {
+      const execution = run.serverExecution;
+      const stage = Math.max(
+        execution?.iteration ?? 0,
+        execution?.chainStageReceipts?.length ?? 0
+      );
+      const delivered =
+        Boolean(run.finalVideo) ||
+        run.status === "awaiting-review" ||
+        run.status === "approved" ||
+        execution?.status === "awaiting_review";
+      return (
+        <p className="text-2xs text-faint">
+          {delivered
+            ? "final stage delivered — the detached report card attaches as evaluations land"
+            : stage >= 1
+              ? `stage ${stage} in progress — each stage generates over the previous cut…`
+              : "chain starting — locking the approved stage order…"}
+        </p>
+      );
+    }
     return (
       <p className="text-2xs text-faint">
         {combined

@@ -11,6 +11,8 @@ import {
   estimateLampBackgroundTwoPass,
   estimateLampBeautifyPlan,
   estimateLampBeautifyTwoPass,
+  estimateLampChainPlan,
+  estimateLampChainSequence,
   estimateLampCombinedPlan,
   estimateLampCombinedTwoPass,
   estimateLampIrisPlan,
@@ -22,6 +24,8 @@ import {
   lampBackgroundTwoPassReservationUsd,
   lampBeautifyPlanReservationUsd,
   lampBeautifyTwoPassReservationUsd,
+  lampChainPlanReservationUsd,
+  lampChainSequenceReservationUsd,
   lampCombinedPlanReservationUsd,
   lampCombinedTwoPassReservationUsd,
   lampIrisPlanReservationUsd,
@@ -59,6 +63,10 @@ import {
   DEFAULT_LAMP_COMBINED_CONTROLS,
   type LampCombinedControls,
 } from "@/lib/lamp-combined";
+import {
+  defaultLampChainStageOrder,
+  type LampChainControls,
+} from "@/lib/lamp-chain";
 import {
   finalLampIteration,
   isGradeable,
@@ -125,6 +133,29 @@ const COMBINED_FLOW = [
     title: "You choose, then grade",
     description:
       "Compare the eligible takes, pick one winner, and blind-grade only that exact artifact.",
+  },
+] as const;
+
+const CHAIN_FLOW = [
+  {
+    title: "Plan and order once",
+    description:
+      "Run only the enabled source planners, choose the stage order, then approve one consolidated ordered plan.",
+  },
+  {
+    title: "Sequential stages",
+    description:
+      "The original enters once. Each enabled concern is its own single-pass generation over the previous stage's cut.",
+  },
+  {
+    title: "Delivered first",
+    description:
+      "The final stage's cut is delivered on structural proof alone—per-stage generation plus verified original audio.",
+  },
+  {
+    title: "Detached report card",
+    description:
+      "Per-stage measurements against the original attach after delivery. They can never hold, repair, or un-deliver the cut.",
   },
 ] as const;
 
@@ -237,9 +268,25 @@ const MODE_COPY: Record<
     description:
       "Lamp Combined freezes one approved plan, creates two source-rooted takes, safety-checks both, then lets you choose an eligible winner before grading.",
   },
+  chain: {
+    eyebrow: "COMBINED V2",
+    title: "Chain",
+    description:
+      "Lamp Chain runs each enabled concern as its own sequential stage in the order you configure, delivers the final cut first, and attaches the detached report card afterwards.",
+  },
 };
 
-function estimateWorkflowRun(mode: WorkflowMode, durationSec: number) {
+/** Chain's default controls: the Combined triple plus the H0 stage order. */
+const DEFAULT_LAMP_CHAIN_CONTROLS: LampChainControls = {
+  ...DEFAULT_LAMP_COMBINED_CONTROLS,
+  stageOrder: defaultLampChainStageOrder(DEFAULT_LAMP_COMBINED_CONTROLS),
+};
+
+function estimateWorkflowRun(
+  mode: WorkflowMode,
+  durationSec: number,
+  chainControls: LampCombinedControls = DEFAULT_LAMP_COMBINED_CONTROLS
+) {
   if (mode === "lamp") return estimateLampRun(durationSec);
   if (mode === "background") {
     return estimateLampBackgroundTwoPass(durationSec);
@@ -253,12 +300,16 @@ function estimateWorkflowRun(mode: WorkflowMode, durationSec: number) {
   if (mode === "combined") {
     return estimateLampCombinedTwoPass(durationSec);
   }
+  if (mode === "chain") {
+    return estimateLampChainSequence(chainControls, durationSec);
+  }
   return estimateFirstCut(durationSec);
 }
 
 function workflowReservationUsd(
   mode: WorkflowMode,
-  durationSec = FIRST_CUT_MAX_OUTPUT_SECONDS
+  durationSec = FIRST_CUT_MAX_OUTPUT_SECONDS,
+  chainControls: LampCombinedControls = DEFAULT_LAMP_COMBINED_CONTROLS
 ): number {
   if (mode === "lamp") return lampRunReservationUsd(durationSec);
   if (mode === "background") {
@@ -272,6 +323,9 @@ function workflowReservationUsd(
   }
   if (mode === "combined") {
     return lampCombinedTwoPassReservationUsd(durationSec);
+  }
+  if (mode === "chain") {
+    return lampChainSequenceReservationUsd(chainControls, durationSec);
   }
   return omniGenerationReservationUsd(durationSec);
 }
@@ -592,6 +646,12 @@ function isResumableSingleRun(
   ) {
     return true;
   }
+  if (
+    workflowMode === "chain" &&
+    run.chainPlan?.aggregate.approval.status === "draft"
+  ) {
+    return true;
+  }
   if (run.iterations.length !== 0) return false;
   if (!run.spendApproval && !run.serverExecution) return true;
   return (
@@ -639,7 +699,33 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
     (runMode === "iris" &&
       run.irisPlan?.approval.status === "draft") ||
     (runMode === "combined" &&
-      run.combinedPlan?.approval.status === "draft");
+      run.combinedPlan?.approval.status === "draft") ||
+    (runMode === "chain" &&
+      run.chainPlan?.aggregate.approval.status === "draft");
+  const chainStageCount =
+    run.chainPlan?.stageOrder.length ??
+    run.chainControls?.stageOrder.length ??
+    0;
+  // Live chain reads only materialize receipt-proven stage iterations; the
+  // durable execution record carries the in-flight stage. Mock runs have no
+  // serverExecution and keep the iterations-driven stage.
+  const chainStageReached = Math.max(
+    run.iterations.length,
+    run.serverExecution?.iteration ?? 0,
+    run.serverExecution?.chainStageReceipts?.length ?? 0
+  );
+  const chainStageText =
+    run.status === "failed"
+      ? chainStageReached > 0
+        ? `Stopped at stage ${chainStageReached}`
+        : "Not started"
+      : run.finalVideo ||
+          run.status === "awaiting-review" ||
+          run.status === "approved"
+        ? "Delivered · report card detached"
+        : chainStageReached > 0
+          ? `Stage ${chainStageReached}${chainStageCount > 0 ? ` of ${chainStageCount}` : ""}`
+          : "—";
   const status = readyToStart
     ? backgroundPlanDraft
       ? { color: "var(--borderline)", label: "plan review" }
@@ -668,7 +754,8 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
                 runMode === "background" ||
                 runMode === "beautify" ||
                 runMode === "iris" ||
-                runMode === "combined"
+                runMode === "combined" ||
+                runMode === "chain"
                   ? "var(--accent)"
                   : "var(--muted)"
               }
@@ -685,7 +772,9 @@ function RunRow({ run, passThreshold, inBatch, readyToStart }: {
         <Badge color={status.color}>{status.label}</Badge>
       </td>
       <td className="px-4 py-3 text-sm text-muted">
-        {run.status === "failed"
+        {runMode === "chain"
+          ? chainStageText
+          : run.status === "failed"
           ? isTwoPassRun && run.iterations.length >= 2
             ? runMode === "combined"
               ? "Stopped after Take 2"
@@ -760,6 +849,9 @@ export default function DashboardPage() {
   const [combinedControls, setCombinedControls] = useState<LampCombinedControls>(
     DEFAULT_LAMP_COMBINED_CONTROLS
   );
+  const [chainControls, setChainControls] = useState<LampChainControls>(
+    DEFAULT_LAMP_CHAIN_CONTROLS
+  );
 
   /** Every run id that belongs to some batch — drives the "batch" row tag. */
   const batchRunIds = useMemo(
@@ -784,6 +876,7 @@ export default function DashboardPage() {
     workflowMode: WorkflowMode;
     relightIntensity: number;
     combinedControls?: LampCombinedControls;
+    chainControls?: LampChainControls;
   } | null>(null);
   /** Server-discovered single uploads that have not become prepared Runs yet. */
   const [pendingSingleUploads, setPendingSingleUploads] = useState<
@@ -1086,7 +1179,8 @@ export default function DashboardPage() {
     async (
       file: File,
       selectedRelightIntensity: number,
-      selectedCombinedControls: LampCombinedControls
+      selectedCombinedControls: LampCombinedControls,
+      selectedChainControls: LampChainControls
     ) => {
       // Re-selecting the same interrupted single clip reuses its durable
       // reservation. Otherwise reserve a fresh canonical id; the Blob token
@@ -1158,6 +1252,8 @@ export default function DashboardPage() {
               workflowMode === "combined"
                 ? selectedCombinedControls
                 : undefined,
+            chainControls:
+              workflowMode === "chain" ? selectedChainControls : undefined,
             prepareOnly: true,
           });
         } catch (error) {
@@ -1176,6 +1272,9 @@ export default function DashboardPage() {
           ...(workflowMode === "combined"
             ? { combinedControls: selectedCombinedControls }
             : {}),
+          ...(workflowMode === "chain"
+            ? { chainControls: selectedChainControls }
+            : {}),
         });
         return;
       }
@@ -1185,6 +1284,8 @@ export default function DashboardPage() {
           relightIntensity: selectedRelightIntensity,
           combinedControls:
             workflowMode === "combined" ? selectedCombinedControls : undefined,
+          chainControls:
+            workflowMode === "chain" ? selectedChainControls : undefined,
         });
         router.push(`/runs/${id}`);
       } catch (error) {
@@ -1202,10 +1303,13 @@ export default function DashboardPage() {
         workflowMode === "background" ||
         workflowMode === "beautify" ||
         workflowMode === "iris" ||
-        workflowMode === "combined"
+        workflowMode === "combined" ||
+        workflowMode === "chain"
       ) {
         appendError(
-          workflowMode === "combined"
+          workflowMode === "chain"
+            ? "Lamp Chain starts one clip at a time because every run keeps its own ordered plan review and explicit spend click. Select a single video, then use the chain sweep board for multi-order experiments."
+            : workflowMode === "combined"
             ? "Lamp Combined starts one clip at a time because its enabled planners and winner choice stay bound to one exact source. Select a single video."
             : workflowMode === "background"
             ? "Lamp Background v1 starts one clip at a time because every source needs its own cleanup plan and explicit approval before generation. Select a single video."
@@ -1301,6 +1405,10 @@ export default function DashboardPage() {
       const selectedRelightIntensity =
         normalizeRelightIntensity(relightIntensity);
       const selectedCombinedControls = { ...combinedControls };
+      const selectedChainControls = {
+        ...chainControls,
+        stageOrder: [...chainControls.stageOrder],
+      };
       if (!hydrated) {
         setIngestError("Wait for saved history to finish loading before uploading.");
         return;
@@ -1336,7 +1444,8 @@ export default function DashboardPage() {
           await handleSingle(
             videos[0],
             selectedRelightIntensity,
-            selectedCombinedControls
+            selectedCombinedControls,
+            selectedChainControls
           );
         } else {
           await handleMany(videos, selectedRelightIntensity);
@@ -1355,6 +1464,7 @@ export default function DashboardPage() {
       readiness,
       relightIntensity,
       combinedControls,
+      chainControls,
     ]
   );
 
@@ -1378,7 +1488,9 @@ export default function DashboardPage() {
     pendingBatchId !== null;
   const workflowCopy = MODE_COPY[workflowMode];
   const workflowFlow =
-    workflowMode === "combined"
+    workflowMode === "chain"
+      ? CHAIN_FLOW
+      : workflowMode === "combined"
       ? COMBINED_FLOW
       : workflowMode === "iris"
       ? IRIS_FLOW
@@ -1410,6 +1522,8 @@ export default function DashboardPage() {
           onRelightIntensityChange={setRelightIntensity}
           combinedControls={combinedControls}
           onCombinedControlsChange={setCombinedControls}
+          chainControls={chainControls}
+          onChainControlsChange={setChainControls}
           disabled={modeControlsDisabled}
         />
       </div>
@@ -1454,7 +1568,8 @@ export default function DashboardPage() {
             {workflowMode === "background" ||
             workflowMode === "beautify" ||
             workflowMode === "iris" ||
-            workflowMode === "combined"
+            workflowMode === "combined" ||
+            workflowMode === "chain"
               ? "Choose one video"
               : "Choose videos"}
           </SectionTitle>
@@ -1508,7 +1623,8 @@ export default function DashboardPage() {
                     : workflowMode === "background" ||
                         workflowMode === "beautify" ||
                         workflowMode === "iris" ||
-                        workflowMode === "combined"
+                        workflowMode === "combined" ||
+                        workflowMode === "chain"
                       ? "Drop one clip, or click to browse"
                       : "Drop one or more clips, or click to browse"}
             </p>
@@ -1521,6 +1637,8 @@ export default function DashboardPage() {
                 ? "video/* · v1 accepts one static-camera clip with at least one visible person — only the primary presenter's gaze is corrected; everyone else is preserved exactly"
                 : workflowMode === "combined"
                 ? "video/* · one static-camera clip · enabled planners share one approval · both takes start from this exact source"
+                : workflowMode === "chain"
+                ? "video/* · one static-camera clip · enabled planners share one ordered approval · each stage conditions on the previous stage's cut"
                 : mode === "live"
                 ? `video/* · one clip starts a ${workflowModeLabel(workflowMode)} run · multiple clips start a live ${workflowModeLabel(workflowMode)} batch after cost review`
                 : `video/* · one clip starts a demo run · multiple clips start a ${workflowModeLabel(workflowMode)} demo batch`}
@@ -1545,7 +1663,8 @@ export default function DashboardPage() {
               workflowMode !== "background" &&
               workflowMode !== "beautify" &&
               workflowMode !== "iris" &&
-              workflowMode !== "combined"
+              workflowMode !== "combined" &&
+              workflowMode !== "chain"
             }
             disabled={!hydrated || readiness.phase !== "ready"}
             className="hidden"
@@ -1591,12 +1710,17 @@ export default function DashboardPage() {
               (resumableMode === "iris" &&
                 resumableSingle.irisPlan?.approval.status === "draft") ||
               (resumableMode === "combined" &&
-                resumableSingle.combinedPlan?.approval.status === "draft");
+                resumableSingle.combinedPlan?.approval.status === "draft") ||
+              (resumableMode === "chain" &&
+                resumableSingle.chainPlan?.aggregate.approval.status ===
+                  "draft");
             const savedRelightIntensity = normalizeRelightIntensity(
               resumableSingle.relightIntensity
             );
             const planTitle =
-              resumableMode === "combined"
+              resumableMode === "chain"
+                ? "Chain plan ready for your review"
+                : resumableMode === "combined"
                 ? "Combined plan ready for your review"
                 : resumableMode === "iris"
                 ? "Gaze plan ready for your review"
@@ -1604,7 +1728,9 @@ export default function DashboardPage() {
                   ? "Enhancement plan ready for your review"
                   : "Cleanup plan ready for your review";
             const planDescription =
-              resumableMode === "combined"
+              resumableMode === "chain"
+                ? `${resumableSingle.originalVideo.label} has one ordered plan binding the stage order and every enabled concern to this exact source.`
+                : resumableMode === "combined"
                 ? `${resumableSingle.originalVideo.label} has one consolidated plan binding lighting, approved cleanup targets, and only the optional edits you enabled.`
                 : resumableMode === "iris"
                 ? `${resumableSingle.originalVideo.label} has a source-specific correct / declined / uncertain plan waiting for approval.`
@@ -1650,7 +1776,8 @@ export default function DashboardPage() {
                       (resumableMode === "background" ||
                         resumableMode === "beautify" ||
                         resumableMode === "iris" ||
-                        resumableMode === "combined")
+                        resumableMode === "combined" ||
+                        resumableMode === "chain")
                     ) {
                       router.push(`/runs/${resumableSingle.id}`);
                       return;
@@ -1665,6 +1792,10 @@ export default function DashboardPage() {
                           combinedControls:
                             resumableMode === "combined"
                               ? resumableSingle.combinedControls
+                              : undefined,
+                          chainControls:
+                            resumableMode === "chain"
+                              ? resumableSingle.chainControls
                               : undefined,
                         });
                         router.push(`/runs/${id}`);
@@ -1688,11 +1819,17 @@ export default function DashboardPage() {
                       resumableSingle.combinedControls
                         ? { combinedControls: resumableSingle.combinedControls }
                         : {}),
+                      ...(resumableMode === "chain" &&
+                      resumableSingle.chainControls
+                        ? { chainControls: resumableSingle.chainControls }
+                        : {}),
                     });
                   }}
                 >
                   {planDraft
-                    ? resumableMode === "combined"
+                    ? resumableMode === "chain"
+                      ? "Review chain plan"
+                      : resumableMode === "combined"
                       ? "Review combined plan"
                       : resumableMode === "beautify"
                       ? "Review enhancement plan"
@@ -1704,7 +1841,8 @@ export default function DashboardPage() {
                       ? resumableMode === "background" ||
                         resumableMode === "beautify" ||
                         resumableMode === "iris" ||
-                        resumableMode === "combined"
+                        resumableMode === "combined" ||
+                        resumableMode === "chain"
                         ? "Open and resume"
                         : "Review and resume"
                       : mode === "live"
@@ -1768,6 +1906,8 @@ export default function DashboardPage() {
                     ? "Choose one clip above to analyze its source-specific gaze-correction plan."
                     : workflowMode === "combined"
                       ? "Choose one clip above to build one consolidated finishing plan."
+                      : workflowMode === "chain"
+                        ? "Choose one clip above to build one ordered chain plan, then compare stage orders on the chain sweep board."
                     : `Choose one clip above to start a ${workflowModeLabel(workflowMode)} run, or choose several for a batch.`
             }
           />
@@ -1811,7 +1951,9 @@ export default function DashboardPage() {
       {pendingLaunch ? (
         <ConfirmSpend
           title={
-            pendingLaunch.workflowMode === "combined"
+            pendingLaunch.workflowMode === "chain"
+              ? "Analyze this video and propose one ordered Chain plan?"
+              : pendingLaunch.workflowMode === "combined"
               ? "Analyze this video and propose one Combined plan?"
               : pendingLaunch.workflowMode === "background"
               ? "Analyze this video and propose a cleanup plan?"
@@ -1822,7 +1964,28 @@ export default function DashboardPage() {
                   : `Run ${workflowModeLabel(pendingLaunch.workflowMode)} for this video?`
           }
           lines={
-            pendingLaunch.workflowMode === "combined"
+            pendingLaunch.workflowMode === "chain"
+              ? [
+                  `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
+                  `Estimated planning cost: ${formatUsd(
+                    estimateLampChainPlan(
+                      pendingLaunch.chainControls ?? DEFAULT_LAMP_CHAIN_CONTROLS
+                    ).totalUsd
+                  )}`,
+                  `Spend authorization: the server reserves ${formatReservationUsd(
+                    lampChainPlanReservationUsd(
+                      pendingLaunch.chainControls ?? DEFAULT_LAMP_CHAIN_CONTROLS
+                    )
+                  )} for Background plus only the optional planners enabled below. No video generation is authorized at this step.`,
+                  `Controls frozen for planning: relight ${pendingLaunch.relightIntensity}/100; background ${pendingLaunch.chainControls?.cleanlinessLevel ?? DEFAULT_LAMP_CHAIN_CONTROLS.cleanlinessLevel}/3; Beautify ${pendingLaunch.chainControls?.beautifyLevel === 0 || pendingLaunch.chainControls === undefined ? "off" : `${pendingLaunch.chainControls.beautifyLevel}/3`}; eye contact ${pendingLaunch.chainControls?.eyeContact ? "Presenter P2" : "off"}.`,
+                  `Stage order under review: ${(
+                    pendingLaunch.chainControls ?? DEFAULT_LAMP_CHAIN_CONTROLS
+                  ).stageOrder.join(" → ")}. Reordering after approval invalidates the approval hash exactly like editing a subplan would.`,
+                  `Planners that will run: Background${pendingLaunch.chainControls?.beautifyLevel ? " + Beautify" : ""}${pendingLaunch.chainControls?.eyeContact ? " + Eye contact" : ""}. Disabled planners are skipped completely and cannot be enabled after approval.`,
+                  "You review one ordered chain plan next. The separate per-stage generation estimate appears only after that exact source-specific plan is approved.",
+                  ...(pendingLaunch.trimNote ? [pendingLaunch.trimNote] : []),
+                ]
+              : pendingLaunch.workflowMode === "combined"
               ? [
                   `${pendingLaunch.video.label} — ${pendingLaunch.video.durationSec.toFixed(1)}s`,
                   `Estimated planning cost: ${formatUsd(
@@ -1892,7 +2055,9 @@ export default function DashboardPage() {
                 ]
           }
           confirmLabel={
-            pendingLaunch.workflowMode === "combined"
+            pendingLaunch.workflowMode === "chain"
+              ? "Analyze chain plan"
+              : pendingLaunch.workflowMode === "combined"
               ? "Analyze combined plan"
               : pendingLaunch.workflowMode === "background"
               ? "Analyze cleanup plan"
@@ -1915,13 +2080,15 @@ export default function DashboardPage() {
                 pendingLaunch.workflowMode === "background" ||
                 pendingLaunch.workflowMode === "beautify" ||
                 pendingLaunch.workflowMode === "iris" ||
-                pendingLaunch.workflowMode === "combined";
+                pendingLaunch.workflowMode === "combined" ||
+                pendingLaunch.workflowMode === "chain";
               const id = await startRun(pendingLaunch.video, {
                 approveLiveSpend: planFirst ? undefined : true,
                 approvePlanSpend: planFirst ? true : undefined,
                 workflowMode: pendingLaunch.workflowMode,
                 relightIntensity: pendingLaunch.relightIntensity,
                 combinedControls: pendingLaunch.combinedControls,
+                chainControls: pendingLaunch.chainControls,
               });
               setPendingLaunch(null);
               router.push(`/runs/${id}`);

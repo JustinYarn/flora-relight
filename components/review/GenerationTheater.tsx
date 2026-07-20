@@ -58,13 +58,26 @@ const BACKGROUND_NODE_STAGES: Array<{ id: string; stage: StageId }> = [
   { id: "review", stage: "decide" },
 ];
 
+/** Chain runs generation-only stage nodes, then delivers before measuring. */
+const CHAIN_NODE_STAGES: Array<{ id: string; stage: StageId }> = [
+  { id: "plan", stage: "brief" },
+  { id: "stage-1", stage: "videogen" },
+  { id: "stage-2", stage: "videogen" },
+  { id: "stage-3", stage: "videogen" },
+  { id: "stage-4", stage: "videogen" },
+  { id: "deliver", stage: "remux" },
+  { id: "report", stage: "checks" },
+];
+
 /**
  * The furthest RUNNING node wins; if nothing is running (a beat between
  * nodes), fall back to the furthest settled node so the line never blanks.
  */
 export function currentStage(run: Run): StageId {
   const workflowMode = runWorkflowMode(run);
-  const stages = isPlanWorkflowMode(workflowMode) || workflowMode === "combined"
+  const stages = workflowMode === "chain"
+    ? CHAIN_NODE_STAGES
+    : isPlanWorkflowMode(workflowMode) || workflowMode === "combined"
     ? BACKGROUND_NODE_STAGES
     : NODE_STAGES;
   let running: StageId | null = null;
@@ -73,6 +86,21 @@ export function currentStage(run: Run): StageId {
     const status = run.nodeStates[id]?.status;
     if (status === "running") running = stage;
     else if (status === "succeeded" || status === "failed") settled = stage;
+  }
+  // Live chain reads carry no stage-N node states; the durable execution
+  // record is the stage source of truth (mirrors WorkflowRail).
+  if (workflowMode === "chain" && running === null) {
+    const execution = run.serverExecution;
+    if (execution?.status === "running") {
+      if (
+        execution.phase === "video_generation" ||
+        (execution.phase === "preparing" && execution.iteration >= 1)
+      ) {
+        return "videogen";
+      }
+      if (execution.phase === "evaluating") return "checks";
+      if (execution.phase === "finalizing") return "remux";
+    }
   }
   return running ?? settled ?? "reading";
 }
@@ -159,11 +187,23 @@ export function GenerationTheater({ run }: { run: Run }) {
   const pausedForApproval =
     run.serverExecution?.status === "user_action_required";
   const latest = run.iterations[run.iterations.length - 1];
+  // Live chain reads only materialize receipt-proven stage iterations, so the
+  // in-flight stage comes from the durable execution record; mock chain runs
+  // fall back to their materialized iterations.
+  const chainExecution =
+    workflowMode === "chain" ? run.serverExecution : undefined;
   const attempt =
-    run.nodeStates.final?.status === "running" ||
-    run.nodeStates.final?.status === "succeeded"
-      ? 2
-      : (latest?.index ?? 1);
+    workflowMode === "chain"
+      ? Math.max(
+          1,
+          chainExecution?.iteration ?? 0,
+          chainExecution?.chainStageReceipts?.length ?? 0,
+          latest?.index ?? 0
+        )
+      : run.nodeStates.final?.status === "running" ||
+          run.nodeStates.final?.status === "succeeded"
+        ? 2
+        : (latest?.index ?? 1);
 
   // Videogen elapsed clock, ticking from the stage's own log entry.
   const videogenStartAt = useMemo(() => {
@@ -171,7 +211,8 @@ export function GenerationTheater({ run }: { run: Run }) {
       if (
         run.log[i].nodeId === "videogen" ||
         run.log[i].nodeId === "initial" ||
-        run.log[i].nodeId === "final"
+        run.log[i].nodeId === "final" ||
+        run.log[i].nodeId?.startsWith("stage-")
       ) {
         return run.log[i].at;
       }
@@ -225,6 +266,8 @@ export function GenerationTheater({ run }: { run: Run }) {
                 ? "Locking the approved gaze plan…"
                 : workflowMode === "combined"
                   ? "Locking the approved Combined plan…"
+                  : workflowMode === "chain"
+                    ? "Locking the approved ordered chain plan…"
                 : "Compiling the mega prompt…";
         subline =
           workflowMode === "background"
@@ -235,12 +278,18 @@ export function GenerationTheater({ run }: { run: Run }) {
               ? "only approved gaze corrections may change"
               : workflowMode === "combined"
                 ? "both source-rooted takes use the same human-approved scope"
+                : workflowMode === "chain"
+                  ? "each stage owns exactly one concern, in the approved order"
               : "what may change and what must remain source-faithful";
       }
       break;
     case "videogen":
       headline =
-        attempt >= 2
+        workflowMode === "chain"
+          ? attempt >= 2
+            ? `Generating stage ${attempt} over stage ${attempt - 1}'s cut…`
+            : "Generating stage 1 from the immutable source…"
+          : attempt >= 2
           ? workflowMode === "combined"
             ? "Generating Take 2 separately from the original…"
             : "Regenerating the final video from the original…"
@@ -294,7 +343,9 @@ export function GenerationTheater({ run }: { run: Run }) {
       <div className="absolute right-2 top-2 z-10 text-right text-2xs tabular-nums text-faint">
         {workflowMode === "combined"
           ? `Take ${attempt} video`
-          : `${attempt >= 2 ? "final" : "initial"} video · v${attempt}`}
+          : workflowMode === "chain"
+            ? `stage ${attempt} video`
+            : `${attempt >= 2 ? "final" : "initial"} video · v${attempt}`}
         {run.cost ? (
           <span>
             {" · "}

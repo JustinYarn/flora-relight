@@ -141,7 +141,7 @@ export function getLampEvalDef(id: string): EvalDefinition {
 
 type RunEvalScope = Pick<
   Run,
-  "workflowId" | "workflowMode" | "serverExecution" | "combinedPlan"
+  "workflowId" | "workflowMode" | "serverExecution" | "combinedPlan" | "chainPlan"
 >;
 
 /** Durable execution identity wins over browser-authored presentation fields. */
@@ -152,7 +152,18 @@ export function isLampRun(run: RunEvalScope): boolean {
   return run.workflowMode === "lamp" || run.workflowId === "lamp-v1";
 }
 
+/** Chain reuses Combined's rubric ids by design (see lib/lamp-chain-evaluation). */
+export function isLampChainRun(run: RunEvalScope): boolean {
+  if (run.serverExecution?.executionId) {
+    return run.serverExecution.executionId.startsWith("lamp-chain:");
+  }
+  return run.workflowMode === "chain" || run.workflowId === "lamp-chain-v1";
+}
+
 export function evalDefsForRun(run: RunEvalScope): EvalDefinition[] {
+  if (isLampChainRun(run)) {
+    return lampCombinedUiEvalDefs(run.chainPlan?.aggregate);
+  }
   if (isLampCombinedRun(run)) return lampCombinedUiEvalDefs(run.combinedPlan);
   if (isLampIrisRun(run)) return LAMP_IRIS_UI_EVAL_DEFS;
   if (isLampBeautifyRun(run)) return LAMP_BEAUTIFY_UI_EVAL_DEFS;

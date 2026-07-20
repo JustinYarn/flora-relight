@@ -34,7 +34,25 @@ export function VerdictLine({
 
   const videosGenerated = run.iterations.length;
   const approvedPlanNoOp = isApprovedPlanNoOp(run);
-  const combined = runWorkflowMode(run) === "combined";
+  const workflowMode = runWorkflowMode(run);
+  const combined = workflowMode === "combined";
+  const chain = workflowMode === "chain";
+  // Live chain reads only materialize receipt-proven stage iterations; the
+  // durable execution record carries the in-flight stage and delivery state.
+  const chainExecution = chain ? run.serverExecution : undefined;
+  const chainStageReached = chain
+    ? Math.max(
+        run.iterations.length,
+        chainExecution?.iteration ?? 0,
+        chainExecution?.chainStageReceipts?.length ?? 0
+      )
+    : 0;
+  const chainDelivered =
+    chain &&
+    (Boolean(run.finalVideo) ||
+      run.status === "awaiting-review" ||
+      run.status === "approved" ||
+      chainExecution?.status === "awaiting_review");
   const scoreLabel =
     combined && iteration
       ? `Take ${iteration.index} AI score`
@@ -97,6 +115,12 @@ export function VerdictLine({
               ) : (
                 "evaluation stopped before a score was recorded"
               )
+            ) : chain ? (
+              chainDelivered
+                ? "delivered — the detached report card attaches per stage"
+                : chainStageReached >= 1
+                  ? `waiting on stage ${chainStageReached}`
+                  : "waiting for the first chain stage"
             ) : (
               combined ? "waiting for Take 1" : "waiting for the initial video"
             )}
@@ -108,6 +132,12 @@ export function VerdictLine({
         <span className="tabular-nums">
           {approvedPlanNoOp
             ? "Exact source · no generation"
+            : chain
+              ? chainDelivered
+                ? "Delivered · report card detached"
+                : chainStageReached >= 1
+                  ? `Stage ${chainStageReached} generating`
+                  : "Preparing stage 1"
             : combined && videosGenerated >= 2
               ? "Take 1 + Take 2 generated"
             : combined && videosGenerated === 1

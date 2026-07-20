@@ -96,7 +96,7 @@ function PlanBucket({
   );
 }
 
-function ControlPill({ label, value }: { label: string; value: string }) {
+export function ControlPill({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg bg-raised px-3 py-2.5">
       <p className="text-2xs text-faint">{label}</p>
@@ -107,7 +107,7 @@ function ControlPill({ label, value }: { label: string; value: string }) {
   );
 }
 
-function BackgroundScope({ plan }: { plan: LampCombinedPlan }) {
+export function BackgroundScope({ plan }: { plan: LampCombinedPlan }) {
   const background = plan.backgroundPlan;
   return (
     <section className="mt-5 border-t border-edge pt-5">
@@ -160,7 +160,7 @@ function BackgroundScope({ plan }: { plan: LampCombinedPlan }) {
   );
 }
 
-function BeautifyScope({ plan }: { plan: LampCombinedPlan }) {
+export function BeautifyScope({ plan }: { plan: LampCombinedPlan }) {
   if (plan.beautify.state === "disabled") {
     return (
       <section className="mt-5 border-t border-edge pt-5">
@@ -231,7 +231,7 @@ function BeautifyScope({ plan }: { plan: LampCombinedPlan }) {
   );
 }
 
-function IrisScope({ plan }: { plan: LampCombinedPlan }) {
+export function IrisScope({ plan }: { plan: LampCombinedPlan }) {
   if (plan.iris.state === "disabled") {
     return (
       <section className="mt-5 border-t border-edge pt-5">

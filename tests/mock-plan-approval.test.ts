@@ -20,8 +20,13 @@ import {
   buildLampCombinedPlan,
 } from "../lib/lamp-combined.ts";
 import {
+  approveLampChainPlan,
+  buildLampChainPlan,
+} from "../lib/lamp-chain.ts";
+import {
   canAcceptMockBackgroundPlanApproval,
   canAcceptMockBeautifyPlanApproval,
+  canAcceptMockChainPlanApproval,
   canAcceptMockCombinedPlanApproval,
   canAcceptMockIrisPlanApproval,
 } from "../lib/mock-plan-approval.ts";
@@ -153,6 +158,49 @@ test("mock Combined approval accepts only one exact aggregate approval", async (
   );
 });
 
+test("mock Chain approval accepts only the exact order-bearing draft", async () => {
+  const runId = "run-chain";
+  const draft = buildLampChainPlan({
+    planId: "lamp-chain-plan-run-chain",
+    runId,
+    createdAt: CREATED_AT,
+    controls: {
+      beautifyLevel: 0,
+      cleanlinessLevel: 2,
+      eyeContact: false,
+      stageOrder: ["background", "lamp"],
+    },
+    backgroundPlan: createMockLampBackgroundCleanupPlan(runId, CREATED_AT),
+  });
+  const approved = approveLampChainPlan(draft, APPROVED_AT);
+  assert.equal(
+    await canAcceptMockChainPlanApproval({
+      currentPlan: draft,
+      candidatePlan: approved,
+      hasSpendApproval: false,
+    }),
+    true
+  );
+  // Stage order is approved identity: reordering invalidates the transition.
+  assert.equal(
+    await canAcceptMockChainPlanApproval({
+      currentPlan: draft,
+      candidatePlan: { ...approved, stageOrder: ["lamp", "background"] },
+      hasSpendApproval: false,
+    }),
+    false
+  );
+  // Replaying an already-approved plan is not a draft transition.
+  assert.equal(
+    await canAcceptMockChainPlanApproval({
+      currentPlan: approved,
+      candidatePlan: approved,
+      hasSpendApproval: false,
+    }),
+    false
+  );
+});
+
 test("all browser PUT fixture exceptions close once spend is authorized", async () => {
   const background = createMockLampBackgroundCleanupPlan("run-bg", CREATED_AT);
   const beautify = createMockLampBeautifyPlan("run-beautify", CREATED_AT);
@@ -168,6 +216,21 @@ test("all browser PUT fixture exceptions close once spend is authorized", async 
     },
     backgroundPlan: createMockLampBackgroundCleanupPlan(
       "run-combined-spend",
+      CREATED_AT
+    ),
+  });
+  const chain = buildLampChainPlan({
+    planId: "lamp-chain-plan-run-chain-spend",
+    runId: "run-chain-spend",
+    createdAt: CREATED_AT,
+    controls: {
+      beautifyLevel: 0,
+      cleanlinessLevel: 2,
+      eyeContact: false,
+      stageOrder: ["background", "lamp"],
+    },
+    backgroundPlan: createMockLampBackgroundCleanupPlan(
+      "run-chain-spend",
       CREATED_AT
     ),
   });
@@ -192,8 +255,16 @@ test("all browser PUT fixture exceptions close once spend is authorized", async 
       candidatePlan: approveLampCombinedPlan(combined, APPROVED_AT),
       hasSpendApproval: true,
     }),
+    canAcceptMockChainPlanApproval({
+      currentPlan: chain,
+      candidatePlan: approveLampChainPlan(chain, APPROVED_AT),
+      hasSpendApproval: true,
+    }),
   ];
-  assert.deepEqual(await Promise.all(inputs), [false, false, false, false]);
+  assert.deepEqual(
+    await Promise.all(inputs),
+    [false, false, false, false, false]
+  );
 });
 
 test("malformed browser plan data fails closed", async () => {
@@ -219,7 +290,12 @@ test("malformed browser plan data fails closed", async () => {
         candidatePlan: {},
         hasSpendApproval: false,
       }),
+      canAcceptMockChainPlanApproval({
+        currentPlan: {},
+        candidatePlan: {},
+        hasSpendApproval: false,
+      }),
     ]),
-    [false, false, false, false]
+    [false, false, false, false, false]
   );
 });

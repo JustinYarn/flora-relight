@@ -31,6 +31,8 @@ import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
 import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
 import { IrisPlanReview } from "@/components/review/IrisPlanReview";
 import { CombinedPlanReview } from "@/components/review/CombinedPlanReview";
+import { ChainPlanReview } from "@/components/review/ChainPlanReview";
+import { ChainEvalReport } from "@/components/review/ChainEvalReport";
 import { CombinedWinnerPicker } from "@/components/review/CombinedWinnerPicker";
 import {
   deliveredInitialBestOfTwo,
@@ -99,7 +101,9 @@ export default function RunReviewPage() {
     (workflowMode === "iris" &&
       run.irisPlan?.approval.status === "draft") ||
     (workflowMode === "combined" &&
-      run.combinedPlan?.approval.status === "draft");
+      run.combinedPlan?.approval.status === "draft") ||
+    (workflowMode === "chain" &&
+      run.chainPlan?.aggregate.approval.status === "draft");
   // Default to the server-selected delivery; mid-flight, follow the newest stage.
   const autoKey =
     workflowMode === "combined" && run.humanGrade?.gradedIteration
@@ -164,6 +168,7 @@ export default function RunReviewPage() {
           <BeautifyPlanReview run={run} />
           <IrisPlanReview run={run} />
           <CombinedPlanReview run={run} />
+          <ChainPlanReview run={run} />
           <CombinedWinnerPicker
             run={run}
             onPreview={(iteration) => setUserSelected(`iter-${iteration}`)}
@@ -194,7 +199,9 @@ export default function RunReviewPage() {
               Generation is paused here. Approving the plan above is the only
               action that can authorize {workflowMode === "combined"
                 ? "the two source-rooted takes. Combined does not auto-approve or bypass this plan."
-                : "the planned edit or a supported exact-source no-op."}
+                : workflowMode === "chain"
+                  ? "the sequential chain stages. Chain does not auto-approve or bypass this ordered plan."
+                  : "the planned edit or a supported exact-source no-op."}
             </p>
           ) : (
             <>
@@ -221,13 +228,18 @@ export default function RunReviewPage() {
                 />
               </div>
 
-              {/* EVALS — method-scoped rows */}
-              <EvalList
-                iteration={selectedIteration}
-                definitions={evalDefsForRun(run)}
-                workflowMode={workflowMode}
-                evalsUnderway={run.status !== "running" || evalPhaseReached(run)}
-              />
+              {/* EVALS — method-scoped rows; Chain's evaluation surface is
+                  its detached per-stage report card instead. */}
+              {workflowMode === "chain" ? (
+                <ChainEvalReport run={run} />
+              ) : (
+                <EvalList
+                  iteration={selectedIteration}
+                  definitions={evalDefsForRun(run)}
+                  workflowMode={workflowMode}
+                  evalsUnderway={run.status !== "running" || evalPhaseReached(run)}
+                />
+              )}
 
               {/* REVIEW */}
               {workflowMode !== "combined" ? (

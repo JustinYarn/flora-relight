@@ -7,6 +7,8 @@ import { isLampBackgroundRun } from "@/lib/lamp-background-read";
 import { isLampBeautifyRun } from "@/lib/lamp-beautify-read";
 import { isLampIrisRun } from "@/lib/lamp-iris-read";
 import { isLampCombinedRun } from "@/lib/lamp-combined-read";
+import type { LampChainStage } from "@/lib/lamp-chain";
+import { runWorkflowMode } from "@/lib/workflow-mode";
 
 type StageState = "idle" | "active" | "done" | "failed" | "skipped";
 
@@ -49,6 +51,25 @@ const COMBINED_STAGES = [
   { id: "grade", label: "Pick + grade winner" },
 ] as const;
 
+const CHAIN_STAGE_LABELS: Record<LampChainStage, string> = {
+  background: "Background",
+  lamp: "Lamp",
+  beautify: "Beautify",
+  iris: "Iris",
+};
+
+/** Defensive read of the server GET projection; absent on mock runs. */
+function chainProjectionStages(
+  run: Run
+): Array<{ stage?: number; artifact?: unknown }> {
+  const projected = (
+    run as Run & { chainExecution?: { stages?: unknown } }
+  ).chainExecution?.stages;
+  return Array.isArray(projected)
+    ? (projected as Array<{ stage?: number; artifact?: unknown }>)
+    : [];
+}
+
 const DOT_COLOR: Record<StageState, string> = {
   idle: "var(--edge)",
   active: "var(--running)",
@@ -80,6 +101,7 @@ function stateForPlanNode(
   if (
     nodeId === "plan" &&
     (run.combinedPlan?.approval.status === "draft" ||
+      run.chainPlan?.aggregate.approval.status === "draft" ||
       run.backgroundCleanupPlan?.approval.status === "draft" ||
       run.beautifyPlan?.approval.status === "draft" ||
       run.irisPlan?.approval.status === "draft")
@@ -94,6 +116,13 @@ function stateForPlanNode(
 }
 
 function planSummary(run: Run): string | null {
+  if (run.chainPlan) {
+    const plan = run.chainPlan;
+    if (plan.aggregate.approval.status !== "approved") {
+      return "awaiting your approval";
+    }
+    return `${plan.stageOrder.length}-stage order approved`;
+  }
   if (run.combinedPlan) {
     const plan = run.combinedPlan;
     if (plan.approval.status !== "approved") return "awaiting your approval";
@@ -143,12 +172,27 @@ function planSummary(run: Run): string | null {
  * not every engine node: v1, one holistic critique, v2, then human grade.
  */
 export function WorkflowRail({ run }: { run: Run }) {
+  const chain = runWorkflowMode(run) === "chain";
   const combined = isLampCombinedRun(run);
   const iris = isLampIrisRun(run);
   const beautify = isLampBeautifyRun(run);
   const background = isLampBackgroundRun(run) || beautify || iris;
   const planFirst = combined || background;
-  const stages = combined
+  const chainOrder: LampChainStage[] = chain
+    ? run.chainPlan?.stageOrder ?? run.chainControls?.stageOrder ?? []
+    : [];
+  const stages: ReadonlyArray<{ id: string; label: string }> = chain
+    ? [
+        { id: "plan", label: "Ordered chain plan" },
+        ...chainOrder.map((kind, index) => ({
+          id: `stage-${index + 1}`,
+          label: `Stage ${index + 1} · ${CHAIN_STAGE_LABELS[kind]}`,
+        })),
+        { id: "deliver", label: "Delivered cut" },
+        { id: "report", label: "Detached report card" },
+        { id: "grade", label: "Your grade" },
+      ]
+    : combined
     ? COMBINED_STAGES
     : iris
       ? IRIS_STAGES
@@ -171,7 +215,78 @@ export function WorkflowRail({ run }: { run: Run }) {
     : run.status === "awaiting-review" || Boolean(run.finalVideo)
       ? "active"
       : "idle";
-  const states: StageState[] = planFirst
+
+  // Chain progress: per-stage chips from the durable execution record —
+  // append-only stage receipts, the live iteration/phase, and the mock
+  // engine's stage nodes — then delivery, then the detached report card.
+  const execution = run.serverExecution;
+  const receipts = execution?.chainStageReceipts ?? [];
+  const chainStageStates: StageState[] = chainOrder.map((_, index) => {
+    const stage = index + 1;
+    const node = run.nodeStates[`stage-${stage}`]?.status;
+    if (node === "succeeded") return "done";
+    if (node === "failed") return "failed";
+    if (node === "running" || node === "queued") return "active";
+    if (receipts.some((receipt) => receipt.stage === stage)) return "done";
+    if (run.iterations.find((item) => item.index === stage)?.generatedVideo) {
+      return "done";
+    }
+    if (execution?.iteration === stage) {
+      if (execution.status === "failed") return "failed";
+      if (
+        execution.status === "running" &&
+        (execution.phase === "video_generation" ||
+          execution.phase === "preparing")
+      ) {
+        return "active";
+      }
+    }
+    return "idle";
+  });
+  const chainDelivered =
+    Boolean(run.finalVideo) ||
+    run.status === "awaiting-review" ||
+    run.status === "approved" ||
+    execution?.status === "awaiting_review";
+  const deliverNode = run.nodeStates.deliver?.status;
+  const chainDeliverState: StageState = chainDelivered
+    ? "done"
+    : deliverNode === "failed"
+      ? "failed"
+      : deliverNode === "running" ||
+          (execution?.status === "running" &&
+            execution.phase === "finalizing")
+        ? "active"
+        : "idle";
+  const chainProjected = chain ? chainProjectionStages(run) : [];
+  const chainAttached = chainOrder.filter((_, index) => {
+    const stage = index + 1;
+    const iteration = run.iterations.find((item) => item.index === stage);
+    if ((iteration?.evalResults.length ?? 0) > 0) return true;
+    return chainProjected.some(
+      (item) => item.stage === stage && item.artifact !== undefined
+    );
+  }).length;
+  const chainReportState: StageState =
+    chainOrder.length > 0 && chainAttached === chainOrder.length
+      ? "done"
+      : run.nodeStates.report?.status === "succeeded"
+        ? "done"
+        : chainAttached > 0 ||
+            run.nodeStates.report?.status === "running" ||
+            chainDelivered
+          ? "active"
+          : "idle";
+
+  const states: StageState[] = chain
+    ? [
+        stateForPlanNode(run, "plan"),
+        ...chainStageStates,
+        chainDeliverState,
+        chainReportState,
+        gradeState,
+      ]
+    : planFirst
     ? [
         stateForPlanNode(run, "plan"),
         stateForPlanNode(run, "initial"),
@@ -210,7 +325,9 @@ export function WorkflowRail({ run }: { run: Run }) {
   return (
     <nav
       aria-label={`${
-        combined
+        chain
+          ? "Lamp Chain"
+          : combined
           ? "Lamp Combined"
           : iris
             ? "Lamp Iris"
@@ -256,6 +373,20 @@ export function WorkflowRail({ run }: { run: Run }) {
                 {stage.id === "plan" && savedPlanSummary ? (
                   <span className="mt-1 block text-2xs text-faint">
                     {savedPlanSummary}
+                  </span>
+                ) : null}
+                {chain &&
+                stage.id.startsWith("stage-") &&
+                state !== "idle" &&
+                run.nodeStates[stage.id]?.detail ? (
+                  <span className="mt-1 block text-2xs text-faint">
+                    {run.nodeStates[stage.id]?.detail}
+                  </span>
+                ) : null}
+                {chain && stage.id === "report" && chainOrder.length > 0 ? (
+                  <span className="mt-1 block text-2xs tabular-nums text-faint">
+                    {chainAttached}/{chainOrder.length} stage measurements
+                    attached
                   </span>
                 ) : null}
                 {stage.id === "critique" && initialCritiqueCount > 0 ? (

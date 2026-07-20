@@ -102,9 +102,10 @@ function validateBody(body: StartBody): string | null {
     body.workflowMode !== "background" &&
     body.workflowMode !== "beautify" &&
     body.workflowMode !== "iris" &&
-    body.workflowMode !== "combined"
+    body.workflowMode !== "combined" &&
+    body.workflowMode !== "chain"
   ) {
-    return 'workflowMode must be "flora", "lamp", "background", "beautify", "iris", or "combined".';
+    return 'workflowMode must be "flora", "lamp", "background", "beautify", "iris", "combined", or "chain".';
   }
   if (
     body.relightIntensity !== undefined &&
@@ -348,6 +349,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       {
         error:
           "Lamp Combined supports one clip at a time because its approved plan, two qualified takes, winner choice, and human grade must all stay bound to one exact source. Combined batches are not started.",
+      },
+      { status: 409 }
+    );
+  }
+  if (body.workflowMode === "chain") {
+    return NextResponse.json(
+      {
+        error:
+          "Lamp Chain supports one clip at a time because every chain keeps its own ordered plan review and explicit spend approval. Chain batches are not started — launch order variants from the /chain-sweep board instead.",
       },
       { status: 409 }
     );

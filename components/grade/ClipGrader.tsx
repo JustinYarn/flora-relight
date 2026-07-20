@@ -19,6 +19,7 @@ import { BackgroundPlanReview } from "@/components/review/BackgroundPlanReview";
 import { BeautifyPlanReview } from "@/components/review/BeautifyPlanReview";
 import { IrisPlanReview } from "@/components/review/IrisPlanReview";
 import { CombinedPlanReview } from "@/components/review/CombinedPlanReview";
+import { ChainPlanReview } from "@/components/review/ChainPlanReview";
 import { isLampCombinedRun } from "@/lib/lamp-combined-read";
 import { lampCombinedCandidateArtifactIdentityHash } from "@/lib/lamp-combined-candidate-read";
 import {
@@ -395,6 +396,11 @@ export function ClipGrader({
       {run.combinedPlan?.approval.status === "approved" ? (
         <div className="mt-4">
           <CombinedPlanReview run={run} interactive={false} compact />
+        </div>
+      ) : null}
+      {run.chainPlan?.aggregate.approval.status === "approved" ? (
+        <div className="mt-4">
+          <ChainPlanReview run={run} interactive={false} compact />
         </div>
       ) : null}
 
